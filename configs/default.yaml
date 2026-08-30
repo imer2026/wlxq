@@ -180,6 +180,27 @@ run:
   # 置 false 可整体关闭自动切回
   refocus_when_idle: true
   refocus_idle_seconds: 20.0
+  # 技能卡自动采集（统计阶段专用，平时保持 false）：技能页出现时顺手裁卡存档，
+  # 供离线 `wlxq-bot build-skill-catalog` OCR 建立技能清单（configs/skills.yaml）。
+  # 采集不参与任何决策、异常只记日志并自动熔断、写盘走后台线程，绝不阻塞对局。
+  # 英雄技能固定，统计阶段采齐后即可关掉
+  skill_collection:
+    enabled: true
+    # 输出目录（位于 gitignore 的 datasets/ 下，不提交仓库）
+    output_dir: datasets/skill_cards
+    # 英雄名 → 技能卡上的英雄图标模板（同一英雄所有技能卡共用一张图标）；
+    # 不在名单内的卡按 unknown 归档，离线人工补标
+    hero_icons:
+      强袭: [skills/qiang_xi.png]
+      天使: [skills/tian_shi.png]
+      雪姬: [skills/xue_ji.png]
+      死骑: [skills/si_qi.png]
+    # 图标匹配置信度低于该值的卡归为 unknown
+    min_icon_confidence: 0.70
+    # 采集器连续内部失败达该次数后自动停用（只记日志，不影响主流程）
+    fuse_max_consecutive_failures: 5
+    # 写盘队列容量；队列满时丢弃新采集并计数，绝不阻塞主循环
+    queue_maxsize: 64
 
 main_c_profiles:
   assault:

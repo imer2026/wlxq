@@ -44,6 +44,7 @@ from wlxq_bot.perception.locator import (
     hero_cell_rois,
     ratio_to_pixel_roi,
 )
+from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
 from wlxq_bot.utils.log import get_logger
 
@@ -130,6 +131,7 @@ class CoopPerception:
         teammate_skill_icon_templates: list[str] | None = None,
         hero_cell_classifier: HeroCellClassifier | None = None,
         allowed_heroes: set[str] | None = None,
+        skill_collector: SkillCollector | None = None,
     ) -> None:
         self._vision = vision
         self._pack = template_pack
@@ -161,6 +163,9 @@ class CoopPerception:
             for rel in (teammate_skill_icon_templates or [])
             if self._pack.resolve_template(rel).is_file()
         ]
+        # 技能卡采集器（统计阶段可选）：observe 契约为永不抛异常、永不阻塞，
+        # 采集结果只落盘不影响任何业务决策
+        self._skill_collector = skill_collector
 
     @property
     def available_heroes(self) -> list[str]:
@@ -388,7 +393,9 @@ class CoopPerception:
                 raw_data["leave_team_match"] = leave_match
 
         if hint_state in {State.SELECT_OPENING_SKILLS, State.SELECT_MAIN_C_SKILLS}:
-            return self._detect_skill_candidates(ctx, frame, matches, raw_data)
+            return self._detect_skill_candidates(
+                ctx, frame, matches, raw_data, page=hint_state.name
+            )
         if hint_state == State.BUILD_MAIN_C and (
             raw_data.get("select_skill_button_visible")
             or raw_data.get("merge_gift_skill_page_visible")
@@ -397,7 +404,9 @@ class CoopPerception:
             # 技能页同一个 3 选 1 界面，会遮住棋盘导致识别为空。页面打开时才做
             # 技能卡识别，不增加常规培养帧的开销；主标识为【请选择1个额外技能】
             # 提示条（2026-08-21 实机确认【选技能】图在该页不稳定），命中任一即识别
-            return self._detect_skill_candidates(ctx, frame, matches, raw_data)
+            return self._detect_skill_candidates(
+                ctx, frame, matches, raw_data, page=hint_state.name
+            )
         # 结算阶段识别【双倍奖励】确认弹窗（实机确认 2026-08-16：结算画面误点
         # 「双倍奖励」后弹出，挡住正常结算）；任务层点击其取消按钮关闭
         if hint_state in _SETTLEMENT_STATES:
@@ -446,6 +455,8 @@ class CoopPerception:
         frame: Any,
         matches: list,
         raw_data: dict[str, Any],
+        *,
+        page: str = "",
     ) -> list[SkillCandidate]:
         """识别主C技能卡：在技能 ROI 匹配主C的英雄图标模板。
 
@@ -460,6 +471,10 @@ class CoopPerception:
         roi_name = self._cfg.skills.get("candidate_roi", "skill_candidates")
         roi = self._resolve_named_roi(str(roi_name), ctx)
         threshold = float(self._cfg.skills.get("threshold", 0.82))
+        # 技能卡采集（统计阶段可选）：无论图标匹配是否命中都裁卡存档；
+        # observe 契约保证不抛异常、不阻塞，失败只记日志
+        if self._skill_collector is not None:
+            self._skill_collector.observe(ctx.frame_id, frame, roi, page=page)
         if self._skill_icon_paths:
             skill_matches = self._vision.match_template_set(
                 frame,

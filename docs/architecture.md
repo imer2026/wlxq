@@ -68,6 +68,8 @@ Runtime Context
 - `Debug Recorder`：订阅任务执行过程中的事件，保存原始截图、标注截图、识别结果和动作日志，不参与业务判断。另维护主循环最近帧的环形缓冲（退出帧），任务非正常退出时批量落盘供事后排查，同样不参与业务判断。
 - `Hero Classifier Tools`：通过独立的 `hero-classifier` CLI 命名空间完成英雄格完整截图采集、局后裁剪、人工标签扫描、轻量模型训练和整局评估；不属于 Debug Recorder，也不参与任务状态机编排。
 - `Hero Cell Classifier`：Perception 层的 ONNX 运行时适配器，把单格 BGR 图片转换为英雄、星级、`empty`、`unavailable` 或 `unknown`；正式合作任务的 12 格棋盘识别只使用该模型，不再回退到英雄模板匹配。
+- `Skill Collector`：Perception 层的统计阶段旁路采集器（`perception/skill_collector.py`）。技能页出现时复用主流程已在手的帧裁卡存档（卡图 + JSONL 元数据，英雄归属由图标模板匹配写入），写盘走后台线程、队列满丢弃、内部异常只记日志并自动熔断；不参与业务决策、不产生输入，只在 `run.skill_collection.enabled` 打开时工作。
+- `Skill Catalog Builder`：离线建册工具（`skill_catalog.py`，CLI `build-skill-catalog`）。OCR 采集卡图（首行为技能名、其余行拼接为描述），按英雄分组合并进 `configs/skills.yaml`，人工补充的 `priority` 等字段保留；英雄技能开局页与合成 4 星赠送页一致，清单按英雄平铺不区分来源。OCR 引擎（`rapidocr-onnxruntime`）只在离线建册时延迟加载。
 - `WindowContext`：保存当前窗口句柄、客户区位置和尺寸、DPI、显示器、截图时间等运行时信息。
 - `Config / Assets`：保存任务配置、模板图片、阈值、延迟和开关。
 

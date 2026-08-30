@@ -43,6 +43,10 @@ TASKS_CONFIG_PATH = Path("configs/tasks.yaml")
 
 logger = get_logger(__name__)
 
+# build-skill-catalog 默认路径（B008: 默认值中的调用提为常量）
+_SKILL_CAPTURES_DEFAULT = Path("datasets/skill_cards/captures")
+_SKILL_CATALOG_DEFAULT = Path("configs/skills.yaml")
+
 app = typer.Typer(
     name="wlxq-bot",
     help="《永远的蔚蓝星球》微信小游戏本地自动化工具集",
@@ -2135,6 +2139,65 @@ def recognize(
         import os
 
         os.startfile(str(save_path))  # type: ignore[attr-defined]
+
+
+@app.command(name="build-skill-catalog")
+def build_skill_catalog(
+    captures: str | None = typer.Option(
+        None,
+        "--captures",
+        help="采集卡图目录，默认 datasets/skill_cards/captures",
+    ),
+    catalog: str | None = typer.Option(
+        None,
+        "--catalog",
+        help="技能清单 YAML 输出路径，默认 configs/skills.yaml",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="只统计并输出报告，不写入清单文件",
+    ),
+) -> None:
+    """OCR 统计阶段采集的技能卡，生成/增量合并技能清单（离线，不打游戏时运行）。
+
+    读取 captures 上级目录的 meta.jsonl 元数据（英雄归属在采集时已由图标
+    匹配写入），对每张卡图 OCR：最上方一行识别为技能名，其余行按纵向顺序
+    拼接为技能描述；按英雄分组合并进清单。英雄技能开局页与合成 4 星赠送页
+    一致，清单按英雄平铺、不区分来源页面。未识别出英雄的卡归入
+    skills.unknown，可人工补标后重跑。
+
+    示例::
+
+        wlxq-bot build-skill-catalog --dry-run
+        wlxq-bot build-skill-catalog
+    """
+    from wlxq_bot.skill_catalog import build_catalog
+
+    captures_path = Path(captures) if captures else _SKILL_CAPTURES_DEFAULT
+    catalog_path = Path(catalog) if catalog else _SKILL_CATALOG_DEFAULT
+    meta_path = captures_path.parent / "meta.jsonl"
+    logger.info(
+        "build-skill-catalog 开始 captures=%s catalog=%s dry_run=%s",
+        captures_path,
+        catalog_path,
+        dry_run,
+    )
+    try:
+        report = build_catalog(captures_path, meta_path, catalog_path, dry_run=dry_run)
+    except (RuntimeError, ValueError, OSError) as exc:
+        logger.error("build-skill-catalog 失败: %s", exc)
+        rprint(f"[red]建册失败: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    rprint(f"[bold]技能清单[/bold] {report.summary()}")
+    if dry_run:
+        rprint("[dim]--dry-run：未写入清单文件[/dim]")
+    if report.unknown:
+        rprint(
+            f"[yellow]有 {report.unknown} 张卡未识别英雄，见清单 skills.unknown 节，"
+            f"可人工确认后自行整理[/yellow]"
+        )
+    logger.info("build-skill-catalog 结束 added=%d updated=%d", report.added, report.updated)
 
 
 if __name__ == "__main__":

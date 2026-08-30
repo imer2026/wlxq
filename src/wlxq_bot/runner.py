@@ -21,7 +21,13 @@ from wlxq_bot.action.executor import ActionExecutor
 from wlxq_bot.action.input import InputController
 from wlxq_bot.action.safety import SafetyGuard
 from wlxq_bot.assets import TemplatePack
-from wlxq_bot.config import DefaultConfig, LocalConfig, TasksConfig, parse_coop_difficulties
+from wlxq_bot.config import (
+    DefaultConfig,
+    LocalConfig,
+    RunConfig,
+    TasksConfig,
+    parse_coop_difficulties,
+)
 from wlxq_bot.debug.recorder import DebugRecorder
 from wlxq_bot.models import Action, CoopRole, Observation, State
 from wlxq_bot.orchestration.coop_grab import CoopGrabCoordinator
@@ -34,6 +40,7 @@ from wlxq_bot.perception.screen import (
     get_input_idle_seconds,
     get_window_monitor_resolution,
 )
+from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
 from wlxq_bot.tasks.base import Task, TaskContext
 from wlxq_bot.tasks.coop import CoopTask
@@ -225,6 +232,7 @@ class Runner:
             else None
         )
         hero_cell_classifier = self._load_hero_cell_classifier(mc)
+        skill_collector = self._build_skill_collector(run_config, pack, vision)
         perception = CoopPerception(
             vision,
             pack,
@@ -236,6 +244,7 @@ class Runner:
             teammate_skill_icon_templates=run_config.teammate_skill_icon_templates,
             hero_cell_classifier=hero_cell_classifier,
             allowed_heroes={mc, *self.default_config.hero_classifier.lineup_others},
+            skill_collector=skill_collector,
         )
 
         required_heroes = {mc, *self.default_config.hero_classifier.lineup_others}
@@ -335,6 +344,9 @@ class Runner:
             # 循环正常结束或异常崩溃在此落盘退出帧；Esc（stop_requested）是
             # 用户主动停止，Ctrl+C 的缓冲已在 except 清空，两者都不会保存
             self._flush_exit_frames(debug_recorder, task, safety)
+            # 技能卡采集收尾：等待写盘队列排空（未启用时为空操作）
+            if skill_collector is not None:
+                skill_collector.close()
         logger.info("任务结束，最终状态=%s，已完成局数=%d", final.value, task.ctx.round_count)
         return final
 
@@ -990,6 +1002,50 @@ class Runner:
             raise RuntimeError(
                 "主C技能图标模板缺失: " + ", ".join(missing) + f"（模板包: {pack.root}）"
             )
+
+    def _build_skill_collector(
+        self,
+        run_config: RunConfig,
+        pack: TemplatePack,
+        vision: Vision,
+    ) -> SkillCollector | None:
+        """按统计阶段配置构造技能卡采集器；未启用或初始化失败返回 None。
+
+        采集只在 ``run.skill_collection.enabled`` 打开时进行；英雄图标模板
+        经模板包解析为绝对路径，缺失的自动跳过。初始化失败只记日志，
+        绝不阻断正常对局。
+        """
+        cfg = run_config.skill_collection
+        if not cfg.enabled:
+            logger.info("技能卡采集未启用（run.skill_collection.enabled=false），跳过")
+            return None
+        try:
+            geometry = self.tasks_config.skill_collection
+            icon_band_cfg = geometry.get("icon_band") or {}
+            icon_band = (
+                float(icon_band_cfg.get("x_ratio", 0.12)),
+                float(icon_band_cfg.get("y_ratio", 0.28)),
+                float(icon_band_cfg.get("width_ratio", 0.76)),
+                float(icon_band_cfg.get("height_ratio", 0.38)),
+            )
+            hero_icons = {
+                hero: [pack.resolve_template(str(rel)) for rel in rels]
+                for hero, rels in cfg.hero_icons.items()
+            }
+            return SkillCollector(
+                output_dir=Path(cfg.output_dir),
+                hero_icons=hero_icons,
+                vision=vision,
+                icon_band=icon_band,
+                column_inset_ratio=float(geometry.get("column_inset_ratio", 0.04)),
+                top_trim_ratio=float(geometry.get("top_trim_ratio", 0.06)),
+                min_icon_confidence=cfg.min_icon_confidence,
+                fuse_max_consecutive_failures=cfg.fuse_max_consecutive_failures,
+                queue_maxsize=cfg.queue_maxsize,
+            )
+        except Exception as exc:
+            logger.warning("技能卡采集器初始化失败，本次运行不采集: %r", exc)
+            return None
 
     @staticmethod
     def _check_difficulty_templates(

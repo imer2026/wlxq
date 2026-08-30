@@ -319,6 +319,20 @@ difficulty_recognition:
   # 相似数字模板命中同一行时，按中心点距离合并并保留最高置信度
   merge_distance: 30
 
+# 技能卡采集（统计阶段）几何参数；比例相对 rois.skill_candidates 裁剪结果。
+# 只影响 datasets/ 下的离线采集存档，不影响任何业务决策
+skill_collection:
+  # 三等分切列后每列左右向内收的比例，避免带到相邻卡边缘
+  column_inset_ratio: 0.04
+  # 列裁剪顶部修剪比例：技能 ROI 顶端可能飘入战斗伤害数字，裁掉防误当技能名
+  top_trim_ratio: 0.06
+  # 卡内英雄图标匹配区（相对整卡裁剪的比例：图标位于卡片中部）
+  icon_band:
+    x_ratio: 0.12
+    y_ratio: 0.28
+    width_ratio: 0.76
+    height_ratio: 0.38
+
 # 英雄模板配置
 heroes:
   # 示例：强袭（占位，待采集模板）

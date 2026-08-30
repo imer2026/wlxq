@@ -102,7 +102,9 @@
 |       |   |-- screen.py     # Screen Capture
 |       |   |-- vision.py     # Vision: 模板匹配、颜色识别、标注
 |       |   |-- locator.py    # Locator: 坐标换算、ROI、动作点
-|       |   `-- hero_classifier.py # 英雄格 ONNX 运行时推理适配
+|       |   |-- hero_classifier.py # 英雄格 ONNX 运行时推理适配
+|       |   `-- skill_collector.py # 技能卡统计阶段采集（非阻塞旁路）
+|       |-- skill_catalog.py  # 技能清单离线建册（OCR 卡图 → configs/skills.yaml）
 |       |-- hero_classifier/  # 英雄格素材采集、裁剪、训练和评估
 |       |   |-- cli.py        # hero-classifier 采集、导入、同步、训练与评估命令
 |       |   |-- collector.py  # 固定时间点截图 + 异步 PNG 落盘
@@ -219,6 +221,14 @@ wlxq-bot run coop --main-c assault --skip-difficulty-selection
 
 # 手动打开难度弹窗后，单独验证难度识别、点击和滚动
 wlxq-bot exec select-difficulty --coop-difficulties 1-10
+
+# 技能卡统计阶段采集（一次性）：先在 configs/default.yaml 打开
+# run.skill_collection.enabled，正常跑几局合作即可自动采集技能卡到
+# datasets/skill_cards/（不参与决策、不阻塞对局）；采齐后记得关掉开关
+# 离线 OCR 采集卡图，生成/增量合并技能清单 configs/skills.yaml
+# （清单含技能名与描述，按英雄分类；开局页与合成4星赠送页不区分）
+wlxq-bot build-skill-catalog --dry-run   # 只看统计不写盘
+wlxq-bot build-skill-catalog             # 写入清单
 
 # 英雄格分类器：采集一局完整客户区截图（默认每秒1张、持续360秒）
 # 主 C 必填；局目录默认使用命令启动时的本地时间戳

@@ -95,6 +95,28 @@ class MainCProfile(BaseModel):
     skill_selection_cap: int = Field(default=0, ge=0, le=100)
 
 
+class SkillCollectionConfig(BaseModel):
+    """技能卡自动采集（统计阶段）配置。
+
+    采集只在统计阶段打开：英雄技能固定，采齐后即可关闭。采集器不参与
+    任何业务决策，内部异常只记日志并自动熔断，写盘走后台线程，
+    绝不阻塞正常对局。
+    """
+
+    enabled: bool = False
+    # 卡图与元数据输出目录（位于 gitignore 的 datasets/ 下，不提交仓库）
+    output_dir: str = "datasets/skill_cards"
+    # 英雄名 → 技能卡上的英雄图标模板（相对模板包路径）。
+    # 名单外的卡按 unknown 归档，离线人工补标
+    hero_icons: dict[str, list[str]] = Field(default_factory=dict)
+    # 图标匹配置信度低于该值的卡归为 unknown
+    min_icon_confidence: float = Field(default=0.70, ge=0.0, le=1.0)
+    # 采集器连续内部失败达该次数后自动停用（只记日志，不影响主流程）
+    fuse_max_consecutive_failures: int = Field(default=5, ge=1, le=100)
+    # 写盘队列容量；队列满时丢弃新采集并计数，绝不阻塞主循环
+    queue_maxsize: int = Field(default=64, ge=8, le=4096)
+
+
 class RunConfig(BaseModel):
     max_rounds: int = 20
     # Runner 的单局最终保险。每当返回验证成功、round_count 增加时重置，
@@ -220,6 +242,8 @@ class RunConfig(BaseModel):
     # 召唤点击后棋盘始终未变化（多为金币不足，点击被游戏忽略）时的重试等待
     # （秒）：等待后重新尝试召唤。回补阶段的召唤失败不等待，直接放弃回补回选技能
     summon_retry_delay_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
+    # 技能卡自动采集（统计阶段）：默认关闭，见 SkillCollectionConfig
+    skill_collection: SkillCollectionConfig = Field(default_factory=SkillCollectionConfig)
 
     @field_validator("coop_difficulties", mode="before")
     @classmethod
@@ -359,6 +383,8 @@ class TasksConfig(BaseModel):
     board: dict[str, BoardGridParams] = Field(default_factory=dict)
     skills: dict[str, Any] = Field(default_factory=dict)
     difficulty_recognition: dict[str, Any] = Field(default_factory=dict)
+    # 技能卡采集（统计阶段）的几何参数：比例相对 rois.skill_candidates 裁剪结果
+    skill_collection: dict[str, Any] = Field(default_factory=dict)
     heroes: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
@@ -374,6 +400,7 @@ class TasksConfig(BaseModel):
                 "board",
                 "skills",
                 "difficulty_recognition",
+                "skill_collection",
                 "heroes",
             ):
                 if data.get(key) is None:
