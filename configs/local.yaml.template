@@ -1,0 +1,10 @@
+# 复制为 configs/local.yaml 后填写。本文件可提交，local.yaml 不提交。
+# 可用 `wlxq-bot save-window` 生成 window。
+# 通用点击位置和 ROI 统一保存在 configs/tasks.yaml，不放在本机配置中。
+
+window:
+  title: 永远的蔚蓝星球
+  class_name: Chrome_WidgetWin_0
+  target_client_width: 927
+  target_client_height: 1727
+  template_pack: 3000x2000

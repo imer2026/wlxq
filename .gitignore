@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Ruff
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 项目运行时产物
+# 截图不提交（可能含真实账号信息）
+screenshots/raw/*
+screenshots/debug/*
+!screenshots/raw/.gitkeep
+!screenshots/debug/.gitkeep
+
+# 敏感配置（本地校准结果、真实账号信息等）
+configs/local.yaml
+configs/secrets.yaml
+
+# AI 助手本地工作记忆（工具运行数据，不入库）
+.workbuddy/
+.zcode/
+
+# 运行/调试产物（标注图、验证截图、临时输出，可能含真实账号画面）
+outputs/
+
+# 英雄格分类器本地数据集（完整截图、裁剪图和人工标签，不入库）
+datasets/

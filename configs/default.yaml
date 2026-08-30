@@ -1,0 +1,237 @@
+# 默认运行配置
+# 通用运行默认值；任务坐标和 ROI 统一放在 configs/tasks.yaml
+
+screen:
+  # 截图模式：fullscreen 全屏 / window 指定窗口客户区
+  mode: window
+  # 微信小游戏窗口标题（已实测确认）
+  window_title: '永远的蔚蓝星球'
+  # 窗口类名（用于多候选时缩小范围）
+  window_class: 'Chrome_WidgetWin_0'
+  screenshot_dir: 'screenshots/raw'
+  # 支持的目标客户区尺寸，启动时按显示器可用空间选择
+  target_sizes:
+    - { width: 927, height: 1727 }
+    - { width: 1920, height: 1080 }
+    - { width: 2560, height: 1440 }
+    - { width: 3000, height: 2000 }
+
+vision:
+  # 默认模板匹配置信度阈值
+  default_threshold: 0.85
+  debug: true
+  debug_dir: 'screenshots/debug'
+  # 退出帧缓冲：主循环保留最近 N 张截图（内存常驻约 N×4.8MB，927x1727 客户区，
+  # 20 张约 96MB，只存引用不复制，无 CPU 开销），
+  # 任务非正常退出（保守停止、失败/步数上限、异常崩溃）时批量落盘到
+  # screenshots/debug/exit_<状态>_<时间戳>/；正常完成（COMPLETED）和
+  # 用户主动停止（Esc、Ctrl+C）不保存；
+  # 落盘路径以 WARNING 打进日志，便于事后排查「当时画面是什么」
+  exit_frame_buffer_size: 20
+  # 连续识别失败达到该阈值后暂停任务
+  max_consecutive_failures: 5
+
+input:
+  click_duration: 0.08
+  # 每次输入动作后的拟人随机间隔（秒）：导航类点击连续操作太快不像人
+  # （2026-08-21 实机反馈，实机调定为 0.8~1.5）；抢合作/召唤有自己的节奏配置
+  # 不受影响
+  min_delay: 0.8
+  max_delay: 1.5
+  # 拖动相关参数
+  drag_duration: 0.5
+  drag_pause: 0.2
+
+safety:
+  # 全局停止热键（当前监听器支持 Esc）
+  stop_hotkey: 'esc'
+  # 单任务最大连续失败次数
+  max_failures: 5
+  # 截图时效（毫秒），超过则丢弃动作并重新截图
+  # 棋盘识别（4 英雄 matchTemplate）耗时约 1 秒，需留足余量；3 秒内游戏界面不会剧变
+  frame_ttl_ms: 3000
+  # 无进展超时（秒），界面长时间不变化时暂停
+  no_progress_timeout: 30
+
+run:
+  # 本次最多完成的合作局数
+  max_rounds: 20
+  # 单局调度循环的最终安全保险；完成一局后自动清零，不限制多局累计步数。
+  # 正常停止主要依赖状态超时、失败上限和 max_rounds。
+  max_steps_per_round: 5000
+  # 局内选择技能前必须完成的最低召唤次数；前5次逐次召唤，识别不阻断下一次点击
+  minimum_summon_count_before_skills: 5
+  # 合作开局开放 7 格
+  initial_board_capacity: 7
+  # 主 C 停止召唤和合成的最低星级
+  target_star_level: 2
+  # 每次召唤点击发送成功后，等待英雄落位再进行下一轮棋盘识别
+  summon_recognition_delay_min: 1.0
+  summon_recognition_delay_max: 2.0
+  # 技能解锁前强制召唤（前 5 次）的连点间隔（秒）：该阶段不做棋盘识别，
+  # 点击发送即计数，快速连点；第 5 次点完恢复正常稳定等待和识别
+  forced_summon_interval_seconds: 0.5
+  # 召唤点击后棋盘始终未变化（多为金币不足）时的重试等待（秒）：等待后重新
+  # 尝试召唤；回补阶段的召唤失败不等待，直接放弃回补回选技能
+  summon_retry_delay_seconds: 15.0
+  # 每次培养决策连续识别的棋盘帧数；DEBUG 日志会输出整批和单帧耗时
+  board_recognition_frames: 10
+  # 默认主 C：assault 强袭 / monkey 猴子
+  default_main_c: assault
+  # 首次进入招募时需要勾选的合作难度（编号指彩虹难度）；按从小到大（如 1→10）依次点击
+  coop_difficulties: '1-12'
+  # 游戏本次会话已手动选过难度时置 true（或 run --skip-difficulty-selection）：
+  # 首局招募只跳过「勾选难度等级」，难度弹窗仍打开并关闭一次以刷新最新合作邀请
+  skip_difficulty_selection: false
+  # run 启动时客户区与本机配置不一致则自动调整窗口尺寸（等价 adjust-window）；
+  # 关闭后退回旧行为：报错停止并提示手动执行 adjust-window
+  auto_adjust_window: true
+  # 抢合作双线程：抢合作线程持续连点 join_coop，检查线程并行识别准备按钮，
+  # 两者重叠，避免识别期间停止点击而错过新邀请。
+  # 连点 join_coop 的拟人间隔（秒）
+  find_coop_click_delay_min: 0.3
+  find_coop_click_delay_max: 0.5
+  # 检查线程识别准备按钮的间隔（秒）
+  find_coop_check_interval_seconds: 1.0
+  # 整段抢合作的最长时长（秒），超时未抢到则保守停止
+  find_coop_max_duration_seconds: 3600
+  # 单个目标难度识别不到时最多滚动重试次数（命中后重置；从没见过彩虹行的
+  # 跳过不重置，后续目标直接级联跳过）；用尽则记录并跳过该目标，不影响
+  # 后续抢合作。2026-08-19 起难度面板每次打开都定位在普通难度区（第1~12层），
+  # 识别为空=尚未滚入彩虹区，会直接向更大难度滚动，预算需覆盖这段行程
+  difficulty_max_scrolls: 15
+  # 难度弹窗打开确认（2026-08-21 实机定案，2026-08-25 实机调 4→2）：点击打开
+  # 按钮后短暂固定等待（等点击生效即可，打开慢由失败预算兜底），再按轮询间隔
+  # 识别【合作模式】标题图；连续 N 次识别到才算打开（0.25×2 = 连续 0.5 秒可见）。
+  # 连续 M 次识别不到（0.25×16 = 4 秒不出现）= 本次点击没生效 → 重点打开按钮
+  # （最多重点 3 次），仍打不开则保守停止，绝不带着「没打开」的假设往下走
+  difficulty_open_settle_seconds: 0.5
+  difficulty_poll_interval_seconds: 0.25
+  difficulty_open_confirm_hits: 2
+  difficulty_open_fail_misses: 16
+  difficulty_open_max_reclicks: 3
+  # 难度弹窗关闭点击的最大次数；标题图可见=没关住就再点（实机确认：面板已
+  # 收起时再点招募按钮无反应），达到上限仍可见则保守停止（弹窗挡住 join_coop
+  # 抢合作无效）
+  difficulty_close_max_attempts: 5
+  # 确认弹窗关闭所需的连续标题图不可见次数（0.25×2 = 连续 0.5 秒不可见）；
+  # 打开确认在前面把关，这里统一按连续不可见判定，无单帧捷径
+  # （2026-08-25 实机调 4→2）
+  difficulty_close_confirm_frames: 2
+  # 难度列表单次拖拽耗时（秒）。过快会带惯性甩过头（如 16 直接滑到 3）；
+  # 5 秒左右为无惯性慢拖，每次只推进一小段，便于逐级点击。
+  difficulty_scroll_duration: 3.0
+  # 点击准备后等待对局界面稳定
+  ready_wait_seconds: 3.0
+  # 技能识别多帧重试：主C技能图标在动，连续这么多帧没识别到才改「随便选一个」；
+  # 每帧含截图识别约 0.6s + 等待 0.4s，5 帧约等待 5 秒后兜底
+  skill_recognition_frames: 5
+  # 确认开局技能选完所需的连续「页面已关闭」帧数；每次选完一张卡后页面会先关闭、
+  # 下一组技能卡再弹出，间隙里召唤按钮会短暂露出，单帧不能判定选完（会漏选最后一组）
+  opening_exit_confirm_frames: 3
+  # 前期约 5 秒检查一次技能，后期约 10 秒；区间内随机抖动只用于界面时序容错
+  skill_early_interval_min: 4.5
+  skill_early_interval_max: 6.0
+  skill_late_interval_min: 9.0
+  skill_late_interval_max: 11.0
+  skill_late_after_seconds: 120.0
+  # 其他队友英雄的技能卡图标（对应 hero_classifier.lineup_others 的三名英雄，
+  # 实机采集 2026-08-15）：技能页已打开但未识别到主C图标时，识别到任一队友
+  # 图标即确认页面已稳定、本组没有主C技能卡，立即随机选一张，
+  # 不再等满 skill_recognition_frames 帧（每次省约 5 秒）
+  teammate_skill_icon_templates:
+    - skills/tian_shi.png
+    - skills/xue_ji.png
+    - skills/si_qi.png
+  # 技能卡兜底点击前页面至少已出现的帧数：页面刚弹出时图标可能先于卡片
+  # 渲染出来，首帧即点会点空（点空后验证失败重试一次要多花约 12 秒）
+  skill_fallback_settle_frames: 1
+  # 召唤、合成、准备和返回等严格动作最多观察多少帧确认结果
+  action_verify_frames: 5
+  # 关闭击杀奖励弹窗验证失败时的整动作重试上限（4 = 首次点击外再点 4 次）；
+  # 连杀时关掉一个弹窗常立刻弹出下一个，模板再次命中，此时应重试而不是退出。
+  # 重试耗尽仍失败才保守停止。
+  close_popup_max_retries: 4
+  # 领取结算宝箱后、点返回按钮前的稳定等待（秒）；实机确认宝箱动画未播完时点返回无响应
+  reward_claim_return_delay: 4.0
+  # 合成拖动验证失败时的重试上限；拖动可能落空（英雄仍在原位），重新决策后再拖；
+  # 每次验证失败会输出棋盘诊断日志（起点英雄是否仍在、终点格星级）。
+  # 重试耗尽仍失败才保守停止。
+  merge_max_retries: 3
+  # 合成拖动的时长（秒）。拖太快时游戏内英雄跟随不及，松开即被弹回原格；
+  # 另外输入层会在终点停留约 0.15 秒再松开（InputController.release_dwell）
+  merge_drag_duration: 1.0
+  # 合成4星赠送技能页确认（2026-08-21 实机定案）：被迫合并 3 星对后，先固定
+  # 等待页面渲染，再按轮询间隔识别【请选择1个额外技能】提示条；连续 N 次
+  # 命中才选技能（半渲染/动画过渡帧不动作）；连续 M 次未命中视为拖动未生效
+  # 或对局已结束（页面随结算消失），放弃等待恢复常规决策。等待期间击杀奖励
+  # 弹窗仍优先关闭，返回按钮出现即正常转入结算。合成选择本身会尽量避开
+  # 3+3（有空位召唤/合低星对，满盘才被迫合并），见 strategy.select_merge
+  merge_gift_settle_seconds: 2.0
+  merge_gift_poll_interval_seconds: 0.5
+  merge_gift_confirm_hits: 2
+  merge_gift_fail_misses: 12
+  # 窗口非前台/最小化时的最长挂起等待（秒）：期间任务不发送任何输入（点击会落到
+  # 当前前台窗口），对局自动进行，切回窗口后从当前进度继续；超过该时长才保守停止。
+  # 想挂机离开更久（吃饭、回消息）可调大
+  window_foreground_wait_seconds: 300.0
+  # 挂起期间系统鼠标/键盘无输入超过该秒数（用户没用电脑）时，自动把游戏窗口
+  # 切回前台继续任务；用户正在操作时不抢焦点，保持挂起等待。refocus_when_idle
+  # 置 false 可整体关闭自动切回
+  refocus_when_idle: true
+  refocus_idle_seconds: 20.0
+
+main_c_profiles:
+  assault:
+    display_name: 强袭
+    hero_template_dir: heroes/assault
+    hero_classifier_model: outputs/hero_classifier/assault-helper/hero_classifier.onnx
+    # 简化版技能识别：强袭技能卡上的英雄图标（同一英雄所有技能卡共用此图）
+    skill_icon_templates:
+      - skills/qiang_xi.png
+    # 强袭策略（2026-08-16 实机规则）：合成尽量不用强袭——没有其他英雄可合成
+    # 且棋盘有空位时召唤新英雄，不把两个强袭合成一个；棋盘占满时才合并强袭腾格子
+    avoid_main_c_merge: true
+    # 局内选满 4 次技能后回培养阶段，把强袭数量补到 4 个以上，补够后继续选技能
+    topup_after_skill_selections: 4
+    topup_hero_count: 4
+    # 局内技能选择总上限（不含开局赠送）：回补前 4 次 + 回补后 5 次 = 9 次，
+    # 达到后不再花金币选技能，等对局结束进结算
+    skill_selection_cap: 9
+
+  monkey:
+    display_name: 猴子
+    hero_template_dir: heroes/monkey
+    hero_classifier_model: outputs/hero_classifier/monkey-helper/hero_classifier.onnx
+    skill_icon_templates: []
+
+  angel:
+    display_name: 天使
+    hero_template_dir: heroes/angel
+    hero_classifier_model: outputs/hero_classifier/angel-helper/hero_classifier.onnx
+    skill_icon_templates: []
+
+  snow:
+    display_name: 雪姬
+    hero_template_dir: heroes/snow
+    hero_classifier_model: outputs/hero_classifier/snow-helper/hero_classifier.onnx
+    skill_icon_templates: []
+
+  death_knight:
+    display_name: 死骑
+    hero_template_dir: heroes/death_knight
+    hero_classifier_model: outputs/hero_classifier/death-knight-helper/hero_classifier.onnx
+    skill_icon_templates: []
+
+  fox:
+    display_name: 狐狸
+    hero_template_dir: heroes/fox
+    hero_classifier_model: outputs/hero_classifier/fox-helper/hero_classifier.onnx
+    skill_icon_templates: []
+
+# 英雄格分类器数据制作配置
+hero_classifier:
+  # 主 C 之外、本局固定携带的队友英雄；crop 时据此与 main_c 一起预建
+  # labeled/<英雄>/star1~star4 标注目录。切换 lineup 时改这里即可。
+  # 必须是 main_c_profiles 中已定义的英雄标识。
+  lineup_others: [angel, snow, death_knight]

@@ -1,0 +1,336 @@
+# 任务识别配置
+# 业务状态机由任务代码实现；本文件保存识别定位器、ROI 和素材映射。
+
+tasks:
+  coop:
+    # 合作任务：寻找合作 -> 进入游戏 -> 培养主C -> 结算
+    description: "合作模式自动对局"
+    main_c_required: true
+    # 任务级超时（秒），0 表示不限制
+    task_timeout: 0
+    # 结算相关
+    settle:
+      reward_claim_timeout: 15
+
+# 任务通用点击位置
+# 游戏客户区固定为 9:16，统一使用相对客户区左上角的比例坐标并提交到仓库。
+# 未实机确认的点保持缺失，任务会保守停止；用 `wlxq-bot pick` 量测后填写。
+# hotspot 名字必须与 tasks/coop.py、orchestration/coop_grab.py 中引用保持一致。
+hotspots:
+  # 抢合作：最下面的「加入」按钮（coop_grab 连点此点抢合作）
+  join_coop:
+    x_ratio: 0.6084
+    y_ratio: 0.7597
+    description: 最下面的「加入」按钮
+
+  # 增加英雄的按钮（底部操作栏）
+  add_hero:
+    x_ratio: 0.6966
+    y_ratio: 0.9611
+    description: 增加英雄的按钮
+
+  # 选技能的按钮（底部操作栏）
+  select_skill:
+    x_ratio: 0.3294
+    y_ratio: 0.9663
+    description: 选技能的按钮
+
+  # 游戏结束（结算）领取宝箱的按钮
+  claim_chest:
+    x_ratio: 0.2449
+    y_ratio: 0.4927
+    description: 游戏结束领取宝箱的按钮
+
+  # 结算页点赞按钮
+  like:
+    x_ratio: 0.8862
+    y_ratio: 0.4266
+    description: 游戏结束点赞按钮
+
+  # 合作页面聊天按钮（区别于首页聊天）
+  coop_chat:
+    x_ratio: 0.9274
+    y_ratio: 0.4423
+    description: 合作页面的聊天按钮
+
+  # 首页聊天按钮
+  home_chat:
+    x_ratio: 0.9274
+    y_ratio: 0.5490
+    description: 首页的聊天按钮
+
+  # 聊天页面招募按钮
+  open_recruit:
+    x_ratio: 0.0758
+    y_ratio: 0.6413
+    description: 聊天页面的招募按钮
+
+  # 合作难度选择按钮，点击后弹出难度面板。面板列表分两区：普通难度
+  # （合作模式-第1~12层）在前、彩虹难度（合作模式-彩虹1~19层）在后，
+  # 每次打开都定位在普通区顶部；彩虹文字模板（cai_hong_1~16）见
+  # buttons/coop_difficulty/
+  open_difficulty_dialog:
+    x_ratio: 0.5753
+    y_ratio: 0.8299
+    description: 选择合作的难度按钮
+
+  # 难度选择面板的关闭点击点。2026-08-17 游戏更新后原「取消」按钮已不存在
+  # （原坐标 0.2059/0.8276 落在难度行左侧空白，点击无效果）；面板打开时左侧
+  # 栏「招募」按钮仍在原位（同 open_recruit 标定），点击它收起面板。
+  close_difficulty_dialog:
+    x_ratio: 0.0758
+    y_ratio: 0.6413
+    description: 点击左侧招募按钮收起难度选择面板
+
+  # 难度列表滚动起点（列表偏上，列表竖直中线附近）
+  difficulty_scroll_start:
+    x_ratio: 0.5688
+    y_ratio: 0.6204
+    description: 难度列表滚动起点（列表偏上）
+
+  # 难度列表滚动终点（列表偏下，与起点同列）。向更大难度滚动（滚入/深入
+  # 彩虹区）从本点拖向起点（从下往上拉）；向较小难度滚动方向相反
+  difficulty_scroll_end:
+    x_ratio: 0.5970
+    y_ratio: 0.7754
+    description: 难度列表滚动终点（列表偏下）
+
+# 定位器配置
+# 每个定位器声明策略、ROI 和动作点来源
+# 坐标体系统一使用客户区比例（ratio），运行时按实际客户区尺寸换算为像素
+locators:
+  # 合作任务启动页的正向识别标志。选取首页右侧信箱按钮（只在首页稳定出现）；
+  # 模板已实机采集（home_page_mail.png），识别区域已标定。
+  # 阈值 0.85：实机首页全图匹配置信度 1.000（2026-08-15，find 命令验证）；
+  # 未逐页做非首页负样本验证，如出现误判再回调。
+  home_page_marker:
+    strategy: template
+    template: buttons/home_page_mail.png
+    roi: home_page_mail_area
+    threshold: 0.85
+    action_point:
+      source: match_center
+  # 抢合作成功后出现的准备按钮；点击匹配中心。
+  ready_button:
+    strategy: template
+    template: buttons/zhun_bei.png
+    threshold: 0.82
+    roi: ready_button_area
+    action_point:
+      source: match_center
+  # 胜负结算都会出现同一个返回按钮；出现即表示本局结束。
+  return_button:
+    strategy: template
+    template: buttons/fan_hui.png
+    threshold: 0.82
+    roi: return_button_area
+    action_point:
+      source: match_center
+  # 击杀精英/Boss 后弹出的奖励弹窗关闭按钮；游戏内出现即点击关闭，时机不定。
+  tan_chuang:
+    strategy: template
+    template: buttons/tan_chuang.png
+    threshold: 0.82
+    roi: tan_chuang_area
+    action_point:
+      source: match_center
+  # 【选技能】图：技能选择页面（3 张技能卡）的标识。开局免费自动弹出或局内点「选择技能」
+  # 按钮（花金币）后都会出现该页面。开局时它遮住召唤按钮，必须选完消失后才能召唤。
+  # 只用于识别页面状态（开局流程不点击它），与 summon_button 按「先选技能、再召唤」识别开局类型。
+  # ROI 待在有游戏的电脑上标定；标定前 _resolve_named_roi 缺省走全图识别。
+  select_skill_button:
+    strategy: template
+    template: buttons/xuan_ze_ji_neng.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【请选择1个额外技能】提示条：两个3星合成4星后弹出的赠送技能页（3选1）标识。
+  # 实机确认 2026-08-21：该文案只在赠送页出现，不选技能页面就常驻；【选技能】图
+  # 在该页上不稳定（实机出现过整页在等选择却始终未命中的情况），以此模板为页面主标识。
+  # 页面可能被Boss奖励弹窗遮挡：任务层先关弹窗再识别本图。ROI 待标定，标定前走全图识别。
+  merge_gift_skill_title:
+    strategy: template
+    template: skills/4_xing_e_wai_ji_neng.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【召唤】按钮：棋盘上召唤英雄的按钮。进入游戏后若无开局技能、或开局技能已选完
+  # （【选技能】页面消失）则可见，标识已进入/可进入召唤阶段。ROI 待标定；标定前走全图识别。
+  summon_button:
+    strategy: template
+    template: buttons/zhao_huan.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【天使开局技能】页标识：天使英雄的开局技能页不出现【选技能】图，也没有主C技能图标，
+  # 只出现该图（实机采集 2026-08-15）。开局阶段命中即在该页随机选一张技能卡。
+  # 仅在开局技能阶段识别；ROI 待标定，标定前走全图识别。
+  tian_shi_kai_ju:
+    strategy: template
+    template: buttons/tian_shi_kai_ju.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【合作模式】标题图：难度弹窗打开时的稳定标识。2026-08-21 更换为重新采集的
+  # 标题图（buttons/coop_difficulty/）；旧图（2026-08-15）实为列表行内
+  # 「合作模式-彩虹N」标签，只存在于彩虹区且随列表滚动，2026-08-19 面板每次
+  # 打开停在普通区后不再命中，导致弹窗开关误判。关闭难度弹窗的正向验证依据：
+  # 该图可见=弹窗仍打开，继续点关闭坐标；连续多帧不可见=弹窗已关闭。
+  # 不再用难度候选（cai_hong_N）是否可见判定弹窗开关。仅在难度弹窗识别模式下检测。
+  he_zuo_mo_shi:
+    strategy: template
+    template: buttons/coop_difficulty/he_zuo_mo_shi.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【退队】按钮：抢到合作、已点准备后的组队大厅界面按钮（实机采集 2026-08-15）。
+  # 房主长时间不开始对局时点击它退出队伍重新抢合作。仅在开局技能阶段识别
+  # （大厅即「点完准备、对局未开始」的等待画面）。ROI 待标定，标定前走全图识别。
+  coop_leave_team:
+    strategy: template
+    template: buttons/he_zuo_tui_dui.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【双倍奖励】确认弹窗标识（实机采集 2026-08-16）：结算画面误点「双倍奖励」后弹出，
+  # 会挡住正常结算操作。仅在结算阶段识别；弹窗打开时点击下方取消按钮回到正常结算
+  double_reward_dialog:
+    strategy: template
+    template: buttons/shuang_bei.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【双倍奖励】弹窗的取消按钮：点击匹配中心
+  double_reward_cancel:
+    strategy: template
+    template: buttons/qu_xiao_shuang_bei.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+
+# ROI 区域定义
+# 使用比例坐标（ratio），相对于客户区左上角
+# 运行时按实际客户区尺寸换算：pixel_x = x_ratio * client_width
+rois:
+  # 首页信箱按钮识别区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
+  home_page_mail_area:
+    relative_to: client
+    x_ratio: 0.8759
+    y_ratio: 0.3521
+    width_ratio: 0.1057
+    height_ratio: 0.0533
+  # 下列四个 ROI 尚待在有游戏的电脑上标定；0x0 会保守退化为全图识别。
+  # 准备按钮 ROI，标定自 923×1723 客户区（wlxq-bot pick --rect）
+  ready_button_area:
+    relative_to: client
+    x_ratio: 0.2340
+    y_ratio: 0.7980
+    width_ratio: 0.6295
+    height_ratio: 0.1672
+  # 返回按钮 ROI 尚未实测，保持 0x0 并保守退化为全图模板识别；
+  # 不复用准备按钮位置，避免把未确认坐标当作事实。
+  return_button_area:
+    relative_to: client
+    x_ratio: 0.0
+    y_ratio: 0.0
+    width_ratio: 0.0
+    height_ratio: 0.0
+  # 关闭弹窗按钮 ROI，标定自 923×1723 客户区（wlxq-bot pick --rect）
+  tan_chuang_area:
+    relative_to: client
+    x_ratio: 0.2914
+    y_ratio: 0.7766
+    width_ratio: 0.4106
+    height_ratio: 0.0929
+
+  # 技能三候选区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
+  skill_candidates:
+    relative_to: client
+    x_ratio: 0.0152
+    y_ratio: 0.2786
+    width_ratio: 0.9621
+    height_ratio: 0.3587
+  # 合作难度弹窗的可滚动列表区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
+  coop_difficulty_list:
+    relative_to: client
+    x_ratio: 0.3218
+    y_ratio: 0.5665
+    width_ratio: 0.4930
+    height_ratio: 0.2914
+
+  # 废弃字段：棋盘搜索范围现由格子模型（board.helper/initiator）的包围盒计算，
+  # 不再使用 bottom_*_board。保留占位仅为兼容旧配置加载，标定与否都不影响识别。
+  # initiator 视角左下方棋盘（本脚本常规流程为 helper，不标定）
+  bottom_left_board:
+    relative_to: client
+    x_ratio: 0.0
+    y_ratio: 0.0
+    width_ratio: 0.0
+    height_ratio: 0.0
+
+  # helper 视角右下方棋盘（已废弃，识别 ROI 由 board.helper 包围盒确定）
+  bottom_right_board:
+    relative_to: client
+    x_ratio: 0.0
+    y_ratio: 0.0
+    width_ratio: 0.0
+    height_ratio: 0.0
+
+# 棋盘格子坐标模型
+# 由 wlxq-bot pick --rect 量测排1/排2 格子后计算得出（见 docs/game-rules.md）
+# 知道这些参数即可推导全部 14 格中心坐标（models.BoardGridConfig.cell_center）
+board:
+  # helper 棋盘（右下己方）。2026-08-11 用 pick --rect 框选排2~排6 共 10 格，
+  # 按中心线性拟合重算 anchor/步长（量测自 927×1727 客户区）；cell 尺寸沿用旧值
+  # （框选尺寸噪声大，旧值略宽、相邻格仍保持正间距，做 ROI 更安全）。
+  # 实帧(202608112148_frame000263)复核：整体上移 7px(5+2) 后底部对齐；再将 cell 高度
+  # 向上扩 2px（cell_height_ratio +0.0012、anchor_y 同步 -0.0012，保持底部不变）。
+  helper:
+    anchor_x_ratio: 0.6215
+    anchor_y_ratio: 0.5055
+    col_step_ratio: 0.0801
+    row_step_ratio: 0.0429
+    cell_width_ratio: 0.0737
+    cell_height_ratio: 0.0372
+  # initiator 棋盘（左下），排6B量测反推锚点 + 复用 helper 步长/格宽高
+  initiator:
+    anchor_x_ratio: 0.1430
+    anchor_y_ratio: 0.5141
+    col_step_ratio: 0.0791
+    row_step_ratio: 0.0432
+    cell_width_ratio: 0.0737
+    cell_height_ratio: 0.0360
+
+# 技能识别配置（简化版：按主C英雄图标识别技能卡）
+skills:
+  # 技能三候选搜索 ROI（rois.skill_candidates）；兜底时横向三等分，
+  # 取三列中心作为卡片点击点，无需额外标定兜底 hotspot。
+  candidate_roi: skill_candidates
+  threshold: 0.82
+  # 主C技能卡图标模板在 default.yaml 的 main_c_profiles.<主C>.skill_icon_templates 配置；
+  # 同一英雄所有技能卡共用一张图标，命中位置即主C技能卡，多个时随机点其一。
+
+# 合作难度弹窗识别配置；文字模板为 cai_hong_1.png～cai_hong_18.png（19 待采集，
+# 1~5/14~18 已按 2026-08-19 实机截图重新裁剪）。逐模板独立匹配，同一行多个
+# 模板命中时保留置信度最高者；不识别勾选框状态（见 tasks/coop.py 开环注释）
+difficulty_recognition:
+  candidate_roi: coop_difficulty_list
+  threshold: 0.78
+  # 相似数字模板命中同一行时，按中心点距离合并并保留最高置信度
+  merge_distance: 30
+
+# 英雄模板配置
+heroes:
+  # 示例：强袭（占位，待采集模板）
+  # assault:
+  #   locator:
+  #     strategy: template_set
+  #     roi: current_board  # 间接引用，运行时按角色解析为 bottom_left/bottom_right_board
+  #     threshold: 0.78
+  #     templates:
+  #       - path: heroes/assault/left_01.png
+  #         direction: left
+  #       - path: heroes/assault/right_01.png
+  #         direction: right
+  #       - path: heroes/assault/action_01.png
+  #         direction: unknown
