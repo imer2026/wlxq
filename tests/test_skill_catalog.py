@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
@@ -10,10 +11,14 @@ import yaml
 
 from wlxq_bot.skill_catalog import (
     CatalogBuildReport,
+    attribute_hero,
     build_catalog,
     extract_card_text,
+    light_body_ratio,
     read_capture_meta,
 )
+
+_ICON_CENTER = (0.50, 0.45)
 
 
 def fake_ocr(image: np.ndarray) -> list[tuple[str, float]]:
@@ -25,23 +30,45 @@ def fake_ocr(image: np.ndarray) -> list[tuple[str, float]]:
     ]
 
 
-def write_capture(captures_dir: Path, digest: str) -> Path:
-    """写一张合成卡图（内容不影响 OCR，fake 按 y 文本返回）。"""
-    captures_dir.mkdir(parents=True, exist_ok=True)
-    image = np.full((200, 160, 3), 180, dtype=np.uint8)
-    path = captures_dir / f"{digest}.png"
-    ok, buf = cv2.imencode(".png", image)
+def make_card_with_icon(
+    width: int = 280,
+    height: int = 560,
+    icon_seed: int | None = 7,
+    light: bool = False,
+) -> np.ndarray:
+    """生成一张合成卡。
+
+    默认深色噪声底；``light=True`` 生成浅色卡身（近似真技能卡）。
+    icon_seed 非 None 时嵌入随机纹理图标（用于归属匹配）。
+    """
+    if light:
+        card = np.full((height, width, 3), 225, dtype=np.uint8)
+    else:
+        rng = np.random.default_rng(11)
+        card = rng.integers(40, 70, size=(height, width, 3), dtype=np.uint8)
+    if icon_seed is not None:
+        icon_rng = np.random.default_rng(icon_seed)
+        icon = icon_rng.integers(0, 255, size=(110, 110, 3), dtype=np.uint8)
+        cx, cy = int(width * _ICON_CENTER[0]), int(height * _ICON_CENTER[1])
+        card[cy - 55 : cy + 55, cx - 55 : cx + 55] = icon
+    return card
+
+
+def brightness_ocr(image: np.ndarray) -> list[tuple[str, float]]:
+    """按亮度分派的 OCR fake：浅色卡返回技能文本，深色垃圾返回数字残片。"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if gray.mean() > 150:
+        return fake_ocr(image)
+    return [("10.0B", 30.0)]
+
+
+def save_icon_template(path: Path, icon_seed: int = 7) -> Path:
+    rng = np.random.default_rng(icon_seed)
+    icon = rng.integers(0, 255, size=(110, 110, 3), dtype=np.uint8)
+    ok, buf = cv2.imencode(".png", icon)
     assert ok
     path.write_bytes(buf.tobytes())
     return path
-
-
-def write_meta(meta_path: Path, rows: list[dict]) -> Path:
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    with meta_path.open("w", encoding="utf-8") as file:
-        for row in rows:
-            file.write(__import__("json").dumps(row, ensure_ascii=False) + "\n")
-    return meta_path
 
 
 class TestExtractCardText:
@@ -68,24 +95,81 @@ class TestExtractCardText:
         assert description == ""
 
 
+class TestAttributeHero:
+    def test_matches_icon_template(self, tmp_path: Path) -> None:
+        tpl_a = save_icon_template(tmp_path / "a.png", icon_seed=7)
+        tpl_b = save_icon_template(tmp_path / "b.png", icon_seed=8)
+        heroes = {"强袭": [tpl_a], "死骑": [tpl_b]}
+        card_a = make_card_with_icon(icon_seed=7)
+        card_none = make_card_with_icon(icon_seed=None)
+
+        assert attribute_hero(card_a, heroes, 0.70) == "强袭"
+        assert attribute_hero(card_none, heroes, 0.70) is None
+
+
+class TestLightBodyRatio:
+    def test_light_card_high_dark_card_low(self) -> None:
+        light = make_card_with_icon(light=True, icon_seed=None)
+        dark = make_card_with_icon(light=False, icon_seed=None)
+        assert light_body_ratio(light) > 0.9
+        assert light_body_ratio(dark) < 0.15
+
+
 class TestBuildCatalog:
-    def make_setup(self, tmp_path: Path, rows: list[dict]) -> tuple[Path, Path, Path]:
+    def make_setup(
+        self,
+        tmp_path: Path,
+        rows: list[dict],
+        icon_seeds: dict[str, int | None] | None = None,
+        kinds: dict[str, str] | None = None,
+    ) -> tuple[Path, Path, Path]:
+        """kinds: hash -> 'light'|'dark'，默认全部深色噪声卡。"""
         captures = tmp_path / "skill_cards" / "captures"
+        captures.mkdir(parents=True, exist_ok=True)
         for row in rows:
-            write_capture(captures, str(row["hash"]))
-        meta = write_meta(tmp_path / "skill_cards" / "meta.jsonl", rows)
+            digest = str(row["hash"])
+            seed = (icon_seeds or {}).get(digest)
+            light = (kinds or {}).get(digest) == "light"
+            image = make_card_with_icon(icon_seed=seed, light=light)
+            ok, buf = cv2.imencode(".png", image)
+            assert ok
+            (captures / f"{digest}.png").write_bytes(buf.tobytes())
+        meta = tmp_path / "skill_cards" / "meta.jsonl"
+        with meta.open("w", encoding="utf-8") as file:
+            for row in rows:
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
         catalog = tmp_path / "configs" / "skills.yaml"
         return captures, meta, catalog
 
-    def test_build_groups_by_hero(self, tmp_path: Path) -> None:
-        rows = [
-            {"hash": "aaa", "hero": "强袭", "page": "SELECT_OPENING_SKILLS"},
-            {"hash": "bbb", "hero": "死骑", "page": "BUILD_MAIN_C"},
-            {"hash": "ccc", "hero": None, "page": "X"},
-        ]
-        captures, meta, catalog = self.make_setup(tmp_path, rows)
+    def test_offline_attribution_groups_by_hero(self, tmp_path: Path) -> None:
+        """英雄归属在离线完成：图标命中的进英雄分组。
 
-        report = build_catalog(captures, meta, catalog, ocr_fn=fake_ocr)
+        ccc 无图标但技能文本与已入库的 冰霜新星 相同 → 判 unchanged,
+        既不入英雄分组也不进 unknown。
+        """
+        tpl_a = save_icon_template(tmp_path / "a.png", icon_seed=7)
+        tpl_b = save_icon_template(tmp_path / "b.png", icon_seed=8)
+        rows = [
+            {"hash": "aaa", "page": "SELECT_OPENING_SKILLS"},
+            {"hash": "bbb", "page": "BUILD_MAIN_C"},
+            {"hash": "ccc", "page": "X"},
+        ]
+        captures, meta, catalog = self.make_setup(
+            tmp_path,
+            rows,
+            icon_seeds={"aaa": 7, "bbb": 8, "ccc": None},
+            # 深色卡会被结构过滤直接判垃圾,这里验证的是归属分组与 unknown,
+            # 三张全部用浅色卡(真卡都是浅色)
+            kinds={"aaa": "light", "bbb": "light", "ccc": "light"},
+        )
+
+        report = build_catalog(
+            captures,
+            meta,
+            catalog,
+            ocr_fn=fake_ocr,
+            hero_icons={"强袭": [tpl_a], "死骑": [tpl_b]},
+        )
 
         data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
         assault = data["skills"]["强袭"]
@@ -93,19 +177,120 @@ class TestBuildCatalog:
         assert assault[0]["name"] == "冰霜新星"
         assert assault[0]["description"] == "对范围内敌人造成120%伤害并冻结2秒"
         assert data["skills"]["死骑"][0]["name"] == "冰霜新星"
-        unknown = data["skills"]["unknown"]
-        assert unknown[0]["image"] == "ccc.png"
-        assert unknown[0]["name"] == "冰霜新星"
+        assert "unknown" not in data["skills"]
         assert isinstance(report, CatalogBuildReport)
         assert report.added == 2
+        assert report.unchanged == 1
+        assert report.unknown == 0
+
+    def test_fuzzy_merge_ocr_variants(self, tmp_path: Path) -> None:
+        """OCR 同名异写(圣灵底护/圣灵庇护)在同一英雄组内被模糊合并。"""
+        tpl_a = save_icon_template(tmp_path / "a.png", icon_seed=7)
+        rows = [
+            {"hash": "aaa"},
+            {"hash": "bbb"},
+        ]
+        captures, meta, catalog = self.make_setup(
+            tmp_path,
+            rows,
+            icon_seeds={"aaa": 7, "bbb": 7},
+            kinds={"aaa": "light", "bbb": "light"},
+        )
+
+        def variant_ocr(image: np.ndarray) -> list[tuple[str, float]]:
+            # 两张卡内容相同,这里模拟两次 OCR 对同一标题的不同误读
+            return [("圣灵底护", 30.0), ("召唤物受到赐福时回血30%", 80.0)]
+
+        report = build_catalog(
+            captures,
+            meta,
+            catalog,
+            ocr_fn=variant_ocr,
+            hero_icons={"天使": [tpl_a]},
+        )
+
+        data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
+        angel = data["skills"]["天使"]
+        assert len(angel) == 1
+        assert angel[0]["name"] == "圣灵底护"
+        assert report.added == 1
+        assert report.unchanged == 1
+
+    def test_garbage_filtered_from_catalog(self, tmp_path: Path) -> None:
+        """垃圾裁剪（深色、OCR 无实义文本）被过滤；同文本卡去重后进 unknown。"""
+        rows = [
+            {"hash": "aaa"},  # 浅色无图标 + 实义 OCR → unknown
+            {"hash": "bbb"},  # 同上,但文本与 aaa 相同 → 被 aaa 吸收(unchanged)
+            {"hash": "ccc"},  # 深色 + 数字残片 → 过滤
+        ]
+        captures, meta, catalog = self.make_setup(
+            tmp_path,
+            rows,
+            icon_seeds={"aaa": None, "bbb": None, "ccc": None},
+            kinds={"aaa": "light", "bbb": "light", "ccc": "dark"},
+        )
+
+        report = build_catalog(captures, meta, catalog, ocr_fn=brightness_ocr)
+
+        data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
+        unknown = data["skills"]["unknown"]
+        assert [entry["image"] for entry in unknown] == ["aaa.png"]
+        assert report.filtered == 1
+        assert report.unknown == 1
+        assert report.unchanged == 1
+        manifest = tmp_path / "skill_cards" / "filtered.txt"
+        assert manifest.read_text(encoding="utf-8").splitlines() == ["ccc.png"]
+
+    def test_filter_manifest_not_written_on_dry_run(self, tmp_path: Path) -> None:
+        rows = [{"hash": "ccc"}]
+        captures, meta, catalog = self.make_setup(tmp_path, rows, icon_seeds={"ccc": None})
+
+        build_catalog(captures, meta, catalog, ocr_fn=brightness_ocr, dry_run=True)
+
+        assert not (tmp_path / "skill_cards" / "filtered.txt").exists()
+
+    def test_unknown_dedup_by_text_and_prune_stale(self, tmp_path: Path) -> None:
+        """unknown 按(名称,描述)去重;指向已不存在图片的旧条目被清理。"""
+        rows = [{"hash": "aaa"}]
+        captures, meta, catalog = self.make_setup(
+            tmp_path, rows, icon_seeds={"aaa": None}, kinds={"aaa": "light"}
+        )
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text(
+            "skills:\n"
+            "  unknown:\n"
+            "    - name: 冰霜新星\n"
+            "      description: 对范围内敌人造成120%伤害并冻结2秒\n"
+            "      image: 旧目录/旧图.png\n"          # 图片已不存在 → 清理
+            "    - name: 旧技能\n"
+            "      description: 只有老图里有的条目\n"
+            "      image: 旧目录/旧图2.png\n",      # 同上
+            encoding="utf-8",
+        )
+
+        report = build_catalog(
+            captures, meta, catalog, ocr_fn=fake_ocr, dry_run=False
+        )
+
+        data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
+        unknown = data["skills"]["unknown"]
+        # 同文本旧条目被合并成一条(换成本次有效的 image),失效旧条目被剪掉
+        assert len(unknown) == 1
+        assert unknown[0]["image"] == "aaa.png"
         assert report.unknown == 1
 
     def test_rerun_is_idempotent(self, tmp_path: Path) -> None:
-        rows = [{"hash": "aaa", "hero": "强袭"}]
-        captures, meta, catalog = self.make_setup(tmp_path, rows)
+        tpl_a = save_icon_template(tmp_path / "a.png", icon_seed=7)
+        rows = [{"hash": "aaa"}]
+        captures, meta, catalog = self.make_setup(
+            tmp_path, rows, icon_seeds={"aaa": 7}, kinds={"aaa": "light"}
+        )
+        heroes = {"强袭": [tpl_a]}
 
-        build_catalog(captures, meta, catalog, ocr_fn=fake_ocr)
-        report = build_catalog(captures, meta, catalog, ocr_fn=fake_ocr)
+        build_catalog(captures, meta, catalog, ocr_fn=fake_ocr, hero_icons=heroes)
+        report = build_catalog(
+            captures, meta, catalog, ocr_fn=fake_ocr, hero_icons=heroes
+        )
 
         assert report.added == 0
         assert report.unchanged == 1
@@ -114,8 +299,11 @@ class TestBuildCatalog:
 
     def test_merge_preserves_manual_fields(self, tmp_path: Path) -> None:
         """人工补充的 priority 保留；描述为空的历史条目被补齐。"""
-        rows = [{"hash": "aaa", "hero": "强袭"}]
-        captures, meta, catalog = self.make_setup(tmp_path, rows)
+        tpl_a = save_icon_template(tmp_path / "a.png", icon_seed=7)
+        rows = [{"hash": "aaa"}]
+        captures, meta, catalog = self.make_setup(
+            tmp_path, rows, icon_seeds={"aaa": 7}, kinds={"aaa": "light"}
+        )
         catalog.parent.mkdir(parents=True, exist_ok=True)
         catalog.write_text(
             "skills:\n"
@@ -128,7 +316,13 @@ class TestBuildCatalog:
             encoding="utf-8",
         )
 
-        report = build_catalog(captures, meta, catalog, ocr_fn=fake_ocr)
+        report = build_catalog(
+            captures,
+            meta,
+            catalog,
+            ocr_fn=fake_ocr,
+            hero_icons={"强袭": [tpl_a]},
+        )
 
         data = yaml.safe_load(catalog.read_text(encoding="utf-8"))
         assault = data["skills"]["强袭"]
@@ -144,7 +338,7 @@ class TestBuildCatalog:
         assert existing["description"] == "人工写好的描述"
 
     def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
-        rows = [{"hash": "aaa", "hero": "强袭"}]
+        rows = [{"hash": "aaa"}]
         captures, meta, catalog = self.make_setup(tmp_path, rows)
 
         build_catalog(captures, meta, catalog, ocr_fn=fake_ocr, dry_run=True)
@@ -164,7 +358,9 @@ class TestBuildCatalog:
 
     def test_missing_image_skipped(self, tmp_path: Path) -> None:
         captures = tmp_path / "skill_cards" / "captures"
-        meta = write_meta(tmp_path / "skill_cards" / "meta.jsonl", [{"hash": "ghost", "hero": "强袭"}])
+        meta = tmp_path / "skill_cards" / "meta.jsonl"
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text('{"hash": "ghost"}\n', encoding="utf-8")
         captures.mkdir(parents=True, exist_ok=True)
 
         report = build_catalog(captures, meta, tmp_path / "skills.yaml", ocr_fn=fake_ocr)
@@ -177,9 +373,7 @@ class TestReadCaptureMeta:
     def test_dedup_by_hash(self, tmp_path: Path) -> None:
         meta = tmp_path / "meta.jsonl"
         meta.write_text(
-            '{"hash": "a", "hero": "强袭"}\n'
-            '{"hash": "a", "hero": "强袭"}\n'
-            '{"hash": "b", "hero": "死骑"}\n',
+            '{"hash": "a"}\n{"hash": "a"}\n{"hash": "b"}\n',
             encoding="utf-8",
         )
         rows = read_capture_meta(meta)

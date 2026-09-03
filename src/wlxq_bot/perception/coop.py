@@ -471,10 +471,27 @@ class CoopPerception:
         roi_name = self._cfg.skills.get("candidate_roi", "skill_candidates")
         roi = self._resolve_named_roi(str(roi_name), ctx)
         threshold = float(self._cfg.skills.get("threshold", 0.82))
-        # 技能卡采集（统计阶段可选）：无论图标匹配是否命中都裁卡存档；
-        # observe 契约保证不抛异常、不阻塞，失败只记日志
-        if self._skill_collector is not None:
+
+        def _collect_on_verified_page() -> None:
+            """技能卡采集（统计阶段可选）：在「页面标志可见 + 图标已实际命中」
+            的帧裁卡——这正是即将点卡的时刻，卡片必然渲染完整、英雄图标必然
+            在画面上，离线归属才不会因图标未渲染而失败。只看任务状态会裁到
+            棋盘帧，只看页面标志会裁到卡片未渲染完的过渡帧。
+            observe 契约保证不抛异常、不阻塞，失败只记日志。
+            """
+            if self._skill_collector is None:
+                return
+            if not any(
+                raw_data.get(flag)
+                for flag in (
+                    "select_skill_button_visible",
+                    "merge_gift_skill_page_visible",
+                    "tian_shi_kai_ju_visible",
+                )
+            ):
+                return
             self._skill_collector.observe(ctx.frame_id, frame, roi, page=page)
+
         if self._skill_icon_paths:
             skill_matches = self._vision.match_template_set(
                 frame,
@@ -483,6 +500,7 @@ class CoopPerception:
                 threshold=threshold,
             )
             if skill_matches:
+                _collect_on_verified_page()
                 matches.extend(skill_matches)
                 candidates = [
                     SkillCandidate(
@@ -508,6 +526,7 @@ class CoopPerception:
                 threshold=threshold,
             )
             if teammate_matches:
+                _collect_on_verified_page()
                 matches.extend(teammate_matches)
                 raw_data["teammate_skill_visible"] = True
                 raw_data["teammate_skill_match"] = teammate_matches[0]

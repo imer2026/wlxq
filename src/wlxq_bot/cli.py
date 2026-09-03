@@ -44,7 +44,7 @@ TASKS_CONFIG_PATH = Path("configs/tasks.yaml")
 logger = get_logger(__name__)
 
 # build-skill-catalog 默认路径（B008: 默认值中的调用提为常量）
-_SKILL_CAPTURES_DEFAULT = Path("datasets/skill_cards/captures")
+_SKILL_CAPTURES_DEFAULT = Path("datasets/skill_cards")
 _SKILL_CATALOG_DEFAULT = Path("configs/skills.yaml")
 
 app = typer.Typer(
@@ -2146,7 +2146,7 @@ def build_skill_catalog(
     captures: str | None = typer.Option(
         None,
         "--captures",
-        help="采集卡图目录，默认 datasets/skill_cards/captures",
+        help="采集根目录（含按局分目录的卡图与 meta.jsonl），默认 datasets/skill_cards",
     ),
     catalog: str | None = typer.Option(
         None,
@@ -2172,11 +2172,12 @@ def build_skill_catalog(
         wlxq-bot build-skill-catalog --dry-run
         wlxq-bot build-skill-catalog
     """
-    from wlxq_bot.skill_catalog import build_catalog
+    from wlxq_bot.config import load_default_config
+    from wlxq_bot.skill_catalog import build_catalog, resolve_icon_templates
 
     captures_path = Path(captures) if captures else _SKILL_CAPTURES_DEFAULT
     catalog_path = Path(catalog) if catalog else _SKILL_CATALOG_DEFAULT
-    meta_path = captures_path.parent / "meta.jsonl"
+    meta_path = captures_path / "meta.jsonl"
     logger.info(
         "build-skill-catalog 开始 captures=%s catalog=%s dry_run=%s",
         captures_path,
@@ -2184,7 +2185,20 @@ def build_skill_catalog(
         dry_run,
     )
     try:
-        report = build_catalog(captures_path, meta_path, catalog_path, dry_run=dry_run)
+        collection_cfg = load_default_config(
+            Path("configs/default.yaml")
+        ).run.skill_collection
+        hero_icons = resolve_icon_templates(
+            Path("assets/templates"), collection_cfg.hero_icons
+        )
+        report = build_catalog(
+            captures_path,
+            meta_path,
+            catalog_path,
+            hero_icons=hero_icons,
+            min_icon_confidence=collection_cfg.min_icon_confidence,
+            dry_run=dry_run,
+        )
     except (RuntimeError, ValueError, OSError) as exc:
         logger.error("build-skill-catalog 失败: %s", exc)
         rprint(f"[red]建册失败: {exc}[/red]")

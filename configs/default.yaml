@@ -47,9 +47,10 @@ safety:
   stop_hotkey: 'esc'
   # 单任务最大连续失败次数
   max_failures: 5
-  # 截图时效（毫秒），超过则丢弃动作并重新截图
-  # 棋盘识别（4 英雄 matchTemplate）耗时约 1 秒，需留足余量；3 秒内游戏界面不会剧变
-  frame_ttl_ms: 3000
+  # 截图时效（毫秒），超过则丢弃动作并重新截图。
+  # 2026-09-01 实机定案 8000：生产组合（3000x2000 模板包 × 927x1727 窗口）
+  # 实测单帧识别 2.6~6.5 秒，3000/6000 都会被高频击穿触发保守停止
+  frame_ttl_ms: 8000
   # 无进展超时（秒），界面长时间不变化时暂停
   no_progress_timeout: 30
 
@@ -181,13 +182,22 @@ run:
   refocus_when_idle: true
   refocus_idle_seconds: 20.0
   # 技能卡自动采集（统计阶段专用，平时保持 false）：技能页出现时顺手裁卡存档，
-  # 供离线 `wlxq-bot build-skill-catalog` OCR 建立技能清单（configs/skills.yaml）。
+  # 供离线 `wlxq-bot build-skill-catalog` 建立技能清单（configs/skills.yaml）。
+  # 运行时只做裁剪和哈希（毫秒级、节流），英雄归属与 OCR 全在离线建册时做；
   # 采集不参与任何决策、异常只记日志并自动熔断、写盘走后台线程，绝不阻塞对局。
   # 英雄技能固定，统计阶段采齐后即可关掉
   skill_collection:
     enabled: true
     # 输出目录（位于 gitignore 的 datasets/ 下，不提交仓库）
     output_dir: datasets/skill_cards
+    # 采集器连续内部失败达该次数后自动停用（只记日志，不影响主流程）
+    fuse_max_consecutive_failures: 5
+    # 两次采集的最小间隔（秒）：技能页静态，采一次就够；节流保证采集开销
+    # 不会侵蚀主循环的截图时效预算（safety.frame_ttl_ms）
+    min_collect_interval_seconds: 30.0
+    # 写盘队列容量；队列满时丢弃新采集并计数，绝不阻塞主循环
+    queue_maxsize: 64
+    # ---- 以下仅离线建册（build-skill-catalog）使用，运行时不读 ----
     # 英雄名 → 技能卡上的英雄图标模板（同一英雄所有技能卡共用一张图标）；
     # 不在名单内的卡按 unknown 归档，离线人工补标
     hero_icons:
@@ -195,12 +205,8 @@ run:
       天使: [skills/tian_shi.png]
       雪姬: [skills/xue_ji.png]
       死骑: [skills/si_qi.png]
-    # 图标匹配置信度低于该值的卡归为 unknown
+    # 离线图标匹配置信度低于该值的卡归为 unknown
     min_icon_confidence: 0.70
-    # 采集器连续内部失败达该次数后自动停用（只记日志，不影响主流程）
-    fuse_max_consecutive_failures: 5
-    # 写盘队列容量；队列满时丢弃新采集并计数，绝不阻塞主循环
-    queue_maxsize: 64
 
 main_c_profiles:
   assault:

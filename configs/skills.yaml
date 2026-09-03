@@ -3,4 +3,94 @@
 # 字段在合并时保留，但重新生成会丢失本文件头以外的所有注释。
 # 英雄技能开局页与赠送页一致，清单按英雄平铺，不区分来源页面。
 # 本清单只做记录与后续技能优先级配置的基础，不影响自动化决策。
-skills: {}
+skills:
+  天使:
+  - name: 神明怒火
+    description: 流星附带怪物最大生命值6%的伤害
+  - name: 光矢协同
+    description: 射手受到赐福时，攻击将追加一道120%伤害的光箭
+  - name: 圣灵庇护
+    description: 召唤受到赐福时，召唤物受伤20%概率震开怪物并回血30%
+  - name: 神圣契约
+    description: 大招！最高星天使将随机最高星英雄指定为救世主，天使会以他为弹射起点，并提升200%攻击力
+  - name: 圣羽加持
+    description: 赐福额外提升50%攻击，50%攻速
+  - name: 圣羽增持
+    description: 赐福持续时间+9S
+  - name: 陨星刻印
+    description: 流星会附带20%易伤效果
+  - name: 流星坠落
+    description: 召唤流星数量+1
+  死骑:
+  - name: 死灵战神
+    description: 大招！最高星死骑召唤死灵战神。伤害+50%，技能范围+20%，灵魂冲击附带剑气且无敌时间+5
+  - name: 灵魂剑气
+    description: 最高星亡灵战士灵魂冲击将附带4道剑气，死灵战神附带6道剑气
+  - name: 亡灵护主
+    description: 亡灵战士攻速额外提升40%~55%（国王剩余血量越低、攻速提升越大）
+  - name: 强化打击
+    description: 最高星亡灵战土双重打击范围+30%伤害+120%
+  - name: 免伤护盾
+    description: 亡灵战士有35%概率免疫伤害，且嘲数量+4
+  - name: 双重打击
+    description: 最高星亡灵战士有70%概率触发双重打击
+  - name: 反弹护盾
+    description: 怪物触发免伤护盾时，有50%概率将其震开并造成600%伤害
+  - name: 暴力斩击
+    description: 每道剑气对命中的前3只怪物造成的伤害+300%
+  - name: 剑气强化
+    description: 剑气距离+40%剑气伤害+100%
+  - name: 护盾增幅
+    description: 死亡骑士每提升1星，它所召唤的亡灵战士免伤概率提升8%
+  - name: 高速打击
+    description: 最高星亡灵战士必定触发双重打击攻击速度+30%，伤害+30%
+  - name: 剑气增伤
+    description: 剑气伤害+120%
+  - name: 控制痛击
+    description: 亡灵战士对魅惑、冰冻、减速的怪物暴击率+15%，最终暴击伤害+40%
+  - name: 血量传承
+    description: 亡灵战士继承国王额外血量提升至8%~13%（国王剩余血量越低、继承血量越多）
+  强袭:
+  - name: 粒子增幅
+    description: 强袭伤害+60%
+  - name: 多束齐射
+    description: 每次发射光束弹数量+2浮游炮连射+1
+  - name: 传导超载
+    description: 强袭的连射次数提升100%
+  - name: 浮游连携
+    description: 每连射5次就会生成一台浮游炮，浮游炮会在战场上游走锁定敌人，持续5s
+  - name: 传导共振
+    description: 强袭的连射次数提升70%
+  - name: 天穹支援
+    description: 大招！每连射120次启动天穹模式：攻击会触发天穹锁定敌人激光打击，持续2次普攻，每次进化会增加激光伤害
+  - name: 弱点锁定
+    description: 强袭伤害+50%充能机甲总星级每提升1星，就会获得1%暴击率，最多10%
+  - name: 机体赋能
+    description: 浮游炮伤害提升160%
+  - name: 高能供给
+    description: 生成浮游炮的连射数-3
+  - name: 机体超频
+    description: 强袭伤害+100%
+  - name: 分裂强化
+    description: 分裂光束弹伤害提升160%
+  雪姬:
+  - name: 冰雪凤鸣
+    description: 大招！最高星雪姬将召唤巨型凤凰，冻结时间+2秒，伤害+100%，命中冰冻怪物会额外提升20%暴
+  - name: 冰核爆炸
+    description: 冰核飞行结束时会爆炸，并且发出一圈10枚冰箭
+  - name: 冰霜核心
+    description: 冰核伤害+60%，冻结时间+1.5s
+  - name: 冰核变大
+    description: 冰核变得更大，范围提升30%，冰核伤害+30%
+  - name: 终点冰封
+    description: 冰凤凰飞行结束后将扇出冰川，对怪物造成大幅减速与伤害
+  - name: 冰核增幅
+    description: 冰核伤害+30%，飞行距离+30%
+  - name: 冰箭增加
+    description: 冰核会持续的向周围发射8枚冰箭
+  - name: 冰箭爆炸
+    description: 冰箭飞行结束后，将爆炸造成伤害
+  - name: 爆炸翻倍
+    description: 冰核飞行结束时会爆炸，并且发出一圈20枚冰箭
+  - name: 职业控制
+    description: 最高星控制英雄冷却缩短50%

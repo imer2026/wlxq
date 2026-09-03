@@ -326,12 +326,6 @@ skill_collection:
   column_inset_ratio: 0.04
   # 列裁剪顶部修剪比例：技能 ROI 顶端可能飘入战斗伤害数字，裁掉防误当技能名
   top_trim_ratio: 0.06
-  # 卡内英雄图标匹配区（相对整卡裁剪的比例：图标位于卡片中部）
-  icon_band:
-    x_ratio: 0.12
-    y_ratio: 0.28
-    width_ratio: 0.76
-    height_ratio: 0.38
 
 # 英雄模板配置
 heroes:

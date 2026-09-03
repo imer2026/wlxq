@@ -1,18 +1,23 @@
 """技能卡采集器：技能页出现时顺手裁卡存档，供离线建立技能清单。
 
-设计约束（不可阻塞合作主流程）：
-- 由 CoopPerception 在技能页识别命中后调用；observe 内部全量捕获异常，
-  连续失败达 ``fuse_max_consecutive_failures`` 后自动停用，只记日志
-- 写盘走后台守护线程 + 有界队列，生产者入队即返回；队列满丢弃并计数，
-  绝不等待、绝不影响识别与决策的主循环节奏
+目录结构：卡图按局（run）开始时间分目录，``<输出目录>/<局开始时间>/
+序号_时分秒.png``；``meta.jsonl`` 集中在输出根目录，每行记录图片相对
+路径、完整哈希、页面与帧号——是否重复采集由内存哈希集合判断，离线建册
+（build-skill-catalog）按 meta 哈希去重与追溯。
+
+设计约束（不可侵蚀主循环的截图时效预算）：
+- 由 CoopPerception 在「页面标志可见 + 技能卡图标已实际命中（即将点卡）」
+  时调用——这是卡片渲染完整的最早时刻，英雄图标必然在画面上；只看任务
+  状态会裁到棋盘帧，只看页面标志会裁到卡片/图标未渲染完的过渡帧
+- 节流：``min_collect_interval_seconds`` 内只采一次。技能页是静态的，
+  采一次就够；动画帧的重复采集毫无价值
+- 运行时只做裁剪和 aHash（毫秒级）；PNG 编码在写盘线程完成；
+  英雄归属和文字 OCR 全部在离线建册（``build-skill-catalog``）时进行，
+  运行时不做任何模板匹配
+- 写盘走后台守护线程 + 有界队列，队列满丢弃并计数，绝不等待
 - 不参与业务决策、不产生任何输入、不额外截图（复用主流程已在手的帧）
 - 只在统计阶段启用（run.skill_collection.enabled）；英雄技能固定，
   采齐后即可关闭
-
-归属规则：每张技能卡的中部图标区匹配 ``run.skill_collection.hero_icons``
-中配置的英雄图标模板，取最高分且过 ``min_icon_confidence`` 者为归属；
-都不过阈值的卡按 unknown 归档，离线人工补标。重复卡按感知哈希（aHash）
-去重，同一张卡多帧/多局只存一份。
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +34,6 @@ from typing import Any
 import cv2
 import numpy as np
 
-from wlxq_bot.perception.vision import Vision
 from wlxq_bot.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -39,10 +44,10 @@ _COLUMN_COUNT = 3
 
 @dataclass(frozen=True)
 class _CaptureTask:
-    """一条待落盘的采集记录。"""
+    """一条待落盘的采集记录；PNG 编码延迟到写盘线程。"""
 
     image_path: Path
-    png_bytes: bytes
+    card: np.ndarray
     meta: dict[str, Any]
 
 
@@ -53,34 +58,32 @@ class SkillCollector:
         self,
         *,
         output_dir: Path,
-        hero_icons: dict[str, list[Path]],
-        vision: Vision,
-        icon_band: tuple[float, float, float, float] = (0.12, 0.28, 0.76, 0.38),
+        session_label: str = "",
         column_inset_ratio: float = 0.04,
         top_trim_ratio: float = 0.06,
-        min_icon_confidence: float = 0.70,
         fuse_max_consecutive_failures: int = 5,
+        min_collect_interval_seconds: float = 30.0,
         queue_maxsize: int = 64,
     ) -> None:
         self._output_dir = Path(output_dir)
-        self._captures_dir = self._output_dir / "captures"
+        # 卡图按局（run）开始时间分目录存放；meta.jsonl 仍集中在输出根目录
+        self._captures_dir = (
+            self._output_dir / session_label if session_label else self._output_dir
+        )
+        self._session_label = session_label
         self._meta_path = self._output_dir / "meta.jsonl"
-        self._hero_icons = {
-            hero: [Path(p) for p in paths if Path(p).is_file()]
-            for hero, paths in hero_icons.items()
-        }
-        self._vision = vision
-        self._icon_band = icon_band
         self._column_inset_ratio = column_inset_ratio
         self._top_trim_ratio = top_trim_ratio
-        self._min_icon_confidence = min_icon_confidence
         self._fuse_max = max(1, fuse_max_consecutive_failures)
+        self._min_interval = max(0.0, min_collect_interval_seconds)
         self._queue: queue.Queue[_CaptureTask | None] = queue.Queue(maxsize=queue_maxsize)
 
         self._known_hashes: set[str] = set()
         self._consecutive_failures = 0
         self._disabled = False
         self._dropped = 0
+        self._seq = 0
+        self._last_collect = float("-inf")
         self._writer: threading.Thread | None = None
 
     @property
@@ -109,9 +112,14 @@ class SkillCollector:
                 裁剪会失真，直接跳过采集
             page: 出现技能页的任务状态名（如 SELECT_OPENING_SKILLS），仅入档
         """
-        if self._disabled or not self._hero_icons:
+        if self._disabled:
+            return
+        # 节流：间隔内直接返回，把运行时增量压到接近零
+        now = time.monotonic()
+        if now - self._last_collect < self._min_interval:
             return
         try:
+            self._last_collect = now
             self._observe(frame_id, frame, roi, page)
         except Exception as exc:  # noqa: BLE001 - 采集失败绝不外泄给主流程
             self._consecutive_failures += 1
@@ -178,44 +186,26 @@ class SkillCollector:
             if digest in self._known_hashes:
                 continue
             self._known_hashes.add(digest)
-            hero, hero_confidence, icon_template = self._match_hero(card)
+            # 文件名 = 序号_时分秒,人能直接读懂;
+            # 是否采过(内容去重)由内存里的 aHash 集合判断,完整哈希只记在 meta
+            self._seq += 1
+            now = datetime.now()
+            filename = f"{self._seq:03d}_{now:%H%M%S}.png"
+            image_rel = f"{self._session_label}/{filename}" if self._session_label else filename
             self._enqueue(
                 _CaptureTask(
-                    image_path=self._captures_dir / f"{digest}.png",
-                    png_bytes=cv2.imencode(".png", card)[1].tobytes(),
+                    image_path=self._captures_dir / filename,
+                    card=card,
                     meta={
-                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "ts": now.isoformat(timespec="seconds"),
                         "frame_id": frame_id,
                         "page": page,
                         "column": column,
                         "hash": digest,
-                        "hero": hero,
-                        "hero_confidence": round(hero_confidence, 4),
-                        "icon_template": icon_template,
+                        "image": image_rel,
                     },
                 )
             )
-
-    def _match_hero(self, card: np.ndarray) -> tuple[str | None, float, str]:
-        """在卡内图标区匹配英雄图标模板，返回 (英雄名, 置信度, 模板路径)。"""
-        band_height, band_width = card.shape[:2]
-        bx, by, bw, bh = self._icon_band
-        band = card[
-            int(by * band_height) : int((by + bh) * band_height),
-            int(bx * band_width) : int((bx + bw) * band_width),
-        ]
-        if band.size == 0:
-            return None, 0.0, ""
-        best: tuple[str | None, float, str] = (None, 0.0, "")
-        for hero, templates in self._hero_icons.items():
-            for template_path in templates:
-                match = self._vision.match_template(
-                    band, str(template_path), threshold=self._min_icon_confidence
-                )
-                if match is not None and match.confidence > best[1]:
-                    # meta 要写入 JSONL,模板路径统一转 str
-                    best = (hero, match.confidence, str(template_path))
-        return best
 
     def _enqueue(self, task: _CaptureTask) -> None:
         try:
@@ -242,11 +232,15 @@ class SkillCollector:
             if task is None:
                 return
             try:
+                ok, buf = cv2.imencode(".png", task.card)
+                if not ok:
+                    logger.warning("技能卡 PNG 编码失败 path=%s", task.image_path)
+                    continue
                 task.image_path.parent.mkdir(parents=True, exist_ok=True)
-                task.image_path.write_bytes(task.png_bytes)
+                task.image_path.write_bytes(buf.tobytes())
                 with self._meta_path.open("a", encoding="utf-8") as file:
                     file.write(json.dumps(task.meta, ensure_ascii=False) + "\n")
-            except OSError as exc:
+            except (OSError, cv2.error) as exc:
                 logger.warning("技能卡采集落盘失败 path=%s error=%r", task.image_path, exc)
 
     @staticmethod

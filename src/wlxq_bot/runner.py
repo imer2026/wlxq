@@ -232,7 +232,7 @@ class Runner:
             else None
         )
         hero_cell_classifier = self._load_hero_cell_classifier(mc)
-        skill_collector = self._build_skill_collector(run_config, pack, vision)
+        skill_collector = self._build_skill_collector(run_config)
         perception = CoopPerception(
             vision,
             pack,
@@ -1003,16 +1003,11 @@ class Runner:
                 "主C技能图标模板缺失: " + ", ".join(missing) + f"（模板包: {pack.root}）"
             )
 
-    def _build_skill_collector(
-        self,
-        run_config: RunConfig,
-        pack: TemplatePack,
-        vision: Vision,
-    ) -> SkillCollector | None:
+    def _build_skill_collector(self, run_config: RunConfig) -> SkillCollector | None:
         """按统计阶段配置构造技能卡采集器；未启用或初始化失败返回 None。
 
-        采集只在 ``run.skill_collection.enabled`` 打开时进行；英雄图标模板
-        经模板包解析为绝对路径，缺失的自动跳过。初始化失败只记日志，
+        采集只在 ``run.skill_collection.enabled`` 打开时进行。运行时采集
+        只做裁剪和哈希，英雄归属在离线建册时进行。初始化失败只记日志，
         绝不阻断正常对局。
         """
         cfg = run_config.skill_collection
@@ -1021,26 +1016,13 @@ class Runner:
             return None
         try:
             geometry = self.tasks_config.skill_collection
-            icon_band_cfg = geometry.get("icon_band") or {}
-            icon_band = (
-                float(icon_band_cfg.get("x_ratio", 0.12)),
-                float(icon_band_cfg.get("y_ratio", 0.28)),
-                float(icon_band_cfg.get("width_ratio", 0.76)),
-                float(icon_band_cfg.get("height_ratio", 0.38)),
-            )
-            hero_icons = {
-                hero: [pack.resolve_template(str(rel)) for rel in rels]
-                for hero, rels in cfg.hero_icons.items()
-            }
             return SkillCollector(
                 output_dir=Path(cfg.output_dir),
-                hero_icons=hero_icons,
-                vision=vision,
-                icon_band=icon_band,
+                session_label=time.strftime("%Y%m%d_%H%M%S"),
                 column_inset_ratio=float(geometry.get("column_inset_ratio", 0.04)),
                 top_trim_ratio=float(geometry.get("top_trim_ratio", 0.06)),
-                min_icon_confidence=cfg.min_icon_confidence,
                 fuse_max_consecutive_failures=cfg.fuse_max_consecutive_failures,
+                min_collect_interval_seconds=cfg.min_collect_interval_seconds,
                 queue_maxsize=cfg.queue_maxsize,
             )
         except Exception as exc:
