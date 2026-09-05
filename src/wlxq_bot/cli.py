@@ -509,6 +509,11 @@ def run(
         "难度弹窗仍打开并关闭一次以刷新最新合作邀请。"
         "不传时使用配置 run.skip_difficulty_selection",
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="组队对局模式：coop（合作）| pet（保卫宠物）；不传时使用配置 run.mode",
+    ),
     start_state: str = typer.Option(
         "find_coop",
         "--start-state",
@@ -518,7 +523,7 @@ def run(
 ) -> None:
     """执行一个自动化任务。
 
-    目前支持合作任务（coop）。启动后自动寻找合作、进入游戏、培养主C，
+    目前支持组队任务（coop / pet）。启动后自动寻找合作、进入游戏、培养主C，
     直到完成 max_rounds 局或触发停止条件。运行中可用 Ctrl+C 中断。
 
     首版培养主C闭环（召唤→识别棋盘→合成→达到目标星级）已可用；
@@ -546,9 +551,11 @@ def run(
 
     enable_dpi_awareness()
     logger.info(
-        "run 开始 task=%s main_c=%s coop_difficulties=%s skip_difficulty_selection=%s max_rounds=%s",
+        "run 开始 task=%s main_c=%s mode=%s coop_difficulties=%s "
+        "skip_difficulty_selection=%s max_rounds=%s",
         task,
         main_c or "(默认)",
+        mode or "(配置)",
         coop_difficulties or "(配置)",
         "未指定" if skip_difficulty_selection is None else skip_difficulty_selection,
         max_rounds if max_rounds is not None else "(配置)",
@@ -578,6 +585,7 @@ def run(
             coop_difficulties=coop_difficulties,
             skip_difficulty_selection=skip_difficulty_selection,
             max_rounds=max_rounds,
+            mode=mode,
         )
     except (ValueError, RuntimeError) as exc:
         logger.error("任务执行失败: %r", exc)
@@ -598,6 +606,11 @@ def exec_select_difficulty(
         "--coop-difficulties",
         help="覆盖配置中的合作难度范围，例如 1-16 或 1-10（编号指彩虹难度）；按从小到大依次点击",
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="组队对局模式：coop（合作）| pet（保卫宠物）；不传时使用配置 run.mode",
+    ),
 ) -> None:
     """在已打开的难度弹窗中，独立验证难度识别、点击和滚动。
 
@@ -617,7 +630,8 @@ def exec_select_difficulty(
 
     enable_dpi_awareness()
     logger.info(
-        "exec select-difficulty 开始 coop_difficulties=%s",
+        "exec select-difficulty 开始 mode=%s coop_difficulties=%s",
+        mode or "(配置)",
         coop_difficulties or "(配置)",
     )
     try:
@@ -638,7 +652,7 @@ def exec_select_difficulty(
 
     runner = Runner(default_cfg, tasks_cfg, local_cfg)
     try:
-        final = runner.select_difficulty(coop_difficulties)
+        final = runner.select_difficulty(coop_difficulties, mode=mode)
     except (ValueError, RuntimeError) as exc:
         logger.error("独立难度选择失败: %r", exc)
         rprint(f"[red]独立难度选择失败: {exc}[/red]")

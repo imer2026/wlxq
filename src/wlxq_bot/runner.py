@@ -25,15 +25,18 @@ from wlxq_bot.assets import TemplatePack
 from wlxq_bot.config import (
     DefaultConfig,
     LocalConfig,
+    ModeProfile,
     RunConfig,
     TasksConfig,
     parse_coop_difficulties,
+    resolve_main_c_profile,
 )
 from wlxq_bot.debug.recorder import DebugRecorder
 from wlxq_bot.models import Action, CoopRole, Observation, State
 from wlxq_bot.orchestration.coop_grab import CoopGrabCoordinator
 from wlxq_bot.perception.coop import _BOARD_WATCH_STATES, CoopPerception
 from wlxq_bot.perception.hero_classifier import HeroCellClassifier
+from wlxq_bot.perception.ocr import ensure_engine
 from wlxq_bot.perception.screen import (
     ScreenCapture,
     activate_window,
@@ -153,6 +156,7 @@ class Runner:
         coop_difficulties: str | None = None,
         skip_difficulty_selection: bool | None = None,
         max_rounds: int | None = None,
+        mode: str | None = None,
     ) -> State:
         """执行指定任务。
 
@@ -166,12 +170,14 @@ class Runner:
             skip_difficulty_selection: 命令行跳过难度选择覆盖；None 使用配置值。
                 游戏本次会话已手动选过难度时置 True：首局招募只跳过勾选难度等级，
                 难度弹窗仍开/关一次刷新最新合作邀请。
+            mode: 组队对局模式（mode_profiles 键，如 coop/pet）；None 使用配置
+                run.mode。决定入口页签、难度识别方式与模式专属素材。
 
         Returns:
             任务结束时的最终状态
 
         Raises:
-            ValueError: 不支持的任务名
+            ValueError: 不支持的任务名或未知模式
             RuntimeError: 窗口未找到、模板包缺失或启动检查失败
         """
         if task_name != "coop":
@@ -200,9 +206,16 @@ class Runner:
             if max_rounds < 1:
                 raise ValueError(f"max_rounds 必须大于等于 1，当前 {max_rounds}")
             run_config = run_config.model_copy(update={"max_rounds": max_rounds})
+        # 模式解析：CLI --mode 优先，缺省用 run.mode；再应用该模式的主C覆盖
+        mode_name, mode_profile = self._resolve_mode_profile(mode)
+        effective_main_c_profile = resolve_main_c_profile(
+            self.default_config.main_c_profiles, mode_profile, mc
+        )
         self._startup_check(mc, initial_state)
         logger.info(
-            "启动合作任务，主C=%s，合作难度=%s，跳过难度选择=%s，最大局数=%d",
+            "启动组队任务，模式=%s（%s），主C=%s，合作难度=%s，跳过难度选择=%s，最大局数=%d",
+            mode_name,
+            mode_profile.display_name,
             mc,
             difficulty_levels,
             skip_difficulty,
@@ -257,6 +270,15 @@ class Runner:
             new_skill_dir=new_skill_dir,
             gold_reader=gold_reader,
             gold_read_interval=gold_read_interval,
+            difficulty_kind=mode_profile.entry.difficulty.kind,
+            pet_difficulty_targets=(
+                mode_profile.entry.difficulty.targets or None
+            ),
+            locator_aliases={
+                "ready_button": mode_profile.match.ready_button,
+                "return_button": mode_profile.settlement.return_button,
+                "coop_leave_team": mode_profile.match.leave_team,
+            },
         )
 
         required_heroes = {mc, *self.default_config.hero_classifier.lineup_others}
@@ -269,9 +291,13 @@ class Runner:
             )
         self._check_skill_templates(mc, initial_state, pack)
         self._check_home_page_template(initial_state, pack)
-        self._check_difficulty_templates(
-            difficulty_levels, initial_state, pack, skip_difficulty=skip_difficulty
-        )
+        # 难度模板只在文字模板识别方式下需要；OCR 模式由 _check_mode_assets
+        # 检查 ROI 标定与 OCR 引擎
+        if mode_profile.entry.difficulty.kind == "template":
+            self._check_difficulty_templates(
+                difficulty_levels, initial_state, pack, skip_difficulty=skip_difficulty
+            )
+        self._check_mode_assets(mode_profile, pack, initial_state)
 
         safety = SafetyGuard(
             max_failures=self.default_config.safety.max_failures,
@@ -302,7 +328,12 @@ class Runner:
             coop_difficulties=difficulty_levels,
             skill_candidate_roi=skill_candidate_roi,
             skip_difficulty_selection=skip_difficulty,
-            main_c_profile=self.default_config.main_c_profiles[mc],
+            main_c_profile=effective_main_c_profile,
+            mode_profile=mode_profile,
+            pet_difficulty_targets=mode_profile.entry.difficulty.targets or None,
+            pet_difficulty_min_confidence=float(
+                self.tasks_config.pet_difficulty_recognition.get("min_confidence", 0.5)
+            ),
         )
         task.ctx.current_state = initial_state
         logger.info(
@@ -362,7 +393,11 @@ class Runner:
         logger.info("任务结束，最终状态=%s，已完成局数=%d", final.value, task.ctx.round_count)
         return final
 
-    def select_difficulty(self, coop_difficulties: str | None = None) -> State:
+    def select_difficulty(
+        self,
+        coop_difficulties: str | None = None,
+        mode: str | None = None,
+    ) -> State:
         """在用户已打开的难度弹窗中执行一次独立的难度选择能力。
 
         该入口复用 ``CoopTask`` 的难度识别、点击和滚动逻辑，但不会打开或关闭
@@ -370,6 +405,8 @@ class Runner:
 
         Args:
             coop_difficulties: 命令行难度范围覆盖，例如 ``1-10``；None 使用配置值。
+            mode: 组队对局模式（mode_profiles 键，如 coop/pet）；None 使用配置
+                run.mode。OCR 模式跳过合作文字模板检查，按模式档案检查资产。
 
         Returns:
             全部目标难度均已点击或在有限重试后跳过时返回 ``State.COMPLETED``；
@@ -380,7 +417,15 @@ class Runner:
             if coop_difficulties is not None
             else list(self.default_config.run.coop_difficulties)
         )
-        logger.info("启动独立难度选择，合作难度=%s", difficulty_levels)
+        mode_name, mode_profile = self._resolve_mode_profile(mode)
+        pet_targets = mode_profile.entry.difficulty.targets
+        is_ocr = mode_profile.entry.difficulty.kind == "ocr"
+        logger.info(
+            "启动独立难度选择，模式=%s（%s），合作难度=%s",
+            mode_name,
+            mode_profile.display_name,
+            difficulty_levels,
+        )
 
         screen = ScreenCapture()
         handle = self._find_game_window(screen)
@@ -397,7 +442,11 @@ class Runner:
         time.sleep(3)
 
         pack = self._load_template_pack(screen, handle)
-        self._check_difficulty_templates(difficulty_levels, State.FIND_COOP, pack)
+        # OCR 模式没有合作难度文字模板，模板检查按识别方式门控；
+        # 模式资产（hotspot/locator/ROI/引擎）统一由 _check_mode_assets 把关
+        if not is_ocr:
+            self._check_difficulty_templates(difficulty_levels, State.FIND_COOP, pack)
+        self._check_mode_assets(mode_profile, pack, State.FIND_COOP)
         debug_recorder = (
             DebugRecorder(
                 self.default_config.vision.debug_dir,
@@ -413,6 +462,13 @@ class Runner:
             CoopRole.HELPER,
             self.default_config.run.default_main_c,
             debug_recorder=debug_recorder,
+            difficulty_kind=mode_profile.entry.difficulty.kind,
+            pet_difficulty_targets=pet_targets or None,
+            locator_aliases={
+                "ready_button": mode_profile.match.ready_button,
+                "return_button": mode_profile.settlement.return_button,
+                "coop_leave_team": mode_profile.match.leave_team,
+            },
         )
         safety = SafetyGuard(
             max_failures=self.default_config.safety.max_failures,
@@ -437,6 +493,16 @@ class Runner:
             hotspots,
             coop_difficulties=difficulty_levels,
             difficulty_selection_only=True,
+            main_c_profile=resolve_main_c_profile(
+                self.default_config.main_c_profiles,
+                mode_profile,
+                self.default_config.run.default_main_c,
+            ),
+            mode_profile=mode_profile,
+            pet_difficulty_targets=pet_targets or None,
+            pet_difficulty_min_confidence=float(
+                self.tasks_config.pet_difficulty_recognition.get("min_confidence", 0.5)
+            ),
         )
 
         if safety.start_esc_listener():
@@ -1155,6 +1221,74 @@ class Runner:
                 + ", ".join(str(level) for level in missing)
                 + f"（模板包: {pack.root}）"
             )
+
+    def _resolve_mode_profile(self, mode: str | None) -> tuple[str, ModeProfile]:
+        """解析本次运行模式：CLI 参数优先，缺省用 run.mode。"""
+        mode_name = mode or self.default_config.run.mode
+        profiles = self.default_config.mode_profiles
+        if mode_name not in profiles:
+            raise ValueError(
+                f"未知模式 {mode_name!r}，可用: {sorted(profiles)}；"
+                "需在 configs/default.yaml 的 mode_profiles 中定义"
+            )
+        return mode_name, profiles[mode_name]
+
+    def _check_mode_assets(
+        self, mode_profile: ModeProfile, pack: TemplatePack, start_state: State
+    ) -> None:
+        """按模式档案做启动前资产缺口检查（spec §4.4：缺失即在产生输入前报错）。"""
+        if start_state != State.FIND_COOP:
+            return
+        display = mode_profile.display_name or "未知模式"
+        missing_hotspots = [
+            name
+            for name in (
+                mode_profile.mode_chat_hotspot,
+                mode_profile.entry.mode_tab_hotspot,
+            )
+            if name and name not in self.tasks_config.hotspots
+        ]
+        if missing_hotspots:
+            raise RuntimeError(
+                f"模式 {display!r} 缺少 hotspot: {missing_hotspots}（configs/tasks.yaml）"
+            )
+        missing_locators: list[str] = []
+        for locator_name in (
+            mode_profile.match.ready_button,
+            mode_profile.match.leave_team,
+            mode_profile.settlement.return_button,
+        ):
+            locator = self.tasks_config.locators.get(locator_name)
+            if not locator:
+                missing_locators.append(f"{locator_name}(未定义)")
+                continue
+            template_rel = locator.get("template")
+            if not template_rel or not pack.resolve_template(str(template_rel)).is_file():
+                missing_locators.append(f"{locator_name}(模板缺失: {template_rel})")
+                continue
+            if not isinstance(locator.get("threshold"), (int, float)):
+                missing_locators.append(f"{locator_name}(阈值未标定)")
+        if missing_locators:
+            raise RuntimeError(f"模式 {display!r} 缺少 locator: {missing_locators}")
+        difficulty = mode_profile.entry.difficulty
+        if difficulty.kind == "ocr":
+            roi_name = str(
+                self.tasks_config.pet_difficulty_recognition.get(
+                    "candidate_roi", "pet_difficulty_list"
+                )
+            )
+            roi = self.tasks_config.rois.get(roi_name)
+            if roi is None or roi.width_ratio <= 0 or roi.height_ratio <= 0:
+                raise RuntimeError(
+                    f"模式 {display!r} 的 OCR 难度识别 ROI 未标定: rois.{roi_name}"
+                    "（OCR 必须限域，禁止全图识别）"
+                )
+            try:
+                ensure_engine()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"模式 {display!r} 需要 OCR 引擎: {exc}"
+                ) from exc
 
     def _check_home_page_template(self, start_state: State, pack: TemplatePack) -> None:
         """正常合作流程启动前确认首页正向识别模板存在。"""

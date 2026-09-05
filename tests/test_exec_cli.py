@@ -23,7 +23,11 @@ def test_exec_select_difficulty_passes_override(monkeypatch) -> None:
     monkeypatch.setattr("wlxq_bot.cli.load_local_config", lambda _path: None)
     monkeypatch.setattr("wlxq_bot.cli.enable_dpi_awareness", lambda: None)
 
-    def fake_select_difficulty(self, coop_difficulties: str | None = None) -> State:
+    def fake_select_difficulty(
+        self,
+        coop_difficulties: str | None = None,
+        mode: str | None = None,
+    ) -> State:
         captured["coop_difficulties"] = coop_difficulties
         return State.COMPLETED
 
@@ -55,7 +59,7 @@ def test_exec_select_difficulty_returns_failure_when_not_completed(monkeypatch) 
     monkeypatch.setattr("wlxq_bot.cli.enable_dpi_awareness", lambda: None)
     monkeypatch.setattr(
         "wlxq_bot.runner.Runner.select_difficulty",
-        lambda self, coop_difficulties=None: State.FIND_COOP,
+        lambda self, coop_difficulties=None, mode=None: State.FIND_COOP,
     )
 
     result = CliRunner().invoke(app, ["exec", "select-difficulty"])

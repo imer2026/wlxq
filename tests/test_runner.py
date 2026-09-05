@@ -12,7 +12,15 @@ from pathlib import Path
 import pytest
 
 from wlxq_bot.action.safety import SafetyGuard
-from wlxq_bot.config import DefaultConfig, LocalConfig, TasksConfig, WindowSpec
+from wlxq_bot.assets import TemplatePack
+from wlxq_bot.config import (
+    DefaultConfig,
+    LocalConfig,
+    MainCProfile,
+    ModeProfile,
+    TasksConfig,
+    WindowSpec,
+)
 from wlxq_bot.models import (
     BoardCapacity,
     BoardHero,
@@ -1810,3 +1818,129 @@ class TestExitFrameSaving:
         recorder = DebugRecorder(str(tmp_path))  # 默认不启用缓冲
         Runner._flush_exit_frames(recorder, task, safety)
         assert list(tmp_path.glob("exit_*")) == []
+
+
+class TestModeAssets:
+    """模式启动检查与模式解析。"""
+
+    def _runner(self, mode_profile: ModeProfile) -> Runner:
+        default_cfg = DefaultConfig(
+            run={"mode": "pet"},
+            main_c_profiles={
+                "assault": MainCProfile(display_name="强袭", hero_template_dir="heroes/assault")
+            },
+            mode_profiles={"pet": mode_profile},
+        )
+        tasks_cfg = TasksConfig(
+            hotspots={
+                "pet_chat": {"x_ratio": 0.92, "y_ratio": 0.55},
+                "recruit_pet_tab": {"x_ratio": 0.74, "y_ratio": 0.89},
+                "join_coop": {"x_ratio": 0.61, "y_ratio": 0.76},
+                "home_chat": {"x_ratio": 0.93, "y_ratio": 0.55},
+                "open_recruit": {"x_ratio": 0.08, "y_ratio": 0.64},
+                "open_difficulty_dialog": {"x_ratio": 0.58, "y_ratio": 0.83},
+            },
+            locators={
+                "pet_ready_button": {
+                    "strategy": "template",
+                    "template": "buttons/bao_wei_chong_wu/zhun_bei.png",
+                    "threshold": 0.82,
+                },
+                "pet_return_button": {
+                    "strategy": "template",
+                    "template": "buttons/bao_wei_chong_wu/fan_hui.png",
+                    "threshold": 0.82,
+                },
+                "pet_leave_team": {
+                    "strategy": "template",
+                    "template": "buttons/bao_wei_chong_wu/tui_dui.png",
+                    "threshold": 0.82,
+                },
+            },
+            rois={
+                "pet_difficulty_list": {
+                    "relative_to": "client",
+                    "x_ratio": 0.34,
+                    "y_ratio": 0.57,
+                    "width_ratio": 0.30,
+                    "height_ratio": 0.24,
+                }
+            },
+            pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
+                                        "min_confidence": 0.5},
+        )
+        return Runner(default_cfg, tasks_cfg, None)
+
+    def _pet_profile(self) -> ModeProfile:
+        return ModeProfile(
+            display_name="保卫宠物",
+            mode_chat_hotspot="pet_chat",
+            entry={
+                "mode_tab_hotspot": "recruit_pet_tab",
+                "difficulty": {"kind": "ocr", "targets": ["普通", "中等"]},
+            },
+            match={"ready_button": "pet_ready_button", "leave_team": "pet_leave_team"},
+            settlement={"like_chest": False, "return_button": "pet_return_button"},
+        )
+
+    def test_resolve_mode_profile_explicit_and_default(self) -> None:
+        runner = self._runner(self._pet_profile())
+        assert runner._resolve_mode_profile("pet") == ("pet", self._pet_profile())
+        assert runner._resolve_mode_profile(None) == ("pet", self._pet_profile())
+
+    def test_check_mode_assets_missing_hotspot_raises(self, tmp_path) -> None:
+        runner = self._runner(self._pet_profile())
+        runner.tasks_config.hotspots.pop("recruit_pet_tab")
+        from wlxq_bot.assets import TemplatePack
+
+        with pytest.raises(RuntimeError, match="recruit_pet_tab"):
+            runner._check_mode_assets(
+                self._pet_profile(),
+                TemplatePack(client_size=(923, 1723), root=tmp_path),
+                State.FIND_COOP,
+            )
+
+    def test_check_mode_assets_missing_template_raises(self, tmp_path) -> None:
+        runner = self._runner(self._pet_profile())
+        from wlxq_bot.assets import TemplatePack
+
+        with pytest.raises(RuntimeError, match="zhun_bei"):
+            runner._check_mode_assets(
+                self._pet_profile(),
+                TemplatePack(client_size=(923, 1723), root=tmp_path),
+                State.FIND_COOP,
+            )
+
+    def test_check_mode_assets_ok_with_templates(self, tmp_path, monkeypatch) -> None:
+        # OCR 模式会探测引擎：测试里打桩，避免真实加载 rapidocr
+        monkeypatch.setattr("wlxq_bot.runner.ensure_engine", lambda: None)
+        runner = self._runner(self._pet_profile())
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        tpl_dir = pack_root / "buttons" / "bao_wei_chong_wu"
+        tpl_dir.mkdir(parents=True)
+        for name in ("zhun_bei.png", "fan_hui.png", "tui_dui.png"):
+            (tpl_dir / name).write_bytes(b"t")
+        runner._check_mode_assets(
+            self._pet_profile(),
+            TemplatePack(client_size=(923, 1723), root=pack_root),
+            State.FIND_COOP,
+        )
+
+    def test_check_mode_assets_ocr_requires_nonzero_roi(self, tmp_path) -> None:
+        runner = self._runner(self._pet_profile())
+        runner.tasks_config.rois["pet_difficulty_list"].width_ratio = 0.0
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        tpl_dir = pack_root / "buttons" / "bao_wei_chong_wu"
+        tpl_dir.mkdir(parents=True)
+        for name in ("zhun_bei.png", "fan_hui.png", "tui_dui.png"):
+            (tpl_dir / name).write_bytes(b"t")
+        with pytest.raises(RuntimeError, match="pet_difficulty_list"):
+            runner._check_mode_assets(
+                self._pet_profile(),
+                TemplatePack(client_size=(923, 1723), root=pack_root),
+                State.FIND_COOP,
+            )

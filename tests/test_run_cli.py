@@ -29,6 +29,7 @@ def _patch_run_env(monkeypatch, captured: dict) -> None:
         coop_difficulties: str | None = None,
         skip_difficulty_selection: bool | None = None,
         max_rounds: int | None = None,
+        mode: str | None = None,
     ) -> State:
         captured["task_name"] = task_name
         captured["main_c"] = main_c
@@ -36,6 +37,7 @@ def _patch_run_env(monkeypatch, captured: dict) -> None:
         captured["coop_difficulties"] = coop_difficulties
         captured["skip_difficulty_selection"] = skip_difficulty_selection
         captured["max_rounds"] = max_rounds
+        captured["mode"] = mode
         return State.COMPLETED
 
     monkeypatch.setattr("wlxq_bot.runner.Runner.run", fake_run)
@@ -58,6 +60,7 @@ def test_run_cli_passes_coop_difficulties_override(monkeypatch) -> None:
         "coop_difficulties": "1-10",
         "skip_difficulty_selection": None,
         "max_rounds": None,
+        "mode": None,
     }
 
 
@@ -78,6 +81,7 @@ def test_run_cli_passes_skip_difficulty_selection(monkeypatch) -> None:
         "coop_difficulties": None,
         "skip_difficulty_selection": True,
         "max_rounds": None,
+        "mode": None,
     }
 
 
@@ -98,7 +102,18 @@ def test_run_cli_passes_max_rounds_override(monkeypatch) -> None:
         "coop_difficulties": None,
         "skip_difficulty_selection": None,
         "max_rounds": 3,
+        "mode": None,
     }
+
+
+def test_run_cli_passes_mode_override(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    _patch_run_env(monkeypatch, captured)
+
+    result = CliRunner().invoke(app, ["run", "coop", "--mode", "pet"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["mode"] == "pet"
 
 
 def test_run_cli_rejects_non_positive_max_rounds(monkeypatch) -> None:
