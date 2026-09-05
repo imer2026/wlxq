@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from wlxq_bot.config import Hotspot, MainCProfile, RoiConfig, RunConfig
+from wlxq_bot.config import Hotspot, MainCProfile, ModeProfile, RoiConfig, RunConfig
 from wlxq_bot.models import (
     Action,
     BoardCapacity,
@@ -56,6 +56,7 @@ def make_task(
     skip_difficulty_selection: bool = False,
     include_skill_candidate_roi: bool = True,
     main_c_profile: MainCProfile | None = None,
+    mode_profile: ModeProfile | None = None,
 ) -> CoopTask:
     ctx = TaskContext(main_c=main_c, max_rounds=max_rounds)
     run_cfg = RunConfig(
@@ -101,6 +102,7 @@ def make_task(
         difficulty_selection_only=difficulty_selection_only,
         skip_difficulty_selection=skip_difficulty_selection,
         main_c_profile=main_c_profile,
+        mode_profile=mode_profile,
     )
 
 
@@ -116,6 +118,28 @@ def make_hero(
         position=pos,
         confidence=0.9,
         cell_name=cell_name,
+    )
+
+
+def make_mode_profile(
+    mode_tab_hotspot: str | None = "recruit_coop_tab",
+    mode_chat_hotspot: str = "coop_chat",
+    difficulty_kind: str = "template",
+    difficulty_targets: list[str] | None = None,
+    like_chest: bool = True,
+    ready_button: str = "ready_button",
+    leave_team: str = "coop_leave_team",
+    return_button: str = "return_button",
+) -> ModeProfile:
+    return ModeProfile(
+        display_name="测试模式",
+        mode_chat_hotspot=mode_chat_hotspot,
+        entry={
+            "mode_tab_hotspot": mode_tab_hotspot,
+            "difficulty": {"kind": difficulty_kind, "targets": difficulty_targets or []},
+        },
+        match={"ready_button": ready_button, "leave_team": leave_team},
+        settlement={"like_chest": like_chest, "return_button": return_button},
     )
 
 
@@ -2372,3 +2396,154 @@ class TestBoardLogging:
         assert action.tag == "claim_chest"
         assert to_state == State.CHECK_ROUND_LIMIT
         assert action.post_delay == pytest.approx(task._run_config.reward_claim_return_delay)
+
+
+class TestModeProfileDispatch:
+    """模式档案注入：页签步骤、模式聊天入口、结算分派。"""
+
+    def _spots_with_tabs(self) -> dict[str, Hotspot]:
+        spots = {
+            "home_chat": Hotspot(x_ratio=0.1, y_ratio=0.2),
+            "open_recruit": Hotspot(x_ratio=0.2, y_ratio=0.3),
+            "recruit_coop_tab": Hotspot(x_ratio=0.25, y_ratio=0.35),
+            "recruit_pet_tab": Hotspot(x_ratio=0.4, y_ratio=0.35),
+            "open_difficulty_dialog": Hotspot(x_ratio=0.3, y_ratio=0.4),
+            "difficulty_scroll_start": Hotspot(x_ratio=0.5, y_ratio=0.3),
+            "difficulty_scroll_end": Hotspot(x_ratio=0.5, y_ratio=0.7),
+            "close_difficulty_dialog": Hotspot(x_ratio=0.4, y_ratio=0.5),
+            "coop_chat": Hotspot(x_ratio=0.5, y_ratio=0.6),
+            "pet_chat": Hotspot(x_ratio=0.55, y_ratio=0.62),
+            "add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96),
+            "join_coop": Hotspot(x_ratio=0.6, y_ratio=0.75),
+            "select_skill": Hotspot(x_ratio=0.2, y_ratio=0.9),
+            "like": Hotspot(x_ratio=0.3, y_ratio=0.8),
+            "claim_chest": Hotspot(x_ratio=0.5, y_ratio=0.8),
+        }
+        return spots
+
+    def test_build_strategy_default_and_unknown(self):
+        from wlxq_bot.tasks.strategy import CultivationStrategy, build_strategy
+
+        profile = make_mode_profile()
+        strategy = build_strategy(profile, "assault", RunConfig(), None)
+        assert isinstance(strategy, CultivationStrategy)
+        bad = profile.model_copy(update={"strategy": "phased_assault"})
+        with pytest.raises(ValueError):
+            build_strategy(bad, "assault", RunConfig(), None)
+
+    def test_coop_mode_clicks_mode_tab_before_difficulty_dialog(self):
+        task = make_task(
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(),  # 合作档案：点 recruit_coop_tab
+        )
+        task.ctx.current_state = State.FIND_COOP
+        tags = []
+        for observation in [
+            home_observation(frame_id=1),
+            Observation(frame_id=2),   # open_recruit
+            Observation(frame_id=3),   # open_mode_tab（新增步骤）
+            Observation(frame_id=4),   # open_difficulty_dialog
+            Observation(frame_id=5),   # settle
+            difficulty_observation(2, 1, frame_id=6),
+            difficulty_observation(2, 1, frame_id=7),
+            difficulty_observation(2, 1, frame_id=8),
+        ]:
+            decision = task.decide_action(observation, make_window_ctx())
+            assert decision is not None
+            action, to_state = decision
+            tags.append(action.tag)
+            task.on_action_verified(action, to_state)
+        assert tags == [
+            "open_home_chat",
+            "open_recruit",
+            "open_mode_tab",
+            "open_difficulty_dialog",
+            "difficulty_open_settle",
+            "difficulty_open_hit",
+            "difficulty_open_hit",
+            "difficulty_open_confirmed",
+        ]
+
+    def test_mode_tab_hotspot_missing_stops_conservatively(self):
+        # 档案要求点页签但 tasks.yaml 缺该 hotspot：无可用动作 → decide 返回 None
+        # （调度层按保守停止计数，绝不跳过页签直接抢）
+        task = make_task(mode_profile=make_mode_profile())  # make_task 默认 spots 无 recruit_coop_tab
+        task.ctx.current_state = State.FIND_COOP
+        d1 = task.decide_action(home_observation(frame_id=1), make_window_ctx())
+        assert d1 is not None and d1[0].tag == "open_home_chat"
+        task.on_action_verified(*d1)
+        d2 = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert d2 is not None and d2[0].tag == "open_recruit"
+        task.on_action_verified(*d2)
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
+        assert task.decide_action(Observation(frame_id=3), make_window_ctx()) is None
+
+    def test_next_round_refresh_clicks_mode_tab_after_chat(self):
+        task = make_task(
+            max_rounds=2,
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(),
+        )
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+        match = MatchResult("buttons/fan_hui.png", (500, 1000), 0.9)
+        before = Observation(
+            frame_id=1,
+            raw_data={"return_button_visible": True, "return_button_match": match},
+        )
+        decision = task.decide_action(before, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert to_state == State.FIND_COOP
+        task.on_action_verified(action, to_state)
+        task.ctx.round_count = 1
+        task.ctx.current_state = to_state
+
+        chat = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert chat is not None and chat[0].tag == "open_coop_chat"
+        task.on_action_verified(*chat)
+        tab = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert tab is not None and tab[0].tag == "open_mode_tab"
+        task.on_action_verified(*tab)
+        dialog = task.decide_action(Observation(frame_id=4), make_window_ctx())
+        assert dialog is not None and dialog[0].tag == "open_refresh_difficulty_dialog"
+
+    def test_pet_mode_uses_pet_chat_hotspot(self):
+        task = make_task(
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(
+                mode_tab_hotspot="recruit_pet_tab",
+                mode_chat_hotspot="pet_chat",
+            ),
+        )
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.OPEN_COOP_CHAT
+        decision = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "open_coop_chat"
+        assert action.target == (int(0.55 * 923), int(0.62 * 1723))  # pet_chat 中心
+
+    def test_pet_settlement_skips_like_and_chest(self):
+        task = make_task(
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(like_chest=False),
+        )
+        task.ctx.current_state = State.HANDLE_RESULT
+        like = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert like is not None
+        assert like[0].tag == "like_skipped"
+        assert like[1] == State.CLAIM_REWARD
+        task.ctx.current_state = State.CLAIM_REWARD
+        claim = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert claim is not None
+        assert claim[0].tag == "claim_skipped"
+        assert claim[1] == State.CHECK_ROUND_LIMIT
+
+    def test_coop_mode_keeps_like_and_chest(self):
+        task = make_task(
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(like_chest=True),
+        )
+        task.ctx.current_state = State.HANDLE_RESULT
+        like = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert like is not None and like[0].tag == "like_result"

@@ -15,7 +15,7 @@ Task Engine 内部组合，见 docs/architecture.md。
 
 from __future__ import annotations
 
-from wlxq_bot.config import MainCProfile, RunConfig
+from wlxq_bot.config import MainCProfile, ModeProfile, RunConfig
 from wlxq_bot.models import BoardHero, BoardSnapshot, MergeCandidate
 from wlxq_bot.utils.log import get_logger
 
@@ -167,3 +167,19 @@ class CultivationStrategy:
         """合成对的位置签名：与拖动方向一致（下格在前），供失败记忆比对。"""
         source, dest = cls.drag_direction(pair)
         return (source.position, dest.position)
+
+
+def build_strategy(
+    mode_profile: ModeProfile | None,
+    main_c: str,
+    run_config: RunConfig,
+    profile: MainCProfile | None,
+) -> CultivationStrategy:
+    """按模式档案构造培养策略（spec §4.2）。
+
+    strategy 字段是阶段化策略（spec §7，如 3星→补4个→无限选）的扩展点；
+    当前仅支持 ``default``，未知名直接拒绝，不带病运行。
+    """
+    if mode_profile is not None and mode_profile.strategy != "default":
+        raise ValueError(f"未知策略 {mode_profile.strategy!r}，当前仅支持 'default'")
+    return CultivationStrategy(main_c, run_config, profile)

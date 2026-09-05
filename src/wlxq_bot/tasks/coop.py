@@ -8,7 +8,7 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Literal
 
-from wlxq_bot.config import Hotspot, MainCProfile, RoiConfig, RunConfig
+from wlxq_bot.config import Hotspot, MainCProfile, ModeProfile, RoiConfig, RunConfig
 from wlxq_bot.models import (
     Action,
     BoardHero,
@@ -23,7 +23,7 @@ from wlxq_bot.models import (
 )
 from wlxq_bot.perception.locator import hotspot_to_client_point, roi_column_centers
 from wlxq_bot.tasks.base import Task, TaskContext
-from wlxq_bot.tasks.strategy import CultivationStrategy
+from wlxq_bot.tasks.strategy import CultivationStrategy, build_strategy
 from wlxq_bot.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +61,7 @@ class _RecruitStep(Enum):
 
     VERIFY_HOME_PAGE = "verify_home_page"
     OPEN_RECRUIT = "open_recruit"
+    SELECT_MODE_TAB = "select_mode_tab"
     OPEN_DIFFICULTY_DIALOG = "open_difficulty_dialog"
     CONFIRM_DIFFICULTY_OPEN = "confirm_difficulty_open"
     SELECT_DIFFICULTIES = "select_difficulties"
@@ -87,6 +88,7 @@ class CoopTask(Task):
         skill_candidate_roi: RoiConfig | None = None,
         difficulty_selection_only: bool = False,
         skip_difficulty_selection: bool = False,
+        mode_profile: ModeProfile | None = None,
         main_c_profile: MainCProfile | None = None,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
@@ -96,8 +98,9 @@ class CoopTask(Task):
         self._role = role
         self._hotspots = hotspots
         self._skill_candidate_roi = skill_candidate_roi
-        # 主C培养策略（合成/门禁/数量回补）：纯决策对象，状态机只负责调度
-        self._strategy = CultivationStrategy(ctx.main_c, run_config, main_c_profile)
+        # 主C培养策略（合成/门禁/数量回补）：纯决策对象，状态机只负责调度；
+        # 模式档案经 Runner 的 resolve_main_c_profile 应用覆盖后传入 profile
+        self._strategy = build_strategy(mode_profile, ctx.main_c, run_config, main_c_profile)
         self._remaining_difficulties = set(coop_difficulties or self._run_config.coop_difficulties)
         self._difficulty_selection_only = difficulty_selection_only
         # 游戏本次会话已手动选过难度：首局招募跳过难度弹窗三步直接抢合作
@@ -156,6 +159,12 @@ class CoopTask(Task):
         # 本会话是否已完成过难度勾选（首局选中或手动选过）；被踢回首页重新
         # 进入招募时不再重复勾选难度（再次点击已选中的难度会取消勾选）
         self._difficulty_done_session = False
+
+        # 模式档案（方案 A）：None = 旧行为（无页签步骤、coop_chat 硬编码、
+        # 结算含点赞宝箱）；正式流程由 Runner 按模式注入
+        self._mode = mode_profile
+        # 页签点击后的去向：首局路径进打开难度弹窗，下一局刷新路径进打开刷新弹窗
+        self._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
 
         self._match_started_at: float | None = None
         self._next_skill_at: float | None = None
@@ -262,6 +271,17 @@ class CoopTask(Task):
         if state == State.SELECT_MAIN_C_SKILLS:
             return self._action_main_c_skills(observation, window_ctx)
         if state == State.HANDLE_RESULT:
+            if not self._like_chest_enabled():
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.3,
+                        verification="immediate",
+                        tag="like_skipped",
+                        reason="保卫宠物结算：跳过点赞",
+                    ),
+                    State.CLAIM_REWARD,
+                )
             return self._hotspot_click(
                 "like",
                 "like_result",
@@ -270,6 +290,17 @@ class CoopTask(Task):
                 window_ctx,
             )
         if state == State.CLAIM_REWARD:
+            if not self._like_chest_enabled():
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.3,
+                        verification="immediate",
+                        tag="claim_skipped",
+                        reason="保卫宠物结算：跳过领宝箱",
+                    ),
+                    State.CHECK_ROUND_LIMIT,
+                )
             # 实机确认：宝箱动画未播完时点返回无响应，领取后稳定等待再进入返回判定
             return self._hotspot_click(
                 "claim_chest",
@@ -384,6 +415,19 @@ class CoopTask(Task):
                 State.FIND_COOP,
                 window_ctx,
             )
+        if self._recruit_step == _RecruitStep.SELECT_MODE_TAB:
+            tab_name = self._mode.entry.mode_tab_hotspot if self._mode else None
+            if not tab_name:
+                # 未配置页签：直接进入页签后的目标步骤（旧行为）
+                self._recruit_step = self._after_tab_step
+                return self._action_recruit_entry(observation, window_ctx)
+            return self._hotspot_click(
+                tab_name,
+                "open_mode_tab",
+                "进入招募：点击模式页签",
+                State.FIND_COOP,
+                window_ctx,
+            )
         if self._recruit_step == _RecruitStep.OPEN_DIFFICULTY_DIALOG:
             return self._hotspot_click(
                 "open_difficulty_dialog",
@@ -405,10 +449,11 @@ class CoopTask(Task):
                 reason_prefix="首次进入招募",
             )
         if self._recruit_step == _RecruitStep.OPEN_COOP_CHAT:
+            chat_hotspot = self._mode.mode_chat_hotspot if self._mode else "coop_chat"
             return self._hotspot_click(
-                "coop_chat",
+                chat_hotspot,
                 "open_coop_chat",
-                "下一局进入招募：点击合作页面聊天",
+                "下一局进入招募：点击模式页面聊天",
                 State.FIND_COOP,
                 window_ctx,
             )
@@ -1669,7 +1714,10 @@ class CoopTask(Task):
         if tag == "open_home_chat":
             self._recruit_step = _RecruitStep.OPEN_RECRUIT
         elif tag == "open_recruit":
-            self._recruit_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
+            self._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
+            self._recruit_step = _RecruitStep.SELECT_MODE_TAB
+        elif tag == "open_mode_tab":
+            self._recruit_step = self._after_tab_step
         elif tag in {"open_difficulty_dialog", "open_refresh_difficulty_dialog"}:
             # 打开点击已发送：进入打开确认步骤（settle → 轮询连续命中标题图）。
             # 首局与下一局刷新共用确认，确认成功后按来源分流到各自后续步骤
@@ -1718,7 +1766,8 @@ class CoopTask(Task):
         elif tag.startswith("scroll_difficulties:"):
             self._difficulty_scroll_count += 1
         elif tag == "open_coop_chat":
-            self._recruit_step = _RecruitStep.OPEN_REFRESH_DIFFICULTY_DIALOG
+            self._after_tab_step = _RecruitStep.OPEN_REFRESH_DIFFICULTY_DIALOG
+            self._recruit_step = _RecruitStep.SELECT_MODE_TAB
         elif tag in {"close_difficulty_dialog", "close_refresh_difficulty_dialog"}:
             # 点击已发送但弹窗未必关住：留在本步骤，等标题图连续不可见才推进
             self._difficulty_close_attempts += 1
@@ -1929,6 +1978,10 @@ class CoopTask(Task):
     def _flag_match(observation: Observation, name: str) -> MatchResult | None:
         value = observation.flag(name, None)
         return value if isinstance(value, MatchResult) else None
+
+    def _like_chest_enabled(self) -> bool:
+        """结算是否执行点赞与领取宝箱（保卫宠物为 False，只点返回）。"""
+        return self._mode is None or self._mode.settlement.like_chest
 
     def _hotspot_click(
         self,
