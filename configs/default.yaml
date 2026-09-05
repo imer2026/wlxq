@@ -80,6 +80,8 @@ run:
   board_recognition_frames: 10
   # 默认主 C：assault 强袭 / monkey 猴子
   default_main_c: assault
+  # 组队对局模式：coop（合作模式）| pet（保卫宠物）；CLI --mode 覆盖本次运行
+  mode: coop
   # 首次进入招募时需要勾选的合作难度（编号指彩虹难度）；按从小到大（如 1→10）依次点击
   coop_difficulties: '1-12'
   # 游戏本次会话已手动选过难度时置 true（或 run --skip-difficulty-selection）：
@@ -279,3 +281,42 @@ hero_classifier:
   # labeled/<英雄>/star1~star4 标注目录。切换 lineup 时改这里即可。
   # 必须是 main_c_profiles 中已定义的英雄标识。
   lineup_others: [angel, snow, death_knight]
+
+# 组队对局模式档案（方案 A）：存 configs/tasks.yaml 里的 hotspot/locator 名与
+# 流程开关；素材本体在 tasks.yaml。详见 docs/superpowers/specs/2026-09-06-pet-defend-mode-design.md
+mode_profiles:
+  coop:
+    display_name: 合作模式
+    mode_chat_hotspot: coop_chat
+    entry:
+      mode_tab_hotspot: recruit_coop_tab
+      difficulty:
+        kind: template
+    match:
+      ready_button: ready_button
+      leave_team: coop_leave_team
+    settlement:
+      like_chest: true
+      return_button: return_button
+    main_c_overrides: {}
+    strategy: default
+
+  pet:
+    display_name: 保卫宠物
+    mode_chat_hotspot: pet_chat
+    entry:
+      mode_tab_hotspot: recruit_pet_tab
+      difficulty:
+        kind: ocr
+        targets: [普通, 中等]
+    match:
+      ready_button: pet_ready_button
+      leave_team: pet_leave_team
+    settlement:
+      like_chest: false
+      return_button: pet_return_button
+    main_c_overrides:
+      assault:
+        # 宠物模式强袭一直选技能到对局结束（2026-09-06 用户确认）
+        skill_selection_cap: 0
+    strategy: default

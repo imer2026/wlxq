@@ -12,13 +12,17 @@ import pytest
 from pydantic import ValidationError
 
 from wlxq_bot.config import (
+    DefaultConfig,
     Hotspot,
+    MainCProfile,
+    ModeProfile,
     RoiConfig,
     RunConfig,
     WindowSpec,
     load_default_config,
     load_tasks_config,
     parse_coop_difficulties,
+    resolve_main_c_profile,
 )
 
 
@@ -254,3 +258,96 @@ hotspots:
 
         with pytest.raises(ValidationError, match="x_ratio"):
             load_tasks_config(cfg_file)
+
+
+class TestModeProfile:
+    """模式档案模型与主C覆盖解析测试。"""
+
+    def _mode(self, **kw) -> ModeProfile:
+        base = dict(
+            display_name="保卫宠物",
+            mode_chat_hotspot="pet_chat",
+            entry={"mode_tab_hotspot": "recruit_pet_tab",
+                   "difficulty": {"kind": "ocr", "targets": ["普通", "中等"]}},
+            match={"ready_button": "pet_ready_button", "leave_team": "pet_leave_team"},
+            settlement={"like_chest": False, "return_button": "pet_return_button"},
+            main_c_overrides={"assault": {"skill_selection_cap": 0}},
+        )
+        base.update(kw)
+        return ModeProfile(**base)
+
+    def _default(self, mode: str = "pet") -> DefaultConfig:
+        return DefaultConfig(
+            run={"mode": mode},
+            main_c_profiles={"assault": MainCProfile(display_name="强袭", hero_template_dir="heroes/assault")},
+            mode_profiles={
+                "coop": ModeProfile(
+                    mode_chat_hotspot="coop_chat",
+                    match={"ready_button": "ready_button", "leave_team": "coop_leave_team"},
+                    settlement={"return_button": "return_button"},
+                ),
+                "pet": self._mode(),
+            },
+        )
+
+    def test_mode_profile_defaults(self) -> None:
+        profile = self._mode()
+        assert profile.entry.difficulty.kind == "ocr"
+        assert profile.entry.difficulty.targets == ["普通", "中等"]
+        assert profile.settlement.like_chest is False
+        assert profile.strategy == "default"
+
+    def test_run_mode_must_exist_in_mode_profiles(self) -> None:
+        with pytest.raises(ValidationError):
+            self._default(mode="not_a_mode")
+
+    def test_ocr_kind_requires_targets(self) -> None:
+        profile = self._mode(entry={"mode_tab_hotspot": None, "difficulty": {"kind": "ocr"}})
+        with pytest.raises(ValidationError):
+            DefaultConfig(
+                run={"mode": "pet"},
+                main_c_profiles={"assault": MainCProfile(display_name="强袭", hero_template_dir="h")},
+                mode_profiles={"pet": profile},
+            )
+
+    def test_main_c_overrides_unknown_hero_rejected(self) -> None:
+        profile = self._mode(main_c_overrides={"ghost": {"skill_selection_cap": 0}})
+        with pytest.raises(ValidationError):
+            DefaultConfig(
+                run={"mode": "pet"},
+                main_c_profiles={"assault": MainCProfile(display_name="强袭", hero_template_dir="h")},
+                mode_profiles={"pet": profile},
+            )
+
+    def test_main_c_overrides_unknown_field_rejected(self) -> None:
+        profile = self._mode(main_c_overrides={"assault": {"no_such_field": 1}})
+        with pytest.raises(ValidationError):
+            DefaultConfig(
+                run={"mode": "pet"},
+                main_c_profiles={"assault": MainCProfile(display_name="强袭", hero_template_dir="h")},
+                mode_profiles={"pet": profile},
+            )
+
+    def test_resolve_main_c_profile_applies_override(self) -> None:
+        cfg = self._default()
+        resolved = resolve_main_c_profile(
+            cfg.main_c_profiles, cfg.mode_profiles["pet"], "assault"
+        )
+        assert resolved.skill_selection_cap == 0
+        # 未覆盖字段继承原档案
+        assert resolved.topup_hero_count == cfg.main_c_profiles["assault"].topup_hero_count
+
+    def test_resolve_main_c_profile_without_override_returns_base(self) -> None:
+        cfg = self._default()
+        resolved = resolve_main_c_profile(
+            cfg.main_c_profiles, cfg.mode_profiles["coop"], "assault"
+        )
+        assert resolved is cfg.main_c_profiles["assault"]
+
+    def test_repo_default_yaml_defines_both_modes(self) -> None:
+        """仓库自带 default.yaml 必须定义 coop/pet 两模式且可加载。"""
+        cfg = load_default_config(Path("configs/default.yaml"))
+        assert set(cfg.mode_profiles) >= {"coop", "pet"}
+        assert cfg.run.mode == "coop"
+        assert cfg.mode_profiles["pet"].entry.difficulty.kind == "ocr"
+        assert cfg.mode_profiles["pet"].main_c_overrides["assault"]["skill_selection_cap"] == 0

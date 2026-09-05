@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -100,6 +100,62 @@ class MainCProfile(BaseModel):
     skill_priority: dict[int, list[str]] = Field(default_factory=dict)
 
 
+class DifficultyProfile(BaseModel):
+    """难度识别方式（模式档案）。"""
+
+    kind: Literal["template", "ocr"] = "template"
+    # ocr 模式的目标难度（行文字子串，如「普通」⊂「保卫宠物-普通」）；配置顺序即点击顺序
+    targets: list[str] = Field(default_factory=list)
+
+
+class EntryProfile(BaseModel):
+    """招募入口差异（模式档案）。"""
+
+    # 进招募后先点的模式页签 hotspot 名（configs/tasks.yaml）；None = 不点
+    mode_tab_hotspot: str | None = None
+    difficulty: DifficultyProfile = Field(default_factory=DifficultyProfile)
+
+
+class MatchProfile(BaseModel):
+    """对局入口/等待差异（模式档案）：值都是 configs/tasks.yaml 的 locator 名。"""
+
+    ready_button: str
+    leave_team: str
+
+
+class SettlementProfile(BaseModel):
+    """结算差异（模式档案）。"""
+
+    # 结算是否点赞并领取宝箱（保卫宠物为 false，只点返回）
+    like_chest: bool = True
+    return_button: str
+
+
+class ModeProfile(BaseModel):
+    """组队对局模式档案：素材名与流程开关；素材本体在 configs/tasks.yaml。"""
+
+    display_name: str = ""
+    # 模式页面聊天按钮（结算返回后 & 退队非首页兜底共用）
+    mode_chat_hotspot: str
+    entry: EntryProfile = Field(default_factory=EntryProfile)
+    match: MatchProfile
+    settlement: SettlementProfile
+    # 主C档案覆盖：键为主C标识，值为 MainCProfile 字段子集（如 skill_selection_cap）
+    main_c_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    strategy: str = "default"
+
+
+def resolve_main_c_profile(
+    profiles: dict[str, MainCProfile], mode: ModeProfile, main_c: str
+) -> MainCProfile:
+    """按模式档案应用主C覆盖；无覆盖时原样返回共享档案实例。"""
+    base = profiles[main_c]
+    overrides = mode.main_c_overrides.get(main_c)
+    if not overrides:
+        return base
+    return MainCProfile.model_validate({**base.model_dump(), **overrides})
+
+
 class SkillCollectionConfig(BaseModel):
     """技能卡自动采集（统计阶段）配置。
 
@@ -139,6 +195,8 @@ class RunConfig(BaseModel):
     summon_recognition_delay_max: float = Field(default=2.0, ge=0.0, le=10.0)
     board_recognition_frames: int = Field(default=10, ge=1, le=60)
     default_main_c: str = "assault"
+    # 组队对局模式：coop（合作模式）| pet（保卫宠物）；CLI --mode 可覆盖
+    mode: str = "coop"
     coop_difficulties: list[int] = Field(default_factory=lambda: list(range(1, 17)))
     # 游戏本次会话已手动选过难度时置 true：首局招募跳过勾选难度等级；
     # 难度弹窗仍开/关一次刷新最新合作邀请
@@ -306,6 +364,7 @@ class DefaultConfig(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     main_c_profiles: dict[str, MainCProfile] = Field(default_factory=dict)
+    mode_profiles: dict[str, ModeProfile] = Field(default_factory=dict)
     hero_classifier: HeroClassifierConfig = Field(default_factory=HeroClassifierConfig)
 
     @model_validator(mode="after")
@@ -318,6 +377,34 @@ class DefaultConfig(BaseModel):
                     f"hero_classifier.lineup_others 引用了未定义的英雄: {unknown}；"
                     f"已知英雄: {sorted(known)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_mode_profiles(self) -> DefaultConfig:
+        if not self.mode_profiles:
+            return self
+        if self.run.mode not in self.mode_profiles:
+            raise ValueError(
+                f"run.mode={self.run.mode!r} 不在 mode_profiles 中: {sorted(self.mode_profiles)}"
+            )
+        for name, profile in self.mode_profiles.items():
+            if profile.entry.difficulty.kind == "ocr" and not profile.entry.difficulty.targets:
+                raise ValueError(
+                    f"mode_profiles.{name}.entry.difficulty.kind=ocr 需要配置 targets"
+                )
+            unknown_heroes = [
+                key for key in profile.main_c_overrides if key not in self.main_c_profiles
+            ]
+            if unknown_heroes:
+                raise ValueError(
+                    f"mode_profiles.{name}.main_c_overrides 引用未定义主C: {unknown_heroes}"
+                )
+            for main_c, overrides in profile.main_c_overrides.items():
+                illegal = sorted(set(overrides) - set(MainCProfile.model_fields))
+                if illegal:
+                    raise ValueError(
+                        f"mode_profiles.{name}.main_c_overrides.{main_c} 含未知字段: {illegal}"
+                    )
         return self
 
 
