@@ -118,6 +118,13 @@ class Task(ABC):
         """
         return None
 
+    def wants_gold_read(self) -> bool:
+        """当前状态是否需要金币感知（召唤/选技能的金币门控）。
+
+        Runner 据此决定是否让识别层读取金币；默认不需要。
+        """
+        return False
+
     def verify_action(
         self,
         action: Action,

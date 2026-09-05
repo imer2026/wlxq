@@ -716,7 +716,7 @@ class TestOtherStates:
         follow_up = task.decide_action(Observation(frame_id=frames + 2), make_window_ctx())
         assert follow_up is not None
         assert follow_up[0].kind == "wait"
-        assert follow_up[0].reason == "等待下一次随机技能检查时间"
+        assert follow_up[0].reason == "等待下一次金币检查"
 
     def test_main_skill_click_failure_schedules_next_attempt(self):
         """局内技能点击重试耗尽后：不中止任务，改为稍后再开技能页重试。"""
@@ -1062,7 +1062,7 @@ class TestOtherStates:
         decision = task.decide_action(Observation(frame_id=1), make_window_ctx())
         assert decision is not None
         assert decision[0].kind == "wait"
-        assert decision[0].reason == "等待下一次随机技能检查时间"
+        assert decision[0].reason == "等待下一次金币检查"
 
     def test_first_cultivation_only_requires_star_level(self):
         """第一阶段（首次培养）：只看 2 星主C，不检查数量，尽早进选技能。"""

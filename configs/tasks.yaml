@@ -142,6 +142,7 @@ locators:
     strategy: template
     template: buttons/xuan_ze_ji_neng.png
     threshold: 0.82
+    roi: skill_page_markers_area
     action_point:
       source: match_center
   # 【请选择1个额外技能】提示条：两个3星合成4星后弹出的赠送技能页（3选1）标识。
@@ -152,14 +153,17 @@ locators:
     strategy: template
     template: skills/4_xing_e_wai_ji_neng.png
     threshold: 0.82
+    roi: skill_page_markers_area
     action_point:
       source: match_center
   # 【召唤】按钮：棋盘上召唤英雄的按钮。进入游戏后若无开局技能、或开局技能已选完
-  # （【选技能】页面消失）则可见，标识已进入/可进入召唤阶段。ROI 待标定；标定前走全图识别。
+  # （【选技能】页面消失）则可见，标识已进入/可进入召唤阶段。ROI 已从实机截图
+  # 离线标定（2026-09-05，三局位置一致）。
   summon_button:
     strategy: template
     template: buttons/zhao_huan.png
     threshold: 0.82
+    roi: summon_button_area
     action_point:
       source: match_center
   # 【天使开局技能】页标识：天使英雄的开局技能页不出现【选技能】图，也没有主C技能图标，
@@ -169,6 +173,16 @@ locators:
     strategy: template
     template: buttons/tian_shi_kai_ju.png
     threshold: 0.82
+    roi: skill_page_markers_area
+    action_point:
+      source: match_center
+  # 【赠送技能】卡片：同一系列技能选满 3 个后赠送的技能展示卡（如穿星折射），
+  # 点击任意位置关闭，处理方式同 Boss 奖励弹窗。仅在选技能阶段识别。
+  zeng_song_ji_neng:
+    strategy: template
+    template: skills/zeng_song_ji_neng.png
+    threshold: 0.82
+    roi: zeng_song_area
     action_point:
       source: match_center
   # 【合作模式】标题图：难度弹窗打开时的稳定标识。2026-08-21 更换为重新采集的
@@ -190,6 +204,7 @@ locators:
     strategy: template
     template: buttons/he_zuo_tui_dui.png
     threshold: 0.82
+    roi: leave_team_area
     action_point:
       source: match_center
   # 【双倍奖励】确认弹窗标识（实机采集 2026-08-16）：结算画面误点「双倍奖励」后弹出，
@@ -198,6 +213,7 @@ locators:
     strategy: template
     template: buttons/shuang_bei.png
     threshold: 0.82
+    roi: double_reward_dialog_area
     action_point:
       source: match_center
   # 【双倍奖励】弹窗的取消按钮：点击匹配中心
@@ -205,6 +221,7 @@ locators:
     strategy: template
     template: buttons/qu_xiao_shuang_bei.png
     threshold: 0.82
+    roi: double_reward_cancel_area
     action_point:
       source: match_center
 
@@ -227,21 +244,48 @@ rois:
     y_ratio: 0.7980
     width_ratio: 0.6295
     height_ratio: 0.1672
-  # 返回按钮 ROI 尚未实测，保持 0x0 并保守退化为全图模板识别；
-  # 不复用准备按钮位置，避免把未确认坐标当作事实。
+  # 返回按钮 ROI，2026-09-05 实机标定（对局结束结算页）
   return_button_area:
     relative_to: client
-    x_ratio: 0.0
-    y_ratio: 0.0
-    width_ratio: 0.0
-    height_ratio: 0.0
-  # 关闭弹窗按钮 ROI，标定自 923×1723 客户区（wlxq-bot pick --rect）
+    x_ratio: 0.5027
+    y_ratio: 0.8888
+    width_ratio: 0.4056
+    height_ratio: 0.0955
+  # 双倍奖励弹窗标识 ROI，2026-09-05 实机标定
+  double_reward_dialog_area:
+    relative_to: client
+    x_ratio: 0.0777
+    y_ratio: 0.3596
+    width_ratio: 0.8166
+    height_ratio: 0.1372
+  # 双倍奖励取消按钮 ROI，2026-09-05 实机标定
+  double_reward_cancel_area:
+    relative_to: client
+    x_ratio: 0.0863
+    y_ratio: 0.5211
+    width_ratio: 0.3981
+    height_ratio: 0.1048
+  # 赠送技能卡片标识（卡片左上装饰），2026-09-05 实机标定
+  zeng_song_area:
+    relative_to: client
+    x_ratio: 0.2611
+    y_ratio: 0.2449
+    width_ratio: 0.2352
+    height_ratio: 0.0921
+  # 退队按钮 ROI，2026-09-05 实机标定（组队大厅）
+  leave_team_area:
+    relative_to: client
+    x_ratio: 0.5102
+    y_ratio: 0.7012
+    width_ratio: 0.3549
+    height_ratio: 0.1146
+  # 关闭弹窗按钮 ROI，2026-09-05 实机重新标定（击杀 Boss 奖励弹窗的提示条）
   tan_chuang_area:
     relative_to: client
-    x_ratio: 0.2914
-    y_ratio: 0.7766
-    width_ratio: 0.4106
-    height_ratio: 0.0929
+    x_ratio: 0.3247
+    y_ratio: 0.7887
+    width_ratio: 0.3506
+    height_ratio: 0.0625
 
   # 技能三候选区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
   skill_candidates:
@@ -257,6 +301,46 @@ rois:
     y_ratio: 0.5665
     width_ratio: 0.4930
     height_ratio: 0.2914
+
+  # 金币感知三区域，标定自 927×1727 客户区（2026-09-05 实机截图）。
+  # 供回补召唤与付费选技能的金币门控；只框数字本身，不含图标。
+  # 现有金币（左下金币徽章的数字，如 764 / 1.3K）
+  gold_current_area:
+    relative_to: client
+    x_ratio: 0.2891
+    y_ratio: 0.8431
+    width_ratio: 0.1036
+    height_ratio: 0.0266
+  # 选技能费用（左下按钮下方数字，如 100 / 1.8K；红色=买不起）
+  skill_cost_area:
+    relative_to: client
+    x_ratio: 0.2621
+    y_ratio: 0.9757
+    width_ratio: 0.1381
+    height_ratio: 0.0208
+  # 召唤费用（右下按钮下方数字，如 80 / 515；红色=买不起）
+  summon_cost_area:
+    relative_to: client
+    x_ratio: 0.5858
+    y_ratio: 0.9757
+    width_ratio: 0.1273
+    height_ratio: 0.0208
+  # 召唤按钮区域，2026-09-05 从实机截图离线标定（三局位置一致，命中 0.965+）
+  summon_button_area:
+    relative_to: client
+    x_ratio: 0.5609
+    y_ratio: 0.8859
+    width_ratio: 0.1942
+    height_ratio: 0.1100
+
+  # 技能页三个页面标志的公共识别带（请选择 / 请选择1个额外技能 / 天使20级效果）
+  # 2026-09-05 实机标定
+  skill_page_markers_area:
+    relative_to: client
+    x_ratio: 0.0831
+    y_ratio: 0.1471
+    width_ratio: 0.8177
+    height_ratio: 0.1297
 
   # 废弃字段：棋盘搜索范围现由格子模型（board.helper/initiator）的包围盒计算，
   # 不再使用 bottom_*_board。保留占位仅为兼容旧配置加载，标定与否都不影响识别。
@@ -326,6 +410,13 @@ skill_collection:
   column_inset_ratio: 0.04
   # 列裁剪顶部修剪比例：技能 ROI 顶端可能飘入战斗伤害数字，裁掉防误当技能名
   top_trim_ratio: 0.06
+
+# 金币感知（回补召唤/付费选技能的金币门控）：读取 rois 的
+# gold_current_area / skill_cost_area / summon_cost_area 三个数字区域。
+# 三个 ROI 全部标定才会启用；读取结果存入 Observation.raw_data['gold']
+gold_recognition:
+  # 两次读取的最小间隔（秒）：金币变化缓慢，控制小 ROI OCR 的频率
+  read_min_interval_seconds: 1.0
 
 # 英雄模板配置
 heroes:

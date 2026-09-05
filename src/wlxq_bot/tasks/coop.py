@@ -833,6 +833,11 @@ class CoopTask(Task):
                     "opening_skill_candidate",
                     State.SELECT_OPENING_SKILLS,
                 )
+            priority_action = self._skill_priority_action(
+                observation, "opening_skill_priority", State.SELECT_OPENING_SKILLS
+            )
+            if priority_action is not None:
+                return priority_action
             if observation.flag("tian_shi_kai_ju_visible"):
                 return self._skill_fallback_action(
                     "opening_angel_skill_fallback",
@@ -986,6 +991,21 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         # 局内技能选择总次数达到档案上限：不再花金币选技能，等对局结束进结算
         # （返回按钮由状态优先级接管）
+        # 赠送技能卡片优先关闭：同系列技能选满 3 个触发（开局 3 技能不触发），
+        # 点击任意位置关闭，处理方式同 Boss 奖励弹窗
+        bonus_match = self._flag_match(observation, "zeng_song_ji_neng_match")
+        if observation.flag("zeng_song_ji_neng_visible") and bonus_match is not None:
+            return (
+                Action(
+                    kind="click",
+                    target=bonus_match.position,
+                    duration=0.08,
+                    verification="next_frame",
+                    tag="close_bonus_popup",
+                    reason="同系列技能选满触发的赠送技能卡片，点击关闭",
+                ),
+                State.SELECT_MAIN_C_SKILLS,
+            )
         cap = self._strategy.skill_selection_cap
         if cap > 0 and self._main_skill_selections_total >= cap:
             return (
@@ -1022,6 +1042,11 @@ class CoopTask(Task):
             self._schedule_next_skill(now)
 
         if self._awaiting_main_candidates:
+            priority_action = self._skill_priority_action(
+                observation, "main_skill_priority", State.SELECT_MAIN_C_SKILLS
+            )
+            if priority_action is not None:
+                return priority_action
             if observation.skill_candidates:
                 return self._choose_skill_action(
                     observation.skill_candidates,
@@ -1085,7 +1110,36 @@ class CoopTask(Task):
                     kind="wait",
                     duration=min(1.0, self._next_skill_at - now),
                     verification="immediate",
-                    reason="等待下一次随机技能检查时间",
+                    reason="等待下一次金币检查",
+                ),
+                State.SELECT_MAIN_C_SKILLS,
+            )
+
+        # 付费选技能金币门控：金币不足时不点（游戏会忽略该点击），短等后重查。
+        # 金币信息缺失（未读取/OCR 失败）时放行，保持原有行为。
+        gold = observation.raw_data.get("gold")
+        if gold is not None:
+            affordable = self._can_afford(gold, "skill")
+            logger.info(
+                "选技能金币检查：现有 %s，需要 %s → %s",
+                gold.get("current"),
+                gold.get("skill_cost"),
+                "可以点" if affordable else "买不起，等待恢复",
+            )
+        if gold is not None and not self._can_afford(gold, "skill"):
+            # 付不起：等待金币恢复（击杀回金），等待时长即检查间隔
+            wait_for = self._run_config.gold_check_interval_seconds
+            self._next_skill_at = self._clock() + wait_for
+            return (
+                Action(
+                    kind="wait",
+                    duration=wait_for,
+                    verification="immediate",
+                    tag="skill_gold_wait",
+                    reason=(
+                        f"金币不足等待恢复：现有 {gold.get('current')} "
+                        f"< 选技能 {gold.get('skill_cost')}"
+                    ),
                 ),
                 State.SELECT_MAIN_C_SKILLS,
             )
@@ -1114,6 +1168,64 @@ class CoopTask(Task):
                 verification="next_frame",
                 tag=tag,
                 reason=f"识别到主C技能图标，点击其一（共 {len(candidates)} 个）",
+            ),
+            to_state,
+        )
+
+    def wants_gold_read(self) -> bool:
+        """需要金币感知的状态：选技能阶段、以及开局 5 连召之后的培养/回补召唤。
+
+        开局 5 连召不读金币（无门控、直接点）。
+        """
+        if self.ctx.current_state == State.SELECT_MAIN_C_SKILLS:
+            return True
+        if self.ctx.current_state == State.BUILD_MAIN_C:
+            # 开局 5 连召阶段无门控,不读;解锁技能系统后的召唤才有金币门控
+            return self._summon_count >= self._run_config.minimum_summon_count_before_skills
+        return False
+
+    @staticmethod
+    def _can_afford(gold: dict, cost_key: str) -> bool:
+        """判断金币是否够付某项费用。
+
+        红色(游戏自身的买不起信号)直接判负；数值缺失时视为付得起
+        （调用方在金币信息缺失时应保持原有行为）。
+        """
+        if gold.get(f"{cost_key}_red"):
+            return False
+        current = gold.get("current")
+        cost = gold.get(f"{cost_key}_cost")
+        if current is None or cost is None:
+            return True
+        return current >= cost
+
+    def _skill_priority_action(
+        self,
+        observation: Observation,
+        tag: str,
+        to_state: State,
+    ) -> tuple[Action, State] | None:
+        """按主C优先级档位选卡（感知层标题 OCR 主路径）。
+
+        感知层在标题 OCR 成功时在 raw_data 给出每张卡的技能名/档位/点击
+        位置；取最小档，同档内随机点一张。未配置优先级、本帧无 OCR 结果
+        时返回 None，走原有图标识别/随机兜底流程。
+        """
+        options = observation.raw_data.get("skill_card_options")
+        if not options:
+            return None
+        best_tier = min(option["tier"] for option in options)
+        pool = [option for option in options if option["tier"] == best_tier]
+        chosen = self._rng.choice(pool)
+        names = "、".join(str(option["name"]) for option in pool)
+        return (
+            Action(
+                kind="click",
+                target=tuple(chosen["position"]),
+                duration=0.08,
+                verification="next_frame",
+                tag=tag,
+                reason=f"按优先级第 {best_tier} 档选卡：{chosen['name']}（同档候选：{names}）",
             ),
             to_state,
         )
@@ -1244,6 +1356,11 @@ class CoopTask(Task):
             or observation.flag("select_skill_button_visible")
             or observation.skill_candidates
         ):
+            priority_action = self._skill_priority_action(
+                observation, "merge_gift_skill_priority", State.BUILD_MAIN_C
+            )
+            if priority_action is not None:
+                return priority_action
             if observation.skill_candidates:
                 return self._choose_skill_action(
                     observation.skill_candidates,
@@ -1308,6 +1425,30 @@ class CoopTask(Task):
                 State.BUILD_MAIN_C,
             )
         self._empty_board_count = 0
+
+        # 召唤金币门控（开局 5 连召之外的所有召唤）：费用不足时原地等待金币
+        # 恢复（击杀回金），一直等到够或对局自然结束——不设上限、不放弃回补
+        # （2026-09-05 定案）。放在无进展检查之前：等待本身不算停滞，重置
+        # 无进展计数，避免等待期间误触保守停止。
+        # 金币信息缺失（未读取/OCR 失败）时不拦截，保持原有行为。
+        gold = observation.raw_data.get("gold")
+        if gold is not None and not self._can_afford(gold, "summon"):
+            self._no_progress_count = 0
+            self._last_board_signature = None
+            return (
+                Action(
+                    kind="wait",
+                    duration=self._run_config.gold_check_interval_seconds,
+                    verification="immediate",
+                    tag="summon_gold_wait",
+                    reason=(
+                        f"召唤金币不足，等待恢复：现有 {gold.get('current')} "
+                        f"< 召唤 {gold.get('summon_cost')}"
+                        + ("（回补阶段，等待后继续回补）" if self._topup_active else "")
+                    ),
+                ),
+                State.BUILD_MAIN_C,
+            )
 
         signature = self._board_signature(board)
         if signature == self._last_board_signature:
@@ -1384,6 +1525,12 @@ class CoopTask(Task):
         point = self._hotspot_point("add_hero", window_ctx)
         if point is None:
             return None
+        reason = "无合法合成对，召唤1个英雄"
+        if gold is not None:
+            reason += (
+                f"（金币：现有 {gold.get('current')} / "
+                f"召唤需 {gold.get('summon_cost')}）"
+            )
         return (
             Action(
                 kind="click",
@@ -1395,7 +1542,7 @@ class CoopTask(Task):
                 ),
                 verification="next_frame",
                 tag="summon_hero",
-                reason="无合法合成对，召唤1个英雄",
+                reason=reason,
             ),
             State.BUILD_MAIN_C,
         )
@@ -1428,6 +1575,9 @@ class CoopTask(Task):
             return not after.flag("ready_button_visible")
         if action.tag == "close_popup":
             return not after.flag("tan_chuang_visible")
+        if action.tag == "close_bonus_popup":
+            # 以赠送技能卡片标识消失确认已关闭
+            return not after.flag("zeng_song_ji_neng_visible")
         if action.tag == "close_double_reward":
             # 以双倍奖励弹窗标识消失确认已取消
             return not after.flag("double_reward_dialog_visible")
@@ -1458,6 +1608,37 @@ class CoopTask(Task):
         if action.tag == "leave_team":
             # 以【退队】按钮消失确认已退出组队大厅
             return not after.flag("leave_team_visible")
+        if action.tag in {
+            "opening_skill_priority",
+            "main_skill_priority",
+            "merge_gift_skill_priority",
+        }:
+            # 选满档位的最后一次点击直接信任:选满后不存在下一组,页面关闭
+            # 与否无需逐帧等待;若点击未生效,页面保持打开,任务层会再走
+            # 随机兜底补选,不会卡死
+            if (
+                action.tag == "opening_skill_priority"
+                and self._opening_skill_selections + 1
+                >= self._run_config.opening_skill_max_selections
+            ):
+                return True
+            # 同页换组:选完一张后下一组技能页立即弹出,页面未关但卡面(技能
+            # 名)已变,选卡同样生效。卡面未变=点击未生效,交给重试
+            if page_closed := (
+                before.flag("select_skill_button_visible")
+                or before.flag("merge_gift_skill_page_visible")
+            ) and not (
+                after.flag("select_skill_button_visible")
+                or after.flag("merge_gift_skill_page_visible")
+            ):
+                return True
+            before_options = before.raw_data.get("skill_card_options")
+            after_options = after.raw_data.get("skill_card_options")
+            return (
+                before_options is not None
+                and after_options is not None
+                and before_options != after_options
+            )
         if action.tag in {
             "opening_skill_candidate",
             "opening_skill_fallback",
@@ -1572,6 +1753,7 @@ class CoopTask(Task):
             "opening_skill_candidate",
             "opening_skill_fallback",
             "opening_angel_skill_fallback",
+            "opening_skill_priority",
         }:
             # 开局每选一次（命中或兜底）都重置空识别计数，给页面刷新/下一组技能留时间
             self._opening_empty_checks = 0
@@ -1615,13 +1797,17 @@ class CoopTask(Task):
             self._main_skill_empty_checks += 1
         elif tag == "main_skill_page_missing_check":
             self._main_page_missing_checks += 1
-        elif tag in {"main_skill_candidate", "main_skill_fallback"}:
+        elif tag in {"main_skill_candidate", "main_skill_fallback", "main_skill_priority"}:
             self._awaiting_main_candidates = False
             self._main_page_missing_checks = 0
             self._main_skill_selections += 1
             self._main_skill_selections_total += 1
             self._schedule_next_skill(self._clock())
-        elif tag in {"merge_gift_skill_candidate", "merge_gift_skill_fallback"}:
+        elif tag in {
+            "merge_gift_skill_candidate",
+            "merge_gift_skill_fallback",
+            "merge_gift_skill_priority",
+        }:
             # 赠送技能页选卡完成、页面关闭：结束 3 星合并后的等待状态
             self._awaiting_merge_gift = False
             self._merge_gift_settled = False
@@ -1635,7 +1821,7 @@ class CoopTask(Task):
     def on_action_failed(self, action: Action) -> None:
         """动作重试耗尽、Runner 放弃该动作时调整内部进度，均不结束任务。"""
         tag = action.tag
-        if tag in {"main_skill_candidate", "main_skill_fallback"}:
+        if tag in {"main_skill_candidate", "main_skill_fallback", "main_skill_priority"}:
             # 本次局内选技能未生效：停止等待图标，按随机间隔稍后重新打开技能页
             self._awaiting_main_candidates = False
             self._main_skill_empty_checks = 0
@@ -1645,6 +1831,7 @@ class CoopTask(Task):
             "opening_skill_candidate",
             "opening_skill_fallback",
             "opening_angel_skill_fallback",
+            "opening_skill_priority",
         }:
             # 开局技能点击多次未生效：不再盲点，等页面变化后再重新尝试选择
             self._opening_clicks_blocked = True
@@ -1669,14 +1856,8 @@ class CoopTask(Task):
     # ------------------------------------------------------------------
 
     def _schedule_next_skill(self, now: float) -> None:
-        elapsed = 0.0 if self._match_started_at is None else now - self._match_started_at
-        if elapsed < self._run_config.skill_late_after_seconds:
-            low = self._run_config.skill_early_interval_min
-            high = self._run_config.skill_early_interval_max
-        else:
-            low = self._run_config.skill_late_interval_min
-            high = self._run_config.skill_late_interval_max
-        self._next_skill_at = now + self._rng.uniform(low, high)
+        """下次金币检查时间：按金币检查间隔固定节奏，不再随机抖动。"""
+        self._next_skill_at = now + self._run_config.gold_check_interval_seconds
 
     def _reset_for_next_round(self) -> None:
         self._reset_for_home_reentry()

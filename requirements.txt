@@ -10,3 +10,5 @@ pillow>=10.0
 pywin32>=306
 pyautogui>=0.9.54
 rich>=13.7
+# 技能标题识别（选卡优先级）与离线建册 OCR
+rapidocr-onnxruntime>=1.3

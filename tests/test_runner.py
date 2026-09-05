@@ -108,6 +108,7 @@ class FakePerception:
         frame,
         hint_state=State.UNKNOWN,
         observation_mode=None,
+        read_gold=False,
     ):
         self.observe_count += 1
         self.observation_modes.append(observation_mode)
@@ -115,7 +116,7 @@ class FakePerception:
             return self._obs
         return replace(self._obs, frame_id=ctx.frame_id)
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
         """培养阶段多帧累积的 fake：直接返回预设 observation。"""
         self.observe_count += 1
         self.cultivation_n_frames.append(n_frames)
@@ -603,7 +604,7 @@ class TestLoopStopConditions:
                 )
                 self._gone = Observation(frame_id=2)
 
-            def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None):
+            def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None, read_gold=False):
                 self.observe_count += 1
                 self.observation_modes.append(observation_mode)
                 return self._button if self.observe_count == 1 else self._gone
@@ -635,7 +636,11 @@ class TestLoopStopConditions:
         ctx = TaskContext(main_c="assault", max_rounds=1)
         ctx.round_count = 1
         ctx.current_state = State.CHECK_ROUND_LIMIT
-        run_cfg = RunConfig(max_rounds=1, minimum_summon_count_before_skills=2)
+        run_cfg = RunConfig(
+            max_rounds=1,
+            minimum_summon_count_before_skills=2,
+            error_restart_enabled=False,
+        )
         task = CoopTask(
             ctx, run_cfg, CoopRole.HELPER, {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)}
         )
@@ -652,7 +657,7 @@ class TestLoopStopConditions:
         assert screen.capture_count == 1
 
     def test_stops_when_decide_action_none(self):
-        """decide_action 返回 None 时保守停止。"""
+        """decide_action 返回 None：自动重开关闭时保守停止。"""
         from wlxq_bot.config import Hotspot, RunConfig
         from wlxq_bot.models import CoopRole
         from wlxq_bot.tasks.base import TaskContext
@@ -660,7 +665,7 @@ class TestLoopStopConditions:
 
         ctx = TaskContext(main_c="assault", max_rounds=10)
         ctx.current_state = State.UNKNOWN  # decide_action 返回 None
-        run_cfg = RunConfig()
+        run_cfg = RunConfig(error_restart_enabled=False)
         task = CoopTask(
             ctx, run_cfg, CoopRole.HELPER, {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)}
         )
@@ -673,6 +678,41 @@ class TestLoopStopConditions:
         final = make_runner()._run_loop(screen, perception, executor, task, safety, 1, max_steps=10)
         assert final == State.UNKNOWN
         assert len(executor.actions) == 0
+
+    def test_decide_action_none_recovers_in_place_then_stops_at_budget(self, caplog):
+        """回归：decide None 时原地继续识别（默认 3 次），预算耗尽才停止。
+
+        实机 2026-09-05 需求：识别出错不退出，原地重新识别继续对局。
+        """
+        import logging
+
+        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.models import CoopRole
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import CoopTask
+
+        ctx = TaskContext(main_c="assault", max_rounds=10)
+        ctx.current_state = State.UNKNOWN  # decide_action 返回 None
+        run_cfg = RunConfig()  # error_restart_enabled=True, max=3
+        task = CoopTask(
+            ctx, run_cfg, CoopRole.HELPER, {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)}
+        )
+
+        screen = FakeScreen(make_window_ctx())
+        perception = FakePerception(Observation(frame_id=1))
+        executor = FakeExecutor()
+        safety = SafetyGuard(max_failures=3, frame_ttl_ms=5000)
+
+        with caplog.at_level(logging.WARNING, logger="wlxq_bot.runner"):
+            final = make_runner()._run_loop(
+                screen, perception, executor, task, safety, 1, max_steps=100
+            )
+        assert final == State.UNKNOWN  # 原地恢复不重置状态
+        assert len(executor.actions) == 0
+        recoveries = sum(
+            1 for r in caplog.records if "原地继续识别" in r.getMessage()
+        )
+        assert recoveries == 3
 
     def test_stops_on_stop_requested(self):
         from wlxq_bot.config import Hotspot, RunConfig
@@ -741,6 +781,9 @@ class TestLoopStopConditions:
 
             def observation_mode(self):
                 return None
+
+            def wants_gold_read(self):
+                return False
 
             def determine_state(self, observation):
                 return self.ctx.current_state
@@ -992,12 +1035,45 @@ class TestStaleDecision:
         assert "连续失败达上限" not in messages
 
     def test_stale_decision_stops_after_limit(self, caplog):
-        """截图持续超龄（本机无法在时效内完成识别到动作）：达到上限保守停止。"""
+        """截图持续超龄（本机无法在时效内完成识别到动作）：自动重开关闭时保守停止。"""
         import logging
 
         from wlxq_bot.config import Hotspot, RunConfig
         from wlxq_bot.models import CoopRole
-        from wlxq_bot.runner import _MAX_STALE_DECISIONS
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import CoopTask
+
+        ctx = TaskContext(main_c="assault", max_rounds=10)
+        ctx.current_state = State.BUILD_MAIN_C
+        task = CoopTask(
+            ctx,
+            RunConfig(error_restart_enabled=False),
+            CoopRole.HELPER,
+            {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)},
+        )
+        executor = FakeExecutor()
+        screen = FakeScreen(make_window_ctx(), stale_age=10.0)
+
+        with caplog.at_level(logging.WARNING, logger="wlxq_bot.runner"):
+            final = make_runner()._run_loop(
+                screen,
+                FakePerception(Observation(frame_id=1)),
+                executor,
+                task,
+                SafetyGuard(max_failures=3, frame_ttl_ms=3000),
+                1,
+                max_steps=100,
+            )
+
+        assert final == State.BUILD_MAIN_C
+        assert executor.actions == []
+
+    def test_stale_decision_recovers_then_stops_at_budget(self, caplog):
+        """回归：截图持续超龄时原地继续识别（默认 3 次），预算耗尽才停止。"""
+        import logging
+
+        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.models import CoopRole
         from wlxq_bot.tasks.base import TaskContext
         from wlxq_bot.tasks.coop import CoopTask
 
@@ -1019,12 +1095,12 @@ class TestStaleDecision:
                 1,
                 max_steps=100,
             )
-
         assert final == State.BUILD_MAIN_C
         assert executor.actions == []
-        assert screen.capture_count == _MAX_STALE_DECISIONS
-        messages = " ".join(record.getMessage() for record in caplog.records)
-        assert "无法在时效内完成" in messages
+        recoveries = sum(
+            1 for r in caplog.records if "原地继续识别" in r.getMessage()
+        )
+        assert recoveries == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1214,12 +1290,12 @@ class TestCultivationLoop:
                 self.observe_count = 0
                 self.observations = []
 
-            def observe(self, c, f, hint, observation_mode=None):
+            def observe(self, c, f, hint, observation_mode=None, read_gold=False):
                 obs = self.observations[min(self.observe_count, len(self.observations) - 1)]
                 self.observe_count += 1
                 return replace(obs, frame_id=c.frame_id)
 
-            def observe_cultivation(self, screen, handle, ctx, n_frames=10):
+            def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
                 obs = self.observations[min(self.observe_count, len(self.observations) - 1)]
                 self.observe_count += 1
                 return ctx, replace(obs, frame_id=ctx.frame_id)
@@ -1265,7 +1341,7 @@ class _PopupPerception:
         self._popup_frames = popup_frames
         self.observe_count = 0
 
-    def observe(self, c, f, hint, observation_mode=None):
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False):
         self.observe_count += 1
         raw = (
             {"tan_chuang_visible": True, "tan_chuang_match": self._popup_match}
@@ -1274,7 +1350,7 @@ class _PopupPerception:
         )
         return replace(Observation(frame_id=c.frame_id, raw_data=raw), frame_id=c.frame_id)
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
         obs = self.observe(ctx, None, State.BUILD_MAIN_C)
         return ctx, obs
 
@@ -1292,12 +1368,20 @@ def _make_popup_task():
 
 class TestClosePopupRetry:
     def test_popup_retry_budget_exhausted_stops(self):
-        """弹窗始终关不掉时重试 close_popup_max_retries 次后才保守停止。"""
+        """弹窗始终关不掉时重试 close_popup_max_retries 次后保守停止。
+
+        自动重开会重置弹窗重试预算，因此本用例关闭自动重开以保持原语义；
+        重开行为由 test_stale_decision_recovers_then_stops_at_budget 覆盖。
+        """
         from wlxq_bot.config import RunConfig
 
         runner = Runner(
             default_config=DefaultConfig(
-                run=RunConfig(action_verify_frames=1, close_popup_max_retries=4)
+                run=RunConfig(
+                    action_verify_frames=1,
+                    close_popup_max_retries=4,
+                    error_restart_enabled=False,
+                )
             ),
             tasks_config=TasksConfig(),
         )
@@ -1383,10 +1467,10 @@ class _MergeBoardPerception:
         self.observe_count += 1
         return replace(obs, frame_id=ctx.frame_id)
 
-    def observe(self, c, f, hint, observation_mode=None):
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False):
         return self._next(c)
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
         return ctx, self._next(ctx)
 
 
@@ -1547,7 +1631,7 @@ class _OpeningSkillPagePerception:
     def __init__(self) -> None:
         self.observe_count = 0
 
-    def observe(self, c, f, hint, observation_mode=None):
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False):
         self.observe_count += 1
         from wlxq_bot.models import SkillCandidate
 
@@ -1557,7 +1641,7 @@ class _OpeningSkillPagePerception:
             skill_candidates=[SkillCandidate("assault", (100, 100), 0.9)],
         )
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
         return ctx, self.observe(ctx, None, None)
 
 

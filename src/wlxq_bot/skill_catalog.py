@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -422,3 +423,98 @@ def _load_existing_skills(catalog_path: Path) -> dict[str, Any]:
         raise ValueError(f"技能清单 YAML 无法解析: {catalog_path}") from exc
     skills = data.get("skills") if isinstance(data, dict) else None
     return skills if isinstance(skills, dict) else {}
+
+
+def load_skill_name_index(catalog_path: Path) -> dict[str, str]:
+    """读取清单为 {技能名: 英雄名} 索引；unknown 节(英雄未知)跳过。"""
+    skills = _load_existing_skills(catalog_path)
+    index: dict[str, str] = {}
+    for hero, entries in skills.items():
+        if hero == UNKNOWN_SECTION or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name"):
+                index[str(entry["name"])] = str(hero)
+    return index
+
+
+def compute_skill_tiers(
+    priority_cfg: dict[int, list[str]],
+    name_to_hero: dict[str, str],
+    main_c_hero: str,
+) -> dict[str, int]:
+    """按主C的优先级配置计算 {技能名: 档位}。
+
+    - 配置里的 1~7/9/10 档为显式数组;第 8、11 档启动时自动计算,配置了也会
+      被忽略(打警告)
+    - 第 8 档 = 主C(强袭)清单里未被显式档覆盖的技能——主C技能永不落第 11 档
+    - 第 11 档 = 清单里其余技能
+    - 配置里清单查不到的名字保留生效并打警告(防手滑写错字)
+    """
+    tier_of: dict[str, int] = {}
+    for tier, names in sorted(priority_cfg.items()):
+        tier = int(tier)
+        if tier in (8, 11):
+            logger.warning(
+                "skill_priority 第 %d 档为启动时自动计算,配置中的 %s 将被忽略", tier, names
+            )
+            continue
+        if not 1 <= tier <= 11:
+            logger.warning("skill_priority 档位 %d 超出 1~11,忽略: %s", tier, names)
+            continue
+        for name in names:
+            name = str(name).strip()
+            if not name:
+                continue
+            if name not in name_to_hero:
+                logger.warning("skill_priority 中的技能 %r 不在技能清单里,请核对拼写", name)
+            tier_of[name] = tier
+    for name, hero in name_to_hero.items():
+        if name in tier_of:
+            continue
+        tier_of[name] = 8 if hero == main_c_hero else 11
+    return tier_of
+
+
+def _new_skills_header() -> str:
+    return (
+        "# 运行时采集到的未收录技能:确认后手动补进 configs/skills.yaml。\n"
+        "# 同名(含模糊相似)只记一条;重复遇到会更新 last_seen。\n"
+    )
+
+
+def record_new_skill(
+    root: Path,
+    name: str,
+    description: str,
+    now: datetime | None = None,
+) -> bool:
+    """把未收录技能追加到 root/new_skills.yaml(按名称模糊去重)。
+
+    Returns:
+        True 表示新记录了一条;False 表示已存在(同名或模糊相似)被跳过。
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "new_skills.yaml"
+    entries: list[dict[str, Any]] = []
+    if path.is_file():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"new_skills.yaml 无法解析: {path}") from exc
+        loaded = data.get("new_skills") if isinstance(data, dict) else None
+        if isinstance(loaded, list):
+            entries = [entry for entry in loaded if isinstance(entry, dict)]
+    if find_fuzzy_match(name, entries) is not None:
+        return False
+    stamp = (now or datetime.now()).isoformat(timespec="seconds")
+    entries.append(
+        {"name": name, "description": description, "first_seen": stamp, "last_seen": stamp}
+    )
+    body = yaml.safe_dump(
+        {"new_skills": entries}, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+    path.write_text(_new_skills_header() + body, encoding="utf-8")
+    logger.info("发现未收录技能,已记录 name=%s desc=%.40s", name, description)
+    return True

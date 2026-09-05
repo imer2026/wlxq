@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -46,6 +48,7 @@ from wlxq_bot.perception.locator import (
 )
 from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
+from wlxq_bot.skill_catalog import find_fuzzy_match, record_new_skill
 from wlxq_bot.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -72,6 +75,8 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
     ("ready_button", "ready_button_visible", "ready_button_match"),
     ("return_button", "return_button_visible", "return_button_match"),
     ("tan_chuang", "tan_chuang_visible", "tan_chuang_match"),
+    # 同系列技能选满 3 个触发的赠送技能卡片（点击关闭，见 SELECT_MAIN_C_SKILLS）
+    ("zeng_song_ji_neng", "zeng_song_ji_neng_visible", "zeng_song_ji_neng_match"),
     # 进入游戏后的两种开局标识：先「选择技能」再「召唤」，二者互斥，
     # 出现其一即确认对局界面已稳定及其开局类型（见 CoopTask._action_opening_skills）。
     ("select_skill_button", "select_skill_button_visible", "select_skill_button_match"),
@@ -101,7 +106,9 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
             "return_button",
         }
     ),
-    State.SELECT_MAIN_C_SKILLS: frozenset({"select_skill_button", "tan_chuang", "return_button"}),
+    State.SELECT_MAIN_C_SKILLS: frozenset(
+        {"select_skill_button", "tan_chuang", "return_button", "zeng_song_ji_neng"}
+    ),
     State.HANDLE_RESULT: frozenset({"return_button"}),
     State.CLAIM_REWARD: frozenset({"return_button"}),
     State.CHECK_ROUND_LIMIT: frozenset({"return_button"}),
@@ -132,6 +139,11 @@ class CoopPerception:
         hero_cell_classifier: HeroCellClassifier | None = None,
         allowed_heroes: set[str] | None = None,
         skill_collector: SkillCollector | None = None,
+        title_reader: Any | None = None,
+        skill_tiers: dict[str, int] | None = None,
+        new_skill_dir: Path | None = None,
+        gold_reader: Any | None = None,
+        gold_read_interval: float = 1.0,
     ) -> None:
         self._vision = vision
         self._pack = template_pack
@@ -166,6 +178,19 @@ class CoopPerception:
         # 技能卡采集器（统计阶段可选）：observe 契约为永不抛异常、永不阻塞，
         # 采集结果只落盘不影响任何业务决策
         self._skill_collector = skill_collector
+        # 技能标题 OCR 主路径（可选）：配置了优先级档位时，技能页用一次横带
+        # OCR 读出三张卡的技能名，产出 skill_card_options 交给任务层按档位
+        # 选卡；标题未读出时回退到图标识别。tier 索引的模糊匹配条目预构建
+        self._title_reader = title_reader
+        self._skill_tiers = skill_tiers or {}
+        self._tier_name_entries = [{"name": name} for name in self._skill_tiers]
+        self._new_skill_dir = new_skill_dir
+        # 金币感知（按需）：仅在任务层声明需要时读取（回补召唤/付费选技能
+        # 门控），最小间隔内复用上次结果；其他状态零开销
+        self._gold_reader = gold_reader
+        self._gold_read_interval = max(0.0, gold_read_interval)
+        self._last_gold_read = float("-inf")
+        self._last_gold_info: dict[str, Any] | None = None
 
     @property
     def available_heroes(self) -> list[str]:
@@ -180,6 +205,7 @@ class CoopPerception:
         frame: Any,
         hint_state: State = State.UNKNOWN,
         observation_mode: str | None = None,
+        read_gold: bool = False,
     ) -> Observation:
         """对一帧截图做识别，返回 Observation。
 
@@ -188,6 +214,8 @@ class CoopPerception:
             frame: 截图帧（BGR ndarray）
             hint_state: 上一轮状态，用于决定是否做棋盘专项识别
             observation_mode: 任务内部步骤要求的专项识别模式
+            read_gold: 当前是否需要金币感知（任务层 wants_gold_read 声明）；
+                按最小间隔读取，间隔内复用上次结果
 
         Returns:
             Observation，界面标志存 raw_data，培养阶段附带 board 快照
@@ -214,6 +242,28 @@ class CoopPerception:
             matches,
             observation_mode=observation_mode,
         )
+        # 金币感知（按需）：仅任务层声明需要（回补召唤/付费选技能门控）时读取。
+        # 技能页/赠送页已打开时金币已支付，读了也无意义——跳过，把帧时间让给标题 OCR
+        page_open = any(
+            raw_data.get(flag)
+            for flag in (
+                "select_skill_button_visible",
+                "merge_gift_skill_page_visible",
+                "tian_shi_kai_ju_visible",
+            )
+        )
+        if self._gold_reader is not None and read_gold and not page_open:
+            now_monotonic = perf_counter()
+            if now_monotonic - self._last_gold_read >= self._gold_read_interval:
+                self._last_gold_read = now_monotonic
+                gold = self._read_gold(ctx, frame)
+                if gold is not None:
+                    self._last_gold_info = gold
+            if (
+                self._last_gold_info is not None
+                and now_monotonic - self._last_gold_read < self._gold_read_interval * 5
+            ):
+                raw_data["gold"] = self._last_gold_info
         difficulty_candidates = []
         if observation_mode == "coop_difficulty":
             self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
@@ -353,15 +403,36 @@ class CoopPerception:
         if observation_mode == "coop_grab":
             wanted = wanted | {"ready_button"}
 
-        for locator_name, flag_name, match_name in _INTERFACE_FLAG_LOCATORS:
-            if locator_name not in wanted:
-                continue
-            locator = locators.get(locator_name)
-            match = self._match_locator_template(ctx, frame, locator) if locator else None
+        # 当帧需要的标志并行匹配（模板匹配释放全局锁，总耗时≈最慢一个）
+        wanted_items = [
+            (locator_name, flag_name, match_name)
+            for locator_name, flag_name, match_name in _INTERFACE_FLAG_LOCATORS
+            if locator_name in wanted
+        ]
+
+        def _match_item(item: tuple[str, str, str]):
+            locator = locators.get(item[0])
+            return self._match_locator_template(ctx, frame, locator) if locator else None
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            match_results = list(pool.map(_match_item, wanted_items))
+
+        for (_locator_name, flag_name, match_name), match in zip(
+            wanted_items, match_results, strict=True
+        ):
             raw_data[flag_name] = match is not None
             if match is not None:
                 matches.append(match)
                 raw_data[match_name] = match
+
+        # 赠送技能卡片（同系列技能选满 3 个触发）：仅在选技能阶段识别
+        if hint_state == State.SELECT_MAIN_C_SKILLS:
+            locator = locators.get("zeng_song_ji_neng")
+            match = self._match_locator_template(ctx, frame, locator) if locator else None
+            raw_data["zeng_song_ji_neng_visible"] = match is not None
+            if match is not None:
+                matches.append(match)
+                raw_data["zeng_song_ji_neng_match"] = match
 
         # 天使开局技能页不出现【选技能】图、也没有主C技能图标，只出现专属标识；
         # 仅在开局技能阶段检测，避免其余高频循环额外消耗模板匹配。
@@ -492,6 +563,27 @@ class CoopPerception:
                 return
             self._skill_collector.observe(ctx.frame_id, frame, roi, page=page)
 
+        # 技能标题 OCR 主路径（配置了优先级档位时启用）：一次横带 OCR 读出
+        # 三张卡的技能名，产出 skill_card_options 交给任务层按档位选卡，
+        # 图标匹配跳过。OCR 未配置/未读到任何标题时走下方图标识别兜底
+        if (
+            self._title_reader is not None
+            and self._skill_tiers
+            and roi is not None
+            and any(
+                raw_data.get(flag)
+                for flag in (
+                    "select_skill_button_visible",
+                    "merge_gift_skill_page_visible",
+                    "tian_shi_kai_ju_visible",
+                )
+            )
+        ):
+            options = self._read_card_options(ctx, frame, roi, page)
+            if options:
+                raw_data["skill_card_options"] = options
+                return []
+
         if self._skill_icon_paths:
             skill_matches = self._vision.match_template_set(
                 frame,
@@ -536,6 +628,147 @@ class CoopPerception:
                     len(teammate_matches),
                 )
         return []
+
+    def _read_title_lines(self, strip: Any) -> list[tuple[str, tuple[int, int]]]:
+        """单列标题 OCR；空图或异常返回空列表，不影响其他列。"""
+        if strip is None or strip.size == 0:
+            return []
+        try:
+            return self._title_reader.read(strip)
+        except Exception as exc:  # noqa: BLE001 - 单列 OCR 失败跳过该列
+            logger.warning("技能标题 OCR 失败（单列跳过） error=%r", exc)
+            return []
+
+    def _read_card_options(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        roi: tuple[int, int, int, int],
+        page: str,
+    ) -> list[dict[str, Any]]:
+        """按列分别裁标题带 OCR，读出三张卡的技能名并产出档位选项。
+
+        必须逐列裁剪：整条横带一次 OCR 时，检测模型会把同一水平线的三个
+        标题合并成一个文本框（实机 2026-09-05：三连名拼接被误判为新技能），
+        列映射随之失效。未收录的技能 OCR 整卡补描述并记录到 new_skills.yaml，
+        按第 11 档处理。全部列读取失败时返回空，调用方回退图标识别。
+        """
+        height, width = frame.shape[:2]
+        rx, ry, rw, rh = roi
+        rw = min(rw, width - rx)
+        rh = min(rh, height - ry)
+        if rw <= 0 or rh <= 0:
+            return []
+        column_width = rw / 3
+        inset = int(column_width * 0.04)
+        band_top = ry + int(rh * 0.06)
+        band_bottom = ry + int(rh * 0.22)
+        strips = []
+        for column in range(3):
+            left = int(rx + column * column_width) + inset
+            right = int(rx + (column + 1) * column_width) - inset
+            strips.append(frame[band_top:band_bottom, max(left, 0) : max(right, 0)])
+        # 三列并发 OCR：总耗时≈最慢一列，而非三列相加
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            column_lines = list(pool.map(self._read_title_lines, strips))
+        options: list[dict[str, Any]] = []
+        for column, lines in enumerate(column_lines):
+            if not lines:
+                continue
+            # 细带内正常只有一行；若多行取最上方（标题）
+            name = sorted(lines, key=lambda item: item[1][1])[0][0].strip()
+            if not name:
+                continue
+            tier, known, description = self._tier_and_description(
+                frame, rx, ry, rw, rh, column_width, column, name
+            )
+            option: dict[str, Any] = {
+                "column": column,
+                "name": name,
+                "tier": tier,
+                "known": known,
+                "page": page,
+                "frame_id": ctx.frame_id,
+                "position": (int(rx + (column + 0.5) * column_width), int(ry + rh // 2)),
+            }
+            if description is not None:
+                option["description"] = description
+            options.append(option)
+        if options:
+            logger.debug(
+                "frame=%d 技能标题 OCR 产出 %s",
+                ctx.frame_id,
+                [(o["column"], o["name"], o["tier"]) for o in options],
+            )
+        return options
+
+    def _tier_and_description(
+        self,
+        frame: Any,
+        rx: int,
+        ry: int,
+        rw: int,
+        rh: int,
+        column_width: float,
+        column: int,
+        name: str,
+    ) -> tuple[int, bool, str | None]:
+        """返回 (档位, 是否清单已知技能, 未收录时补 OCR 的描述)。
+
+        名称精确/模糊命中档位索引即已知；未收录时对整卡 OCR 一次，首行
+        之外的文字拼为描述，并记录到 new_skills.yaml，按第 11 档处理。
+        """
+        if name in self._skill_tiers:
+            return self._skill_tiers[name], True, None
+        matched = find_fuzzy_match(name, self._tier_name_entries)
+        if matched is not None:
+            canonical = str(matched["name"])
+            logger.debug("技能标题 %r 模糊匹配清单 %r", name, canonical)
+            return self._skill_tiers[canonical], True, None
+        description = ""
+        inset = int(column_width * 0.04)
+        left = int(rx + column * column_width) + inset
+        right = int(rx + (column + 1) * column_width) - inset
+        card = frame[ry : ry + rh, max(left, 0) : max(right, 0)]
+        if card.size:
+            try:
+                card_lines = sorted(self._title_reader.read(card), key=lambda item: item[1][1])
+                description = "".join(text for text, _ in card_lines[1:])
+            except Exception as exc:  # noqa: BLE001 - 描述补 OCR 失败只影响记录质量
+                logger.debug("未收录技能描述 OCR 失败 name=%s error=%r", name, exc)
+        if self._new_skill_dir is not None:
+            try:
+                record_new_skill(self._new_skill_dir, name, description)
+            except (OSError, ValueError) as exc:
+                logger.warning("新技能记录失败 name=%s error=%r", name, exc)
+        return 11, False, description
+
+    def _read_gold(self, ctx: WindowContext, frame: Any) -> dict[str, Any] | None:
+        """读取三个金币数字区域；ROI 未标定时永久停用金币读取。"""
+        current = self._resolve_named_roi("gold_current_area", ctx)
+        skill = self._resolve_named_roi("skill_cost_area", ctx)
+        summon = self._resolve_named_roi("summon_cost_area", ctx)
+        if current is None or skill is None or summon is None:
+            logger.debug("金币感知 ROI 未标定，停用金币读取")
+            self._gold_reader = None
+            return None
+        info = self._gold_reader.read(frame, current, skill, summon)
+        logger.debug(
+            "frame=%d 金币读取 current=%s skill=%s(红=%s) summon=%s(红=%s)",
+            ctx.frame_id,
+            info.current,
+            info.skill_cost,
+            info.skill_red,
+            info.summon_cost,
+            info.summon_red,
+        )
+        return {
+            "current": info.current,
+            "skill_cost": info.skill_cost,
+            "summon_cost": info.summon_cost,
+            "skill_red": info.skill_red,
+            "summon_red": info.summon_red,
+        }
 
     def match_ready_button(
         self,
@@ -678,6 +911,7 @@ class CoopPerception:
         n_frames: int = _DEFAULT_CULTIVATION_FRAMES,
         *,
         require_foreground: bool = True,
+        read_gold: bool = False,
     ) -> tuple[WindowContext, Observation]:
         """多帧分类棋盘，并按每格精确类别做多数投票。
 
@@ -802,6 +1036,11 @@ class CoopPerception:
                 raw_data,
                 matches,
             )
+            # 金币感知：培养/回补阶段的召唤门控需要金币数据（按最小间隔读取）
+            if self._gold_reader is not None:
+                gold = self._read_gold(latest_ctx, latest_frame)
+                if gold is not None:
+                    raw_data["gold"] = gold
         observation = Observation(
             frame_id=latest_frame_id,
             source_frame_ids=tuple(source_frame_ids or [latest_frame_id]),

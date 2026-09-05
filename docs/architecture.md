@@ -69,7 +69,8 @@ Runtime Context
 - `Hero Classifier Tools`：通过独立的 `hero-classifier` CLI 命名空间完成英雄格完整截图采集、局后裁剪、人工标签扫描、轻量模型训练和整局评估；不属于 Debug Recorder，也不参与任务状态机编排。
 - `Hero Cell Classifier`：Perception 层的 ONNX 运行时适配器，把单格 BGR 图片转换为英雄、星级、`empty`、`unavailable` 或 `unknown`；正式合作任务的 12 格棋盘识别只使用该模型，不再回退到英雄模板匹配。
 - `Skill Collector`：Perception 层的统计阶段旁路采集器（`perception/skill_collector.py`）。仅在「技能页标志可见且技能卡图标已实际命中（即将点卡）」的帧复用主流程已在手的截图裁卡存档（卡图 + JSONL 元数据）——该时刻卡片必然渲染完整，离线归属才可靠；运行时只做裁剪和 aHash 去重（毫秒级、按 `min_collect_interval_seconds` 节流），PNG 编码在写盘线程完成，队列满丢弃、内部异常只记日志并自动熔断；不参与业务决策、不产生输入、不做任何模板匹配，只在 `run.skill_collection.enabled` 打开时工作。
-- `Skill Catalog Builder`：离线建册工具（`skill_catalog.py`，CLI `build-skill-catalog`）。英雄归属（卡图与英雄图标模板匹配）和文字 OCR（首行为技能名、其余行拼接为描述）都在离线完成，按英雄分组合并进 `configs/skills.yaml`，人工补充的 `priority` 等字段保留；英雄技能开局页与合成 4 星赠送页一致，清单按英雄平铺不区分来源。OCR 引擎（`rapidocr-onnxruntime`）只在离线建册时延迟加载。
+- `Skill Catalog Builder`：离线建册工具（`skill_catalog.py`，CLI `build-skill-catalog`）。英雄归属（卡图与英雄图标模板匹配）和文字 OCR（首行为技能名、其余行拼接为描述）都在离线完成，按英雄分组合并进 `configs/skills.yaml`，人工补充的 `priority` 等字段保留；英雄技能开局页与合成 4 星赠送页一致，清单按英雄平铺不区分来源。同文件还提供档位计算（`compute_skill_tiers`：第 8 档=主C未被显式档覆盖的技能、第 11 档=清单剩余技能，启动时计算）与未收录技能记录（`record_new_skill` → `new_skills.yaml`，按名称模糊去重）。
+- `Skill Title Reader`：Perception 层的技能标题识别器（`perception/ocr.py`，RapidOCR 懒加载）。配置了主C `skill_priority` 档位后，技能页一次横带 OCR 读出三张卡标题，经清单匹配（精确/模糊）得到档位，产出 `skill_card_options` 交给任务层按最小档随机选卡；标题未读出时回退图标识别流程。未收录技能记录到 `new_skills.yaml`。
 - `WindowContext`：保存当前窗口句柄、客户区位置和尺寸、DPI、显示器、截图时间等运行时信息。
 - `Config / Assets`：保存任务配置、模板图片、阈值、延迟和开关。
 

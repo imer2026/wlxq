@@ -43,6 +43,7 @@
 - `pydantic`：配置校验
 - `pyyaml`：YAML 配置文件
 - `rich`：命令行日志输出
+- `rapidocr-onnxruntime`：技能标题 OCR（按优先级选卡）与离线建册
 
 ## 目录结构
 

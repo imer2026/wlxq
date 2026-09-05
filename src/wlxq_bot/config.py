@@ -57,11 +57,11 @@ class VisionConfig(BaseModel):
 
 class InputConfig(BaseModel):
     click_duration: float = 0.08
-    # 每次输入动作后的拟人随机间隔（秒）：导航类点击（首页聊天/招募/开弹窗等）
-    # 连续操作太快不像人（2026-08-21 实机反馈，实机调定为 0.8~1.5）。
+    # 每次输入动作后的拟人随机间隔（秒）：导航类点击（首页聊天/招募/开弹窗、
+    # 返回/聊天/难度弹窗等）。2026-09-05 实机调定为 1.0~2.0(区间更宽更像人)。
     # 抢合作/召唤等有自己的节奏配置，不受这里影响
-    min_delay: float = 0.8
-    max_delay: float = 1.5
+    min_delay: float = 1.0
+    max_delay: float = 2.0
     drag_duration: float = 0.5
     drag_pause: float = 0.2
 
@@ -93,6 +93,11 @@ class MainCProfile(BaseModel):
     # 对局结束进结算。0 = 不限制（一直选到对局结束）。
     # 强袭为 4（回补前）+ 5（回补后）= 9（2026-08-16 实机规则）
     skill_selection_cap: int = Field(default=0, ge=0, le=100)
+    # 技能选择优先级（标题 OCR 主路径）：档位号 → 技能名数组，数字越小越优先；
+    # 同档多张随机点一张。第 8 档（主C其他技能）与第 11 档（清单剩余技能）
+    # 启动时自动计算，配置了会被忽略。未配置时技能选择走原有图标识别流程。
+    # 技能名需与 configs/skills.yaml 一致
+    skill_priority: dict[int, list[str]] = Field(default_factory=dict)
 
 
 class SkillCollectionConfig(BaseModel):
@@ -185,11 +190,9 @@ class RunConfig(BaseModel):
     # 局内等待主C技能图标时，连续这么多帧【选技能】页面不在才认定页面已关闭
     # （页面可能被击杀奖励弹窗打断关闭），回到定时点选技能的节奏，避免盲点技能卡
     main_skill_page_closed_frames: int = Field(default=3, ge=1, le=10)
-    skill_early_interval_min: float = Field(default=4.5, gt=0.0)
-    skill_early_interval_max: float = Field(default=6.0, gt=0.0)
-    skill_late_interval_min: float = Field(default=9.0, gt=0.0)
-    skill_late_interval_max: float = Field(default=11.0, gt=0.0)
-    skill_late_after_seconds: float = Field(default=120.0, gt=0.0)
+    # 选技能/召唤的金币检查间隔（秒）：每 2 秒读一次金币，够就操作，不够就等。
+    # 节奏跟着金币走（2026-09-05 定案，取代旧的随机间隔）
+    gold_check_interval_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
     # 其他队友英雄的技能卡图标（本局阵容 lineup_others 对应）：技能页已打开但
     # 未识别到主C图标时，识别到任一队友图标即确认页面稳定且本组无主C技能卡，
     # 立即随机选一张，不再等满 skill_recognition_frames 帧
@@ -245,8 +248,14 @@ class RunConfig(BaseModel):
     # 快速连点；最后一次保留正常稳定等待后再进入棋盘决策
     forced_summon_interval_seconds: float = Field(default=0.5, gt=0.0, le=10.0)
     # 召唤点击后棋盘始终未变化（多为金币不足，点击被游戏忽略）时的重试等待
-    # （秒）：等待后重新尝试召唤。回补阶段的召唤失败不等待，直接放弃回补回选技能
+    # （秒）：等待后重新尝试召唤。金币门控（summon_gold_wait）下金币不足时
+    # 原地等待恢复，不设次数上限
     summon_retry_delay_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
+    # 识别出错自动重开：任务保守停止（无可用动作/验证耗尽/截图时效超限）时，
+    # 不退出任务，清空对局进度自动重新开始一局。连续重开达到上限仍无任何
+    # 进展（验证成功/完成一局会清零计数）才真正停止，防环境损坏时死循环
+    error_restart_enabled: bool = True
+    error_restart_max_consecutive: int = Field(default=3, ge=1, le=50)
     # 技能卡自动采集（统计阶段）：默认关闭，见 SkillCollectionConfig
     skill_collection: SkillCollectionConfig = Field(default_factory=SkillCollectionConfig)
 
@@ -259,10 +268,6 @@ class RunConfig(BaseModel):
     def _check_ranges(self) -> RunConfig:
         if self.summon_recognition_delay_min > self.summon_recognition_delay_max:
             raise ValueError("summon_recognition_delay_min 不能大于 summon_recognition_delay_max")
-        if self.skill_early_interval_min > self.skill_early_interval_max:
-            raise ValueError("skill_early_interval_min 不能大于 skill_early_interval_max")
-        if self.skill_late_interval_min > self.skill_late_interval_max:
-            raise ValueError("skill_late_interval_min 不能大于 skill_late_interval_max")
         if self.find_coop_click_delay_min > self.find_coop_click_delay_max:
             raise ValueError("find_coop_click_delay_min 不能大于 find_coop_click_delay_max")
         return self
@@ -390,6 +395,8 @@ class TasksConfig(BaseModel):
     difficulty_recognition: dict[str, Any] = Field(default_factory=dict)
     # 技能卡采集（统计阶段）的几何参数：比例相对 rois.skill_candidates 裁剪结果
     skill_collection: dict[str, Any] = Field(default_factory=dict)
+    # 金币感知（回补召唤/付费选技能门控）配置
+    gold_recognition: dict[str, Any] = Field(default_factory=dict)
     heroes: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
@@ -406,6 +413,7 @@ class TasksConfig(BaseModel):
                 "skills",
                 "difficulty_recognition",
                 "skill_collection",
+                "gold_recognition",
                 "heroes",
             ):
                 if data.get(key) is None:

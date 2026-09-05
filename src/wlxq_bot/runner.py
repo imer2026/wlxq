@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from wlxq_bot.action.executor import ActionExecutor
 from wlxq_bot.action.input import InputController
@@ -56,10 +57,11 @@ _FG_CHECK_INTERVAL_SECONDS = 0.5
 _FG_LOG_EVERY_CHECKS = 20  # 20 × 0.5s = 每 10 秒一条
 # 自动切回前台失败后的重试间隔（秒），避免高频反复激活
 _REFOCUS_RETRY_SECONDS = 5.0
-# 连续多少轮「识别决策耗时超过截图时效」后保守停止。识别慢通常是机器负载、
-# 省电模式等临时状况，先丢弃超龄决策重新截图（静态界面晚几秒重试仍有效）；
-# 持续超龄说明本机无法在时效内完成识别->动作，继续循环没有意义
-_MAX_STALE_DECISIONS = 10
+# 连续多少轮「识别决策耗时超过截图时效」后触发原地恢复（丢弃超龄决策重新
+# 识别，连续恢复有独立预算上限）。识别慢通常是机器负载、省电模式等临时状况；
+# 持续超龄说明本机无法在时效内完成识别->动作。3 帧 ≈ 25 秒内即触发恢复，
+# 不必苦等 10 帧（实机 2026-09-05 定案：10 次太久）
+_MAX_STALE_DECISIONS = 3
 
 
 # 单次任务最大步数上限，防止无限循环（首版安全网）
@@ -78,10 +80,13 @@ _SKILL_CLICK_TAGS = frozenset(
         "opening_skill_candidate",
         "opening_skill_fallback",
         "opening_angel_skill_fallback",
+        "opening_skill_priority",
         "main_skill_candidate",
         "main_skill_fallback",
+        "main_skill_priority",
         "merge_gift_skill_candidate",
         "merge_gift_skill_fallback",
+        "merge_gift_skill_priority",
     }
 )
 
@@ -233,6 +238,8 @@ class Runner:
         )
         hero_cell_classifier = self._load_hero_cell_classifier(mc)
         skill_collector = self._build_skill_collector(run_config)
+        title_reader, skill_tiers, new_skill_dir = self._build_skill_priority(mc)
+        gold_reader, gold_read_interval = self._build_gold_reader()
         perception = CoopPerception(
             vision,
             pack,
@@ -245,6 +252,11 @@ class Runner:
             hero_cell_classifier=hero_cell_classifier,
             allowed_heroes={mc, *self.default_config.hero_classifier.lineup_others},
             skill_collector=skill_collector,
+            title_reader=title_reader,
+            skill_tiers=skill_tiers,
+            new_skill_dir=new_skill_dir,
+            gold_reader=gold_reader,
+            gold_read_interval=gold_read_interval,
         )
 
         required_heroes = {mc, *self.default_config.hero_classifier.lineup_others}
@@ -490,6 +502,32 @@ class Runner:
         popup_close_retries = 0
         merge_retries = 0
         skill_click_retries = 0
+        # 识别出错自动重开：连续无进展的重开次数（验证成功/完成一局清零）
+        error_restarts = 0
+        error_restart_enabled = self.default_config.run.error_restart_enabled
+        error_restart_max = self.default_config.run.error_restart_max_consecutive
+
+        def _recover_or_stop(reason: str) -> bool:
+            """保守停止时的原地恢复兜底。返回 True=原地继续循环；False=应停止。
+
+            原地恢复：不重置状态、不回首页，丢弃未验证的动作后直接进入下一帧
+            ——状态机每帧按屏幕画面重新识别决策，画面在哪就接着处理哪。
+            连续恢复达到预算仍无任何进展（验证成功/完成一局清零）才停止。
+            """
+            nonlocal error_restarts, pending, round_steps, stale_decisions
+            if not error_restart_enabled or error_restarts >= error_restart_max:
+                return False
+            error_restarts += 1
+            logger.warning(
+                "%s；原地继续识别（无进展重开 %d/%d，验证成功或完成一局后清零）",
+                reason,
+                error_restarts,
+                error_restart_max,
+            )
+            pending = None
+            round_steps = 0
+            stale_decisions = 0
+            return True
         while not safety.stop_requested:
             if task.ctx.round_count != tracked_round_count:
                 # round_count 在结算返回验证后 +1，新值即刚完成的局号
@@ -503,6 +541,7 @@ class Runner:
                 )
                 tracked_round_count = task.ctx.round_count
                 round_steps = 0
+                error_restarts = 0
             if task.ctx.current_state == State.COMPLETED:
                 logger.info(
                     "达到 COMPLETED，任务完成，共完成 %d/%d 局",
@@ -594,6 +633,7 @@ class Runner:
                     window_handle,
                     ctx,
                     n_frames=self.default_config.run.board_recognition_frames,
+                    read_gold=task.wants_gold_read(),
                 )
                 logger.debug(
                     "frame=%d 多帧累积识别 heroes=%d",
@@ -606,6 +646,7 @@ class Runner:
                     frame,
                     task.ctx.current_state,
                     task.observation_mode(),
+                    read_gold=task.wants_gold_read(),
                 )
             observe_ms = (time.perf_counter() - observe_started) * 1000
 
@@ -625,9 +666,11 @@ class Runner:
                         ctx.frame_id,
                         pending.action.tag,
                     )
+                    error_restarts = 0
                     if (
                         pending.action.tag == "close_popup"
                         or pending.action.tag == "close_double_reward"
+                        or pending.action.tag == "close_bonus_popup"
                     ):
                         popup_close_retries = 0
                     elif pending.action.tag == "merge_heroes":
@@ -647,7 +690,7 @@ class Runner:
                         if tag == "merge_heroes":
                             _log_merge_verify_failure(pending, observation)
                         if (
-                            tag in {"close_popup", "close_double_reward"}
+                            tag in {"close_popup", "close_double_reward", "close_bonus_popup"}
                             and popup_close_retries
                             < self.default_config.run.close_popup_max_retries
                         ):
@@ -726,7 +769,11 @@ class Runner:
                             pending.attempts,
                             tag,
                         )
-                        break
+                        if not _recover_or_stop(
+                            f"动作 {tag} 验证连续 {pending.attempts} 帧失败"
+                        ):
+                            break
+                        continue
                     logger.debug(
                         "动作后状态尚未稳定，等待下一帧 tag=%s (%d/%d)",
                         pending.action.tag,
@@ -745,8 +792,12 @@ class Runner:
             # 5. 决策
             decision = task.decide_action(observation, ctx)
             if decision is None:
-                logger.info("状态 %s 无可用动作，保守停止", state.value)
-                break
+                if not _recover_or_stop(
+                    f"状态 {state.value} 无可用动作（识别出错或界面未知）"
+                ):
+                    logger.info("状态 %s 无可用动作，保守停止", state.value)
+                    break
+                continue
             action, to_state = decision
             logger.info(
                 "frame=%d 局=%d/%d %s -> %s action=%s [%s]",
@@ -796,11 +847,12 @@ class Runner:
                 if stale_decisions >= _MAX_STALE_DECISIONS:
                     logger.error(
                         "连续 %d 轮识别决策超过截图时效，本机无法在时效内完成"
-                        "识别到动作，保守停止；可检查电脑负载/电源模式，"
-                        "或调大 safety.frame_ttl_ms",
+                        "识别到动作；可检查电脑负载/电源模式，或调大 safety.frame_ttl_ms",
                         stale_decisions,
                     )
-                    break
+                    if not _recover_or_stop("连续多轮识别决策超过截图时效"):
+                        break
+                    continue
                 continue
             stale_decisions = 0
 
@@ -1002,6 +1054,59 @@ class Runner:
             raise RuntimeError(
                 "主C技能图标模板缺失: " + ", ".join(missing) + f"（模板包: {pack.root}）"
             )
+
+    def _build_gold_reader(self) -> tuple[Any | None, float]:
+        """按标定情况装配金币读取器；三个 ROI 未全部标定时返回 (None, 间隔)。"""
+        interval = float(
+            self.tasks_config.gold_recognition.get("read_min_interval_seconds", 1.0)
+        )
+        required = ("gold_current_area", "skill_cost_area", "summon_cost_area")
+        if not all(name in self.tasks_config.rois for name in required):
+            logger.info("金币感知 ROI 未标定，金币门控不可用")
+            return None, interval
+        from wlxq_bot.perception.ocr import GoldReader
+
+        return GoldReader(), interval
+
+    def _build_skill_priority(self, mc: str) -> tuple[Any | None, dict[str, int] | None, Path | None]:
+        """装配技能标题 OCR 主路径（优先级选卡）三件套。
+
+        Returns:
+            (标题识别器, 技能名→档位映射, 新技能记录目录)；主C未配置
+            skill_priority、依赖缺失或清单缺失时返回 (None, None, None)，
+            技能选择回退原有图标识别+随机流程。
+        """
+        profile = self.default_config.main_c_profiles[mc]
+        if not profile.skill_priority:
+            logger.info("主C %s 未配置 skill_priority，技能选择走图标识别流程", mc)
+            return None, None, None
+        try:
+            from wlxq_bot.perception.ocr import TitleReader, ensure_engine
+            from wlxq_bot.skill_catalog import compute_skill_tiers, load_skill_name_index
+
+            catalog_path = Path("configs/skills.yaml")
+            name_to_hero = load_skill_name_index(catalog_path)
+            if not name_to_hero:
+                logger.warning("技能清单 %s 为空，标题识别不可用", catalog_path)
+                return None, None, None
+            skill_tiers = compute_skill_tiers(
+                profile.skill_priority, name_to_hero, profile.display_name
+            )
+            ensure_engine()
+            tier8 = sorted(name for name, tier in skill_tiers.items() if tier == 8)
+            tier11 = sorted(name for name, tier in skill_tiers.items() if tier == 11)
+            logger.info(
+                "技能优先级已启用 主C=%s(%s) 第8档=%s 第11档=%s",
+                mc,
+                profile.display_name,
+                tier8,
+                tier11,
+            )
+            new_skill_dir = Path(self.default_config.run.skill_collection.output_dir)
+            return TitleReader(), skill_tiers, new_skill_dir
+        except (ImportError, RuntimeError, ValueError, OSError) as exc:
+            logger.warning("技能标题识别初始化失败，回退图标识别流程: %r", exc)
+            return None, None, None
 
     def _build_skill_collector(self, run_config: RunConfig) -> SkillCollector | None:
         """按统计阶段配置构造技能卡采集器；未启用或初始化失败返回 None。
