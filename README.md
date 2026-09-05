@@ -219,9 +219,15 @@ wlxq-bot run coop --main-c assault
 wlxq-bot run coop --main-c assault --coop-difficulties 1-10
 # 游戏本次会话已手动选过难度：首局招募跳过难度弹窗直接抢合作
 wlxq-bot run coop --main-c assault --skip-difficulty-selection
+# 保卫宠物模式：与抢合作共用同一套流程引擎，差异由 mode_profiles.pet 档案承载
+# （进招募先点「保卫宠物」页签、OCR 勾选「普通/中等」难度、结算只点返回、
+#  强袭技能一直选到对局结束）；默认模式由 configs/default.yaml 的 run.mode 控制
+wlxq-bot run coop --mode pet
 
 # 手动打开难度弹窗后，单独验证难度识别、点击和滚动
 wlxq-bot exec select-difficulty --coop-difficulties 1-10
+# 手动打开保卫宠物难度弹窗后，单独验证宠物难度的 OCR 识别与勾选
+wlxq-bot exec select-difficulty --mode pet
 
 # 技能卡统计阶段采集（一次性）：先在 configs/default.yaml 打开
 # run.skill_collection.enabled，正常跑几局合作即可自动采集技能卡到
@@ -285,6 +291,8 @@ safety:
   max_failures: 5
 
 run:
+  # 组队对局模式：coop（合作模式）| pet（保卫宠物）；CLI --mode 覆盖本次运行
+  mode: coop
   # 本次最多完成的合作局数
   max_rounds: 20
   # 单局调度循环最终保险，完成一局后自动重置
