@@ -89,6 +89,8 @@ class CoopTask(Task):
         difficulty_selection_only: bool = False,
         skip_difficulty_selection: bool = False,
         mode_profile: ModeProfile | None = None,
+        pet_difficulty_targets: list[str] | None = None,
+        pet_difficulty_min_confidence: float = 0.5,
         main_c_profile: MainCProfile | None = None,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
@@ -165,6 +167,11 @@ class CoopTask(Task):
         self._mode = mode_profile
         # 页签点击后的去向：首局路径进打开难度弹窗，下一局刷新路径进打开刷新弹窗
         self._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
+        # 保卫宠物难度选择（OCR 开环）：待选目标按配置顺序点击；行文字子串匹配
+        self._remaining_pet_targets = list(pet_difficulty_targets or [])
+        self._selected_pet_targets: list[str] = []
+        self._pet_difficulty_misses = 0
+        self._pet_min_confidence = pet_difficulty_min_confidence
 
         self._match_started_at: float | None = None
         self._next_skill_at: float | None = None
@@ -439,6 +446,9 @@ class CoopTask(Task):
         if self._recruit_step == _RecruitStep.CONFIRM_DIFFICULTY_OPEN:
             return self._action_confirm_difficulty_open(observation, window_ctx)
         if self._recruit_step == _RecruitStep.SELECT_DIFFICULTIES:
+            # OCR 模式（保卫宠物）：按行文字勾选，不需要窗口换算的滚动参数
+            if self._mode is not None and self._mode.entry.difficulty.kind == "ocr":
+                return self._action_select_pet_difficulties(observation)
             return self._action_select_difficulties(observation, window_ctx)
         if self._recruit_step == _RecruitStep.CLOSE_DIFFICULTY_DIALOG:
             return self._action_close_difficulty_dialog(
@@ -726,6 +736,86 @@ class CoopTask(Task):
                 reason=reason,
             ),
             State.FIND_COOP,
+        )
+
+    def _action_select_pet_difficulties(
+        self, observation: Observation
+    ) -> tuple[Action, State] | None:
+        """保卫宠物难度勾选（OCR 开环，2026-09-06 定案）。
+
+        行文字来自 CoopPerception 的 pet_difficulty_rows（已按
+        pet_difficulty_recognition.min_confidence 过滤）；按配置顺序对每个
+        待选目标做行文字子串匹配，命中即点击行文字中心，点击发送即计为已选
+        （同合作难度的开环哲学，不识别勾选框）。所有目标不可见时只等待计数，
+        连续 difficulty_open_fail_misses 次仍不可见则保守停止——OCR 模式无
+        滚动，绝不盲点。
+        """
+        if not self._remaining_pet_targets:
+            self._log_pet_difficulty_summary()
+            if self._difficulty_selection_only:
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.0,
+                        verification="immediate",
+                        tag="pet_difficulty_selection_complete",
+                        reason="保卫宠物目标难度已全部点击",
+                    ),
+                    State.COMPLETED,
+                )
+            return None
+
+        rows = observation.raw_data.get("pet_difficulty_rows") or []
+        for target in self._remaining_pet_targets:
+            hits = [row for row in rows if target in row.text]
+            if not hits:
+                continue
+            best = max(hits, key=lambda row: row.confidence)
+            if best.confidence < self._pet_min_confidence:
+                continue
+            logger.info(
+                "frame=%d 保卫宠物难度 %s 命中行 %r 置信度 %.2f，点击文字中心",
+                observation.frame_id,
+                target,
+                best.text,
+                best.confidence,
+            )
+            return (
+                Action(
+                    kind="click",
+                    target=best.position,
+                    duration=0.08,
+                    verification="immediate",
+                    tag=f"select_pet_difficulty:{target}",
+                    reason=f"选择保卫宠物难度 {target}",
+                ),
+                State.FIND_COOP,
+            )
+
+        if self._pet_difficulty_misses >= self._run_config.difficulty_open_fail_misses:
+            raise RuntimeError(
+                f"保卫宠物难度行持续不可见（{self._pet_difficulty_misses} 次），保守停止；"
+                "请确认难度弹窗已打开且 pet_difficulty_list ROI 标定正确"
+            )
+        return (
+            Action(
+                kind="wait",
+                duration=0.3,
+                verification="immediate",
+                tag="pet_difficulty_miss",
+                reason="保卫宠物难度行不可见，等待重试",
+            ),
+            State.FIND_COOP,
+        )
+
+    def _log_pet_difficulty_summary(self) -> None:
+        """保卫宠物难度选择汇总（仅输出一次）。"""
+        if self._difficulty_summary_logged:
+            return
+        self._difficulty_summary_logged = True
+        logger.info(
+            "保卫宠物难度选择汇总：选中 %s",
+            self._selected_pet_targets,
         )
 
     def _complete_difficulty_target(
@@ -1765,6 +1855,21 @@ class CoopTask(Task):
             )
         elif tag.startswith("scroll_difficulties:"):
             self._difficulty_scroll_count += 1
+        elif tag.startswith("select_pet_difficulty:"):
+            # 保卫宠物开环勾选：点击已发送即视为已选（不识别勾选框状态）
+            target = tag.partition(":")[2]
+            if target in self._remaining_pet_targets:
+                self._remaining_pet_targets.remove(target)
+            self._selected_pet_targets.append(target)
+            self._pet_difficulty_misses = 0
+            if not self._remaining_pet_targets:
+                self._log_pet_difficulty_summary()
+                if not self._difficulty_selection_only:
+                    self._recruit_step = _RecruitStep.CLOSE_DIFFICULTY_DIALOG
+                    self._difficulty_close_attempts = 0
+                    self._difficulty_close_streak = 0
+        elif tag == "pet_difficulty_miss":
+            self._pet_difficulty_misses += 1
         elif tag == "open_coop_chat":
             self._after_tab_step = _RecruitStep.OPEN_REFRESH_DIFFICULTY_DIALOG
             self._recruit_step = _RecruitStep.SELECT_MODE_TAB

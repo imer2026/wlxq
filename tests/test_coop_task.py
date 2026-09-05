@@ -57,6 +57,7 @@ def make_task(
     include_skill_candidate_roi: bool = True,
     main_c_profile: MainCProfile | None = None,
     mode_profile: ModeProfile | None = None,
+    pet_difficulty_targets: list[str] | None = None,
 ) -> CoopTask:
     ctx = TaskContext(main_c=main_c, max_rounds=max_rounds)
     run_cfg = RunConfig(
@@ -103,6 +104,7 @@ def make_task(
         skip_difficulty_selection=skip_difficulty_selection,
         main_c_profile=main_c_profile,
         mode_profile=mode_profile,
+        pet_difficulty_targets=pet_difficulty_targets,
     )
 
 
@@ -2547,3 +2549,129 @@ class TestModeProfileDispatch:
         task.ctx.current_state = State.HANDLE_RESULT
         like = task.decide_action(Observation(frame_id=1), make_window_ctx())
         assert like is not None and like[0].tag == "like_result"
+
+    def _pet_task(
+        self,
+        targets: list[str] | None = None,
+        difficulty_selection_only: bool = False,
+    ) -> CoopTask:
+        return make_task(
+            hotspots=self._spots_with_tabs(),
+            difficulty_selection_only=difficulty_selection_only,
+            mode_profile=make_mode_profile(
+                mode_tab_hotspot="recruit_pet_tab",
+                mode_chat_hotspot="pet_chat",
+                difficulty_kind="ocr",
+                difficulty_targets=targets if targets is not None else ["普通", "中等"],
+                like_chest=False,
+                ready_button="pet_ready_button",
+                leave_team="pet_leave_team",
+                return_button="pet_return_button",
+            ),
+            pet_difficulty_targets=targets if targets is not None else ["普通", "中等"],
+        )
+
+    @staticmethod
+    def _pet_observation(
+        rows: list[tuple[str, float]], frame_id: int
+    ) -> Observation:
+        from wlxq_bot.perception.pet_difficulty import DifficultyRow
+
+        return Observation(
+            frame_id=frame_id,
+            raw_data={
+                "pet_difficulty_rows": [
+                    DifficultyRow(text=text, confidence=conf, position=(100 * i, 200 * i))
+                    for i, (text, conf) in enumerate(rows, start=1)
+                ],
+                "difficulty_dialog_visible": True,
+            },
+        )
+
+    def test_pet_difficulty_clicks_targets_in_configured_order(self):
+        task = self._pet_task(["普通", "中等"])
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_DIFFICULTIES
+        clicks = []
+        for i, rows in enumerate(
+            [
+                [("保卫宠物-普通", 0.85), ("保卫宠物-中等", 0.8)],
+                # 勾选后两行仍在列表中（行位置不变）：中等行保持 (200, 400)
+                [("保卫宠物-普通", 0.85), ("保卫宠物-中等", 0.8)],
+            ],
+            start=1,
+        ):
+            decision = task.decide_action(
+                self._pet_observation(rows, frame_id=i), make_window_ctx()
+            )
+            assert decision is not None
+            action, to_state = decision
+            assert to_state == State.FIND_COOP
+            clicks.append((action.tag, action.target))
+            task.on_action_verified(action, to_state)
+        assert clicks == [
+            ("select_pet_difficulty:普通", (100, 200)),
+            ("select_pet_difficulty:中等", (200, 400)),
+        ]
+        # 选完 → 进入关闭弹窗步骤
+        assert task._recruit_step == _RecruitStep.CLOSE_DIFFICULTY_DIALOG
+
+    def test_pet_difficulty_prefers_higher_confidence_row(self):
+        task = self._pet_task(["普通"])
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_DIFFICULTIES
+        decision = task.decide_action(
+            self._pet_observation(
+                [("保卫宠物-普通", 0.7), ("保卫宠物-普通", 0.95)], frame_id=1
+            ),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].target == (200, 400)  # 置信度 0.95 的行
+
+    def test_pet_difficulty_miss_budget_stops_conservatively(self):
+        task = self._pet_task(["普通"])
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_DIFFICULTIES
+        budget = task._run_config.difficulty_open_fail_misses
+        with pytest.raises(RuntimeError, match="难度行持续不可见"):
+            for i in range(budget + 1):
+                decision = task.decide_action(
+                    self._pet_observation([], frame_id=i + 1), make_window_ctx()
+                )
+                assert decision is not None
+                assert decision[0].tag == "pet_difficulty_miss"
+                task.on_action_verified(*decision)
+
+    def test_pet_difficulty_selection_only_completes(self):
+        task = self._pet_task(["普通"], difficulty_selection_only=True)
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_DIFFICULTIES
+        decision = task.decide_action(
+            self._pet_observation([("保卫宠物-普通", 0.85)], frame_id=1),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        task.on_action_verified(*decision)
+        final = task.decide_action(
+            self._pet_observation([("保卫宠物-普通", 0.85)], frame_id=2),
+            make_window_ctx(),
+        )
+        assert final is not None
+        assert final[0].tag == "pet_difficulty_selection_complete"
+        assert final[1] == State.COMPLETED
+
+    def test_skip_difficulty_selection_applies_to_pet(self):
+        # 已选过难度（_difficulty_done_session）→ 确认打开后直接关闭，不进勾选
+        task = self._pet_task(["普通"])
+        task._difficulty_done_session = True
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_DIFFICULTIES
+        task._difficulty_open_is_refresh = False
+        # 模拟 difficulty_open_confirmed 的既有分流逻辑（在 on_action_verified 中）
+        task._recruit_step = _RecruitStep.CONFIRM_DIFFICULTY_OPEN
+        task.on_action_verified(
+            Action(kind="wait", duration=0.0, verification="immediate", tag="difficulty_open_confirmed"),
+            State.FIND_COOP,
+        )
+        assert task._recruit_step == _RecruitStep.CLOSE_DIFFICULTY_DIALOG
