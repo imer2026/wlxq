@@ -1164,3 +1164,39 @@ class TestLocatorAliases:
         )
         assert observation.flag("leave_team_visible") is True
         assert observation.raw_data["leave_team_match"] == match
+
+    def test_match_ready_button_uses_alias(self, tmp_path) -> None:
+        """抢合作检查线程的 match_ready_button 同样走别名重映射：
+
+        保卫宠物模式下 canonical ready_button locator 缺失、只有
+        pet_ready_button，方法应命中宠物模板并返回其 MatchResult。
+        """
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        (pack_root / "buttons" / "bao_wei_chong_wu").mkdir(parents=True)
+        (pack_root / "buttons" / "bao_wei_chong_wu" / "zhun_bei.png").write_bytes(b"t")
+        match = MatchResult("zhun_bei.png", (400, 1300), 0.9)
+        vision = _SingleTemplateVision("zhun_bei.png", match)
+        tasks_cfg = TasksConfig(
+            locators={
+                "pet_ready_button": {
+                    "strategy": "template",
+                    "template": "buttons/bao_wei_chong_wu/zhun_bei.png",
+                    "threshold": 0.82,
+                }
+            }
+        )
+        perception = CoopPerception(
+            vision,
+            TemplatePack(client_size=(923, 1723), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+            locator_aliases={"ready_button": "pet_ready_button"},
+        )
+
+        assert perception.match_ready_button(_make_window_ctx(), None) == match
+        # 确实匹配的是宠物专属模板（template_calls 记录解析后的绝对路径）
+        assert len(vision.template_calls) == 1
+        assert vision.template_calls[0].endswith("zhun_bei.png")

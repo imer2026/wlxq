@@ -828,9 +828,13 @@ class CoopPerception:
         """仅匹配准备按钮模板，供抢合作检查线程周期调用。
 
         复用 ready_button locator 配置（模板/阈值/ROI），保证与 observe 中
-        识别到的 ready_button 来自同一来源，避免两处阈值/ROI 漂移。
+        识别到的 ready_button 来自同一来源，避免两处阈值/ROI 漂移；
+        locator 名同样走别名重映射（保卫宠物模式重映射到 pet_ready_button，
+        宠物专属准备按钮与合作不是同一张图）。
         """
-        locator = self._cfg.locators.get("ready_button")
+        locator = self._cfg.locators.get(
+            self._locator_aliases.get("ready_button", "ready_button")
+        )
         if not locator:
             return None
         return self._match_locator_template(ctx, frame, locator)
