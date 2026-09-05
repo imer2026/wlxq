@@ -344,6 +344,26 @@ class TestModeProfile:
         )
         assert resolved is cfg.main_c_profiles["assault"]
 
+    def test_resolve_main_c_profile_unknown_main_c_rejected(self) -> None:
+        # CLI 只捕获 ValueError/RuntimeError：未知 main_c 必须抛 ValueError
+        # 而不是裸 KeyError（会变成未处理 traceback）
+        cfg = self._default()
+        with pytest.raises(ValueError, match="不在配置档案"):
+            resolve_main_c_profile(cfg.main_c_profiles, cfg.mode_profiles["pet"], "ghost")
+
+    def test_ocr_targets_duplicates_rejected(self) -> None:
+        # 重复目标会点击同一难度两次，实机确认再次点击已勾选难度会取消勾选
+        profile = self._mode(
+            entry={"mode_tab_hotspot": "recruit_pet_tab",
+                   "difficulty": {"kind": "ocr", "targets": ["普通", "普通"]}},
+        )
+        with pytest.raises(ValidationError):
+            DefaultConfig(
+                run={"mode": "pet"},
+                main_c_profiles={"assault": MainCProfile(display_name="强袭", hero_template_dir="h")},
+                mode_profiles={"pet": profile},
+            )
+
     def test_repo_default_yaml_defines_both_modes(self) -> None:
         """仓库自带 default.yaml 必须定义 coop/pet 两模式且可加载。"""
         cfg = load_default_config(Path("configs/default.yaml"))

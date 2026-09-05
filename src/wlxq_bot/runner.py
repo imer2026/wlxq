@@ -271,9 +271,6 @@ class Runner:
             gold_reader=gold_reader,
             gold_read_interval=gold_read_interval,
             difficulty_kind=mode_profile.entry.difficulty.kind,
-            pet_difficulty_targets=(
-                mode_profile.entry.difficulty.targets or None
-            ),
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -463,7 +460,6 @@ class Runner:
             self.default_config.run.default_main_c,
             debug_recorder=debug_recorder,
             difficulty_kind=mode_profile.entry.difficulty.kind,
-            pet_difficulty_targets=pet_targets or None,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,

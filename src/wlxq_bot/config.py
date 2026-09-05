@@ -148,7 +148,13 @@ class ModeProfile(BaseModel):
 def resolve_main_c_profile(
     profiles: dict[str, MainCProfile], mode: ModeProfile, main_c: str
 ) -> MainCProfile:
-    """按模式档案应用主C覆盖；无覆盖时原样返回共享档案实例。"""
+    """按模式档案应用主C覆盖；无覆盖时原样返回共享档案实例。
+
+    未知 main_c 抛 ValueError（CLI 只捕获 ValueError/RuntimeError，
+    不能让裸 KeyError 变成未处理 traceback）。
+    """
+    if main_c not in profiles:
+        raise ValueError(f"主C {main_c!r} 不在配置档案中，可用: {sorted(profiles)}")
     base = profiles[main_c]
     overrides = mode.main_c_overrides.get(main_c)
     if not overrides:
@@ -388,10 +394,22 @@ class DefaultConfig(BaseModel):
                 f"run.mode={self.run.mode!r} 不在 mode_profiles 中: {sorted(self.mode_profiles)}"
             )
         for name, profile in self.mode_profiles.items():
-            if profile.entry.difficulty.kind == "ocr" and not profile.entry.difficulty.targets:
-                raise ValueError(
-                    f"mode_profiles.{name}.entry.difficulty.kind=ocr 需要配置 targets"
+            difficulty = profile.entry.difficulty
+            if difficulty.kind == "ocr":
+                if not difficulty.targets:
+                    raise ValueError(
+                        f"mode_profiles.{name}.entry.difficulty.kind=ocr 需要配置 targets"
+                    )
+                # 重复目标会点击同一难度两次；实机确认再次点击已勾选难度
+                # 会取消勾选，必须在校验层拒绝
+                duplicates = sorted(
+                    {t for t in difficulty.targets if difficulty.targets.count(t) > 1}
                 )
+                if duplicates:
+                    raise ValueError(
+                        f"mode_profiles.{name}.entry.difficulty.targets "
+                        f"含重复项: {duplicates}（再次点击已勾选难度会取消勾选）"
+                    )
             unknown_heroes = [
                 key for key in profile.main_c_overrides if key not in self.main_c_profiles
             ]

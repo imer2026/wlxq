@@ -22,6 +22,7 @@ from wlxq_bot.models import (
     WindowContext,
 )
 from wlxq_bot.perception.locator import hotspot_to_client_point, roi_column_centers
+from wlxq_bot.perception.pet_difficulty import match_targets
 from wlxq_bot.tasks.base import Task, TaskContext
 from wlxq_bot.tasks.strategy import CultivationStrategy, build_strategy
 from wlxq_bot.utils.log import get_logger
@@ -167,8 +168,10 @@ class CoopTask(Task):
         self._mode = mode_profile
         # 页签点击后的去向：首局路径进打开难度弹窗，下一局刷新路径进打开刷新弹窗
         self._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
-        # 保卫宠物难度选择（OCR 开环）：待选目标按配置顺序点击；行文字子串匹配
-        self._remaining_pet_targets = list(pet_difficulty_targets or [])
+        # 保卫宠物难度选择（OCR 开环）：待选目标按配置顺序点击；行文字子串匹配。
+        # 保序去重：重复目标会点击同一难度两次，实机确认再次点击已勾选难度
+        # 会取消勾选（配置层已校验拒绝，这里兜底防御）
+        self._remaining_pet_targets = list(dict.fromkeys(pet_difficulty_targets or []))
         self._selected_pet_targets: list[str] = []
         self._pet_difficulty_misses = 0
         self._pet_min_confidence = pet_difficulty_min_confidence
@@ -744,11 +747,12 @@ class CoopTask(Task):
         """保卫宠物难度勾选（OCR 开环，2026-09-06 定案）。
 
         行文字来自 CoopPerception 的 pet_difficulty_rows（已按
-        pet_difficulty_recognition.min_confidence 过滤）；按配置顺序对每个
-        待选目标做行文字子串匹配，命中即点击行文字中心，点击发送即计为已选
-        （同合作难度的开环哲学，不识别勾选框）。所有目标不可见时只等待计数，
-        连续 difficulty_open_fail_misses 次仍不可见则保守停止——OCR 模式无
-        滚动，绝不盲点。
+        pet_difficulty_recognition.min_confidence 过滤）；用共享的
+        match_targets 做子串匹配（targets 顺序即优先顺序，每个目标取
+        置信度最高行），命中即点击行文字中心，点击发送即计为已选
+        （同合作难度的开环哲学，不识别勾选框）；保留置信度二次防线。
+        所有目标不可见时只等待计数，连续 difficulty_open_fail_misses 次
+        仍不可见则保守停止——OCR 模式无滚动，绝不盲点。
         """
         if not self._remaining_pet_targets:
             self._log_pet_difficulty_summary()
@@ -766,11 +770,7 @@ class CoopTask(Task):
             return None
 
         rows = observation.raw_data.get("pet_difficulty_rows") or []
-        for target in self._remaining_pet_targets:
-            hits = [row for row in rows if target in row.text]
-            if not hits:
-                continue
-            best = max(hits, key=lambda row: row.confidence)
+        for target, best in match_targets(rows, self._remaining_pet_targets):
             if best.confidence < self._pet_min_confidence:
                 continue
             logger.info(

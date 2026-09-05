@@ -344,7 +344,7 @@ flowchart TD
 
 宠物难度只有 4 档（普通/中等/困难/地狱），一屏放完、无滚动。勾选走 OCR 路径（`difficulty.kind: ocr`）：在 `pet_difficulty_list` ROI 内 OCR 读取各行文字，按 `mode_profiles.pet.entry.difficulty.targets`（当前 `[普通, 中等]`）对行文字做**子串匹配**（「普通」⊂「保卫宠物-普通」），命中后开环点击行文字中心——不识别勾选框，点击发送即计为已选（与合作难度勾选同一开环哲学，见「进入招募小流程」）。OCR 文字置信度阈值由 `tasks.yaml` 的 `pet_difficulty_recognition.min_confidence`（默认 0.5）控制，与模板匹配置信度语义不同，不混用。
 
-读不到目标难度行时不开环盲点：视为「目标不可见」，等待后重读；连续 `difficulty_open_fail_misses` 次（与打开确认共用该预算）仍不可见则保守停止——OCR 模式无滚动、也不重点打开按钮，会提示确认难度弹窗已打开且 `pet_difficulty_list` ROI 标定正确。OCR 引擎异常按识别失败计入现有失败预算，不静默跳过。
+读不到目标难度行时不开环盲点：视为「目标不可见」，等待后重读；行文字持续不可见达 `difficulty_open_fail_misses` 预算（与打开确认共用）时由任务层保守停止——OCR 模式无滚动、也不重点打开按钮，会提示确认难度弹窗已打开且 `pet_difficulty_list` ROI 标定正确。OCR 引擎异常不被 `perception.observe` 捕获，将直接终止任务（比识别失败更保守），不静默跳过。
 
 弹窗打开/关闭确认复用合作的全套轮询参数（`difficulty_open_settle_seconds` / `difficulty_poll_interval_seconds` / `difficulty_open_confirm_hits` / `difficulty_open_fail_misses` / `difficulty_open_max_reclicks` / `difficulty_close_confirm_frames` / `difficulty_close_max_attempts`），只是「标识」从【合作模式】标题图模板换成 OCR 行存在性（标志名 `difficulty_dialog_visible` 不变）：难度列表区 OCR 读到任一置信度达标的难度行 = 弹窗打开，连续多次读不到 = 已关闭。
 
@@ -356,7 +356,7 @@ flowchart TD
 - **技能选择不封顶**：宠物模式通过 `main_c_overrides` 把强袭的 `skill_selection_cap` 覆盖为 0（0 = 不限制，一直选到对局结束，2026-09-06 用户确认）；数量回补、合成回避、技能优先级等其余策略字段照常继承。合作模式保持 9 次上限不变。
 - **结算返回后的入口**：合作回到合作页面聊天（`coop_chat`），宠物回到宠物挑战页面聊天（`pet_chat`）并补点一次招募（幂等）；退队后「非首页」兜底路径同样使用模式聊天 hotspot。
 
-宠物专属素材（hotspot `recruit_pet_tab` / `pet_chat` / `pet_leave_team`，locator `pet_ready_button` / `pet_return_button` / `pet_leave_team`，ROI `pet_difficulty_list`）已写入 `configs/tasks.yaml`，三张按钮模板已放入 3000x2000 模板包 `buttons/bao_wei_chong_wu/*.png`（模板文件待实机标定后再提交）；按钮阈值 0.82 起步，待实机回调。
+宠物专属素材（hotspot `recruit_pet_tab` / `pet_chat` / `pet_leave_team`，locator `pet_ready_button` / `pet_return_button` / `pet_leave_team`，ROI `pet_difficulty_list`）已写入 `configs/tasks.yaml`，三张按钮模板已放入 3000x2000 模板包 `buttons/bao_wei_chong_wu/*.png`（初版已提交，实机标定后更新）；按钮阈值 0.82 起步，待实机回调。
 
 **首跑人工验证清单**（页签重复点击、难度弹窗按钮位置、开/关弹窗刷新行为、三模板 ROI/阈值标定、双倍奖励风险、对局标志命中）见 [项目 TODO](todo.md) 的「保卫宠物首跑验证清单」一节；清单未完成前不得声称宠物模式实机可用。
 

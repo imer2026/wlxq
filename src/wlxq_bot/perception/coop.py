@@ -146,7 +146,6 @@ class CoopPerception:
         gold_reader: Any | None = None,
         gold_read_interval: float = 1.0,
         difficulty_kind: str = "template",
-        pet_difficulty_targets: list[str] | None = None,
         locator_aliases: dict[str, str] | None = None,
         difficulty_reader: Any | None = None,
     ) -> None:
@@ -196,9 +195,9 @@ class CoopPerception:
         self._gold_read_interval = max(0.0, gold_read_interval)
         self._last_gold_read = float("-inf")
         self._last_gold_info: dict[str, Any] | None = None
-        # 难度识别方式（模式档案）：template=合作文字模板；ocr=保卫宠物行 OCR
+        # 难度识别方式（模式档案）：template=合作文字模板；ocr=保卫宠物行 OCR。
+        # OCR 目标难度（targets）只由任务层 CoopTask 消费，感知层不持有
         self._difficulty_kind = difficulty_kind
-        self._pet_difficulty_targets = list(pet_difficulty_targets or [])
         # canonical locator 名 → 模式专属 locator 名（ready_button/return_button/
         # coop_leave_team 三个可被重映射；标志名不变，任务层零改动）
         self._locator_aliases = dict(locator_aliases or {})

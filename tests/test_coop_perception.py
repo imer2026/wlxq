@@ -1047,7 +1047,7 @@ class TestPetDifficultyOcr:
                                         "min_confidence": 0.5},
         )
 
-    def _perception(self, reader: FakeRowReader, targets: list[str], tmp_path):
+    def _perception(self, reader: FakeRowReader, tmp_path):
         from wlxq_bot.assets import TemplatePack
 
         pack_root = tmp_path / "3000x2000"
@@ -1059,7 +1059,6 @@ class TestPetDifficultyOcr:
             CoopRole.HELPER,
             "assault",
             difficulty_kind="ocr",
-            pet_difficulty_targets=targets,
             difficulty_reader=reader,
         )
 
@@ -1071,7 +1070,7 @@ class TestPetDifficultyOcr:
             ("保卫宠物-普通", 0.85, (120, 50)),
             ("保卫宠物-中等", 0.60, (120, 140)),
         ])
-        perception = self._perception(reader, ["普通", "中等"], tmp_path)
+        perception = self._perception(reader, tmp_path)
         observation = perception.observe(
             _make_window_ctx(), self._frame(), observation_mode="coop_difficulty"
         )
@@ -1083,7 +1082,7 @@ class TestPetDifficultyOcr:
 
     def test_ocr_mode_low_confidence_rows_filtered(self, tmp_path) -> None:
         reader = FakeRowReader([("保卫宠物-中等", 0.30, (120, 140))])
-        perception = self._perception(reader, ["中等"], tmp_path)
+        perception = self._perception(reader, tmp_path)
         observation = perception.observe(
             _make_window_ctx(), self._frame(), observation_mode="coop_difficulty"
         )
@@ -1092,7 +1091,7 @@ class TestPetDifficultyOcr:
 
     def test_ocr_dialog_mode_reports_visibility_without_candidates(self, tmp_path) -> None:
         reader = FakeRowReader([("保卫宠物-普通", 0.85, (120, 50))])
-        perception = self._perception(reader, ["普通"], tmp_path)
+        perception = self._perception(reader, tmp_path)
         observation = perception.observe(
             _make_window_ctx(), self._frame(), observation_mode="difficulty_dialog"
         )
