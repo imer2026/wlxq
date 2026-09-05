@@ -53,15 +53,14 @@ def _get_engine() -> Any:
 class TitleReader:
     """横带标题识别器。
 
-    read() 对输入图做一次 OCR，返回 [(文字, (中心x, 中心y))]，坐标相对
-    输入图左上角。输入应为覆盖三张卡标题的水平窄条，一次调用即可同时
-    读出三个标题，x 坐标用于区分卡片列。
+    read_with_confidence() 对输入图做一次 OCR，返回 [(文字, 置信度, (中心x, 中心y))]，
+    坐标相对输入图左上角。read() 是丢弃置信度的兼容封装。
     """
 
-    def read(self, image: np.ndarray) -> list[tuple[str, tuple[int, int]]]:
+    def read_with_confidence(self, image: np.ndarray) -> list[tuple[str, float, tuple[int, int]]]:
         engine = _get_engine()
         result, _ = engine(image)
-        lines: list[tuple[str, tuple[int, int]]] = []
+        lines: list[tuple[str, float, tuple[int, int]]] = []
         if not result:
             return lines
         for item in result:
@@ -69,8 +68,11 @@ class TitleReader:
             center = (int(box[:, 0].mean()), int(box[:, 1].mean()))
             text = str(item[1]).strip()
             if text:
-                lines.append((text, center))
+                lines.append((text, float(item[2]), center))
         return lines
+
+    def read(self, image: np.ndarray) -> list[tuple[str, tuple[int, int]]]:
+        return [(text, center) for text, _, center in self.read_with_confidence(image)]
 
 
 @dataclass(frozen=True)
