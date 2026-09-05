@@ -53,6 +53,15 @@ hotspots:
     y_ratio: 0.4423
     description: 合作页面的聊天按钮
 
+  # 宠物挑战页面聊天按钮（保卫宠物结算点返回后的落点页面，2026-09-06 实机
+  # 标定，927×1727 客户区）。注意与 coop_chat（y=0.4423）不是同一位置，
+  # 纵向差近 200px，不可互用。点击后进入招募流程（用户实测直接落到招募
+  # 页面，仍按标准流程补点一次招募按钮，幂等）
+  pet_chat:
+    x_ratio: 0.9234
+    y_ratio: 0.5541
+    description: 宠物挑战页面的聊天按钮
+
   # 首页聊天按钮
   home_chat:
     x_ratio: 0.9274
@@ -94,6 +103,28 @@ hotspots:
     x_ratio: 0.5970
     y_ratio: 0.7754
     description: 难度列表滚动终点（列表偏下）
+
+  # 招募页模式页签（2026-09-05 实机标定，927×1727 客户区）：进入招募后默认
+  # 停在「合作模式」，旁边即「保卫宠物」页签。保卫宠物流程：点宠物页签 →
+  # 首次勾选保卫宠物-普通/中等 → 关闭难度弹窗 → 连点 join_coop（坐标同抢合作）
+  recruit_coop_tab:
+    x_ratio: 0.3937
+    y_ratio: 0.8871
+    description: 招募页「合作模式」页签（默认选中）
+  recruit_pet_tab:
+    x_ratio: 0.7368
+    y_ratio: 0.8877
+    description: 招募页「保卫宠物」页签
+
+  # 保卫宠物组队大厅【退队】按钮实测点击点（2026-09-05 实机，927×1727 客户区）。
+  # 与合作的退队不同位：合作退队走模板匹配 coop_leave_team（识别区 leave_team_area，
+  # 覆盖 y 0.701~0.816），本点 y=0.8616 在该识别区之外（偏下约 80px、偏右约 100px），
+  # 直接复用必漏检。模板图案是否同款待实机截图验证；识别方案（宠物专属 ROI /
+  # 加宽公共 ROI / 新模板）在设计时定
+  pet_leave_team:
+    x_ratio: 0.7994
+    y_ratio: 0.8616
+    description: 保卫宠物组队大厅【退队】按钮实测点（识别方案待定）
 
 # 定位器配置
 # 每个定位器声明策略、ROI 和动作点来源
@@ -224,6 +255,29 @@ locators:
     roi: double_reward_cancel_area
     action_point:
       source: match_center
+  # 【保卫宠物-准备】按钮（抢到保卫宠物后的准备确认；与合作不是同一张图）
+  # 阈值 0.82 起步待实机回调；ROI 待标定，标定前退化全图识别
+  pet_ready_button:
+    strategy: template
+    template: buttons/bao_wei_chong_wu/zhun_bei.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【保卫宠物-返回】按钮（保卫宠物结算页；不点赞不领宝箱，点返回即完成本局）
+  pet_return_button:
+    strategy: template
+    template: buttons/bao_wei_chong_wu/fan_hui.png
+    threshold: 0.82
+    action_point:
+      source: match_center
+  # 【保卫宠物-退队】按钮（保卫宠物组队大厅；位置与合作的明显不同，
+  # 实测点见 hotspots.pet_leave_team；ROI 待标定，标定前退化全图识别）
+  pet_leave_team:
+    strategy: template
+    template: buttons/bao_wei_chong_wu/tui_dui.png
+    threshold: 0.82
+    action_point:
+      source: match_center
 
 # ROI 区域定义
 # 使用比例坐标（ratio），相对于客户区左上角
@@ -302,6 +356,17 @@ rois:
     width_ratio: 0.4930
     height_ratio: 0.2914
 
+  # 保卫宠物难度弹窗的列表区域（2026-09-05 实机标定）。共 4 行（保卫宠物-
+  # 普通/中等/困难/地狱），一屏放得下、无滚动；计划用 OCR 读行文字并点击
+  # 文字框中心（开环，同合作难度勾选策略）。OCR 离线验证：四行全部读对，
+  # 置信度 0.76~0.85（素材 buttons/bao_wei_chong_wu/nan_du.png，2026-09-05）
+  pet_difficulty_list:
+    relative_to: client
+    x_ratio: 0.3420
+    y_ratio: 0.5732
+    width_ratio: 0.3010
+    height_ratio: 0.2362
+
   # 金币感知三区域，标定自 927×1727 客户区（2026-09-05 实机截图）。
   # 供回补召唤与付费选技能的金币门控；只框数字本身，不含图标。
   # 现有金币（左下金币徽章的数字，如 764 / 1.3K）
@@ -359,6 +424,12 @@ rois:
     y_ratio: 0.0
     width_ratio: 0.0
     height_ratio: 0.0
+
+# 保卫宠物难度弹窗 OCR 配置；min_confidence 是 OCR 文字置信度（离线验证
+# 四行 0.76~0.85），语义与模板匹配置信度不同，不得混用
+pet_difficulty_recognition:
+  candidate_roi: pet_difficulty_list
+  min_confidence: 0.5
 
 # 棋盘格子坐标模型
 # 由 wlxq-bot pick --rect 量测排1/排2 格子后计算得出（见 docs/game-rules.md）

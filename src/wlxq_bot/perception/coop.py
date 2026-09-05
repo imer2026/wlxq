@@ -46,6 +46,7 @@ from wlxq_bot.perception.locator import (
     hero_cell_rois,
     ratio_to_pixel_roi,
 )
+from wlxq_bot.perception.pet_difficulty import read_difficulty_rows
 from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
 from wlxq_bot.skill_catalog import find_fuzzy_match, record_new_skill
@@ -144,6 +145,10 @@ class CoopPerception:
         new_skill_dir: Path | None = None,
         gold_reader: Any | None = None,
         gold_read_interval: float = 1.0,
+        difficulty_kind: str = "template",
+        pet_difficulty_targets: list[str] | None = None,
+        locator_aliases: dict[str, str] | None = None,
+        difficulty_reader: Any | None = None,
     ) -> None:
         self._vision = vision
         self._pack = template_pack
@@ -191,6 +196,13 @@ class CoopPerception:
         self._gold_read_interval = max(0.0, gold_read_interval)
         self._last_gold_read = float("-inf")
         self._last_gold_info: dict[str, Any] | None = None
+        # 难度识别方式（模式档案）：template=合作文字模板；ocr=保卫宠物行 OCR
+        self._difficulty_kind = difficulty_kind
+        self._pet_difficulty_targets = list(pet_difficulty_targets or [])
+        # canonical locator 名 → 模式专属 locator 名（ready_button/return_button/
+        # coop_leave_team 三个可被重映射；标志名不变，任务层零改动）
+        self._locator_aliases = dict(locator_aliases or {})
+        self._difficulty_reader = difficulty_reader
 
     @property
     def available_heroes(self) -> list[str]:
@@ -266,12 +278,20 @@ class CoopPerception:
                 raw_data["gold"] = self._last_gold_info
         difficulty_candidates = []
         if observation_mode == "coop_difficulty":
-            self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
-            difficulty_candidates = self._detect_difficulty_candidates(ctx, frame, matches)
+            if self._difficulty_kind == "ocr":
+                # 保卫宠物：OCR 读难度行；弹窗开关以行存在性判定（标志名不变）
+                self._detect_pet_difficulty_rows(ctx, frame, raw_data)
+                raw_data["difficulty_dialog_visible"] = bool(raw_data["pet_difficulty_rows"])
+            else:
+                self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
+                difficulty_candidates = self._detect_difficulty_candidates(ctx, frame, matches)
         elif observation_mode == "difficulty_dialog":
-            # 关闭/确认关闭难度弹窗：只判定弹窗开关标识，跳过 16 个难度候选
-            # 匹配，控制单帧识别耗时（难度候选只用于勾选步骤）
-            self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
+            # 关闭/确认关闭难度弹窗：只判定弹窗开关标识，跳过难度候选匹配
+            if self._difficulty_kind == "ocr":
+                self._detect_pet_difficulty_rows(ctx, frame, raw_data)
+                raw_data["difficulty_dialog_visible"] = bool(raw_data["pet_difficulty_rows"])
+            else:
+                self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
 
         # 2. 培养阶段做棋盘英雄识别
         board: BoardSnapshot | None = None
@@ -404,8 +424,10 @@ class CoopPerception:
             wanted = wanted | {"ready_button"}
 
         # 当帧需要的标志并行匹配（模板匹配释放全局锁，总耗时≈最慢一个）
+        # canonical locator 名先经别名重映射，模式专属 locator 不存在时该标志
+        # 按未识别处理（flag() 返回 False），标志名保持不变
         wanted_items = [
-            (locator_name, flag_name, match_name)
+            (self._locator_aliases.get(locator_name, locator_name), flag_name, match_name)
             for locator_name, flag_name, match_name in _INTERFACE_FLAG_LOCATORS
             if locator_name in wanted
         ]
@@ -454,7 +476,10 @@ class CoopPerception:
                 matches.append(home_match)
                 raw_data["home_page_match"] = home_match
             # 组队大厅的【退队】按钮：房主长时间不开始对局时由任务层点击退出
-            leave_locator = locators.get("coop_leave_team")
+            # （保卫宠物模式经别名重映射到 pet_leave_team，标志名不变）
+            leave_locator = locators.get(
+                self._locator_aliases.get("coop_leave_team", "coop_leave_team")
+            )
             leave_match = (
                 self._match_locator_template(ctx, frame, leave_locator) if leave_locator else None
             )
@@ -519,6 +544,31 @@ class CoopPerception:
         if match is not None:
             matches.append(match)
             raw_data["difficulty_dialog_match"] = match
+
+    def _detect_pet_difficulty_rows(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 读保卫宠物难度行，写入 pet_difficulty_rows（已按 min_confidence 过滤）。
+
+        ROI 来自 pet_difficulty_recognition.candidate_roi；缺失或零面积时
+        read_difficulty_rows 返回空（OCR 必须限域，启动检查会另行为缺失报错）。
+        """
+        cfg = self._cfg.pet_difficulty_recognition
+        roi_name = str(cfg.get("candidate_roi", "pet_difficulty_list"))
+        roi = self._resolve_named_roi(roi_name, ctx)
+        min_confidence = float(cfg.get("min_confidence", 0.5))
+        rows = [
+            row
+            for row in read_difficulty_rows(frame, roi, reader=self._difficulty_reader)
+            if row.confidence >= min_confidence
+        ]
+        raw_data["pet_difficulty_rows"] = rows
+        logger.debug(
+            "frame=%d 宠物难度行=%s", ctx.frame_id, [row.text for row in rows]
+        )
 
     def _detect_skill_candidates(
         self,

@@ -11,6 +11,7 @@ from wlxq_bot.config import BoardGridParams, TasksConfig
 from wlxq_bot.models import (
     CoopRole,
     MatchResult,
+    State,
     WindowContext,
 )
 from wlxq_bot.perception.coop import CoopPerception
@@ -1014,3 +1015,152 @@ class TestDoubleRewardDialogObservation:
         assert settlement.raw_data["double_reward_cancel_match"] == cancel_match
         # 对局内状态不识别（不影响高频循环）
         assert "double_reward_dialog_visible" not in in_match.raw_data
+
+
+class FakeRowReader:
+    """pet_difficulty reader 协议的 fake。"""
+
+    def __init__(self, lines: list[tuple[str, float, tuple[int, int]]]) -> None:
+        self.lines = lines
+        self.images: list = []
+
+    def read_with_confidence(self, image):
+        self.images.append(image)
+        return self.lines
+
+
+class TestPetDifficultyOcr:
+    """OCR 难度识别模式（保卫宠物）。"""
+
+    def _tasks_cfg(self) -> TasksConfig:
+        return TasksConfig(
+            rois={
+                "pet_difficulty_list": {
+                    "relative_to": "client",
+                    "x_ratio": 0.0,
+                    "y_ratio": 0.0,
+                    "width_ratio": 0.5,
+                    "height_ratio": 0.5,
+                }
+            },
+            pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
+                                        "min_confidence": 0.5},
+        )
+
+    def _perception(self, reader: FakeRowReader, targets: list[str], tmp_path):
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        pack_root.mkdir(exist_ok=True)
+        return CoopPerception(
+            _RecordingVision(),
+            TemplatePack(client_size=(923, 1723), root=pack_root),
+            self._tasks_cfg(),
+            CoopRole.HELPER,
+            "assault",
+            difficulty_kind="ocr",
+            pet_difficulty_targets=targets,
+            difficulty_reader=reader,
+        )
+
+    def _frame(self) -> np.ndarray:
+        return np.zeros((1723, 923, 3), dtype=np.uint8)
+
+    def test_ocr_mode_reads_rows_into_raw_data(self, tmp_path) -> None:
+        reader = FakeRowReader([
+            ("保卫宠物-普通", 0.85, (120, 50)),
+            ("保卫宠物-中等", 0.60, (120, 140)),
+        ])
+        perception = self._perception(reader, ["普通", "中等"], tmp_path)
+        observation = perception.observe(
+            _make_window_ctx(), self._frame(), observation_mode="coop_difficulty"
+        )
+        rows = observation.raw_data["pet_difficulty_rows"]
+        assert [row.text for row in rows] == ["保卫宠物-普通", "保卫宠物-中等"]
+        assert rows[0].confidence == 0.85
+        assert observation.raw_data["difficulty_dialog_visible"] is True
+        assert observation.difficulty_candidates == []
+
+    def test_ocr_mode_low_confidence_rows_filtered(self, tmp_path) -> None:
+        reader = FakeRowReader([("保卫宠物-中等", 0.30, (120, 140))])
+        perception = self._perception(reader, ["中等"], tmp_path)
+        observation = perception.observe(
+            _make_window_ctx(), self._frame(), observation_mode="coop_difficulty"
+        )
+        assert observation.raw_data["pet_difficulty_rows"] == []
+        assert observation.raw_data["difficulty_dialog_visible"] is False
+
+    def test_ocr_dialog_mode_reports_visibility_without_candidates(self, tmp_path) -> None:
+        reader = FakeRowReader([("保卫宠物-普通", 0.85, (120, 50))])
+        perception = self._perception(reader, ["普通"], tmp_path)
+        observation = perception.observe(
+            _make_window_ctx(), self._frame(), observation_mode="difficulty_dialog"
+        )
+        assert observation.raw_data["difficulty_dialog_visible"] is True
+        assert "pet_difficulty_rows" in observation.raw_data
+
+
+class TestLocatorAliases:
+    """locator 别名：canonical 名重映射到模式专属 locator，标志名不变。"""
+
+    def test_ready_button_alias_in_grab_mode(self, tmp_path) -> None:
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        (pack_root / "buttons" / "bao_wei_chong_wu").mkdir(parents=True)
+        (pack_root / "buttons" / "bao_wei_chong_wu" / "zhun_bei.png").write_bytes(b"t")
+        match = MatchResult("zhun_bei.png", (400, 1300), 0.9)
+        vision = _SingleTemplateVision("zhun_bei.png", match)
+        tasks_cfg = TasksConfig(
+            locators={
+                "pet_ready_button": {
+                    "strategy": "template",
+                    "template": "buttons/bao_wei_chong_wu/zhun_bei.png",
+                    "threshold": 0.82,
+                }
+            }
+        )
+        perception = CoopPerception(
+            vision,
+            TemplatePack(client_size=(923, 1723), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+            locator_aliases={"ready_button": "pet_ready_button"},
+        )
+        observation = perception.observe(
+            _make_window_ctx(), None, hint_state=State.FIND_COOP, observation_mode="coop_grab"
+        )
+        assert observation.flag("ready_button_visible") is True
+        assert observation.raw_data["ready_button_match"] == match
+
+    def test_leave_team_alias_in_opening_state(self, tmp_path) -> None:
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        (pack_root / "buttons" / "bao_wei_chong_wu").mkdir(parents=True)
+        (pack_root / "buttons" / "bao_wei_chong_wu" / "tui_dui.png").write_bytes(b"t")
+        match = MatchResult("tui_dui.png", (741, 1488), 0.9)
+        vision = _SingleTemplateVision("tui_dui.png", match)
+        tasks_cfg = TasksConfig(
+            locators={
+                "pet_leave_team": {
+                    "strategy": "template",
+                    "template": "buttons/bao_wei_chong_wu/tui_dui.png",
+                    "threshold": 0.82,
+                }
+            }
+        )
+        perception = CoopPerception(
+            vision,
+            TemplatePack(client_size=(923, 1723), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+            locator_aliases={"coop_leave_team": "pet_leave_team"},
+        )
+        observation = perception.observe(
+            _make_window_ctx(), None, hint_state=State.SELECT_OPENING_SKILLS
+        )
+        assert observation.flag("leave_team_visible") is True
+        assert observation.raw_data["leave_team_match"] == match

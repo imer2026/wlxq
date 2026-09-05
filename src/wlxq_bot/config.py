@@ -480,6 +480,8 @@ class TasksConfig(BaseModel):
     board: dict[str, BoardGridParams] = Field(default_factory=dict)
     skills: dict[str, Any] = Field(default_factory=dict)
     difficulty_recognition: dict[str, Any] = Field(default_factory=dict)
+    # 保卫宠物难度弹窗 OCR 识别配置（candidate_roi + min_confidence）
+    pet_difficulty_recognition: dict[str, Any] = Field(default_factory=dict)
     # 技能卡采集（统计阶段）的几何参数：比例相对 rois.skill_candidates 裁剪结果
     skill_collection: dict[str, Any] = Field(default_factory=dict)
     # 金币感知（回补召唤/付费选技能门控）配置
@@ -499,6 +501,7 @@ class TasksConfig(BaseModel):
                 "board",
                 "skills",
                 "difficulty_recognition",
+                "pet_difficulty_recognition",
                 "skill_collection",
                 "gold_recognition",
                 "heroes",
