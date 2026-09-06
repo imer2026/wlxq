@@ -2218,7 +2218,7 @@ class TestVerifyAbortOnMatchEnd:
             )
 
         messages = " ".join(record.getMessage() for record in caplog.records)
-        assert "验证期间识别到返回按钮" in messages
+        assert "验证期间对局已结束（返回按钮可见）" in messages
         # 修复后：对局结束信号在对局态下优先于验证——注定失败的验证一次都不跑
         assert task.verify_calls == 0
         assert len(task.failed) == 0
@@ -2309,3 +2309,192 @@ class TestPopupCloseUsesLightObserve:
         # 点击后的验证帧必须走单帧轻量识别——每次关弹窗不再白等十几秒
         assert perception.cultivation_n_frames == [10]
         assert perception.observe_count >= 3
+
+
+class TestPopupPreEmptsVerification:
+    """弹窗出现优先于挂起中的动作验证（2026-09-06 用户不变量）。
+
+    击杀/赠送弹窗、对局结束三者都应先于其他事情处理：验证期间弹窗出现，
+    立即放弃验证，让决策层先关弹窗；对局结束则直接切结算。
+    """
+
+    def test_tan_chuang_pre_empts_merge_verification(self, caplog) -> None:
+        import logging
+
+        from wlxq_bot.models import Action
+        from wlxq_bot.tasks.base import TaskContext
+
+        class _MergeThenPopupTask:
+            """决策桩：弹窗可见→关弹窗；否则→拖动合成。验证恒失败。"""
+
+            def __init__(self) -> None:
+                self.ctx = TaskContext(main_c="assault", max_rounds=1)
+                self.ctx.current_state = State.BUILD_MAIN_C
+                self.verify_calls = 0
+
+            def wants_board_watch(self) -> bool:
+                return False
+
+            def wants_gold_read(self) -> bool:
+                return False
+
+            def observation_mode(self):
+                return None
+
+            def in_match_states(self) -> bool:
+                return True
+
+            def determine_state(self, observation):
+                if observation.flag("return_button_visible"):
+                    return State.HANDLE_RESULT
+                return State.BUILD_MAIN_C
+
+            def decide_action(self, observation, window_ctx):
+                if observation.flag("tan_chuang_visible"):
+                    return (
+                        Action(kind="click", target=(500, 1300), duration=0.08,
+                               verification="next_frame", tag="close_popup",
+                               reason="识别到击杀奖励弹窗，点击关闭"),
+                        State.BUILD_MAIN_C,
+                    )
+                return (
+                    Action(kind="drag", target=(1, 1), end=(2, 2), duration=0.5,
+                           verification="next_frame", tag="merge_heroes",
+                           reason="测试：拖动合成"),
+                    State.BUILD_MAIN_C,
+                )
+
+            def verify_action(self, action, before, after) -> bool:
+                self.verify_calls += 1
+                return False
+
+            def on_action_verified(self, action, to_state) -> None:
+                pass
+
+            def on_action_failed(self, action) -> None:
+                pass
+
+        task = _MergeThenPopupTask()
+
+        class _PopupMidVerifyPerception(FakePerception):
+            """第一帧无弹窗（决策拖动），第二帧起击杀弹窗可见。"""
+
+            def __init__(self) -> None:
+                super().__init__(Observation(frame_id=1))
+                self.observe_count = 0
+
+            def observe(self, ctx, frame, hint_state=State.UNKNOWN,
+                        observation_mode=None, read_gold=False):
+                self.observe_count += 1
+                if self.observe_count == 1:
+                    return Observation(frame_id=ctx.frame_id)
+                return Observation(
+                    frame_id=ctx.frame_id,
+                    raw_data={
+                        "tan_chuang_visible": True,
+                        "tan_chuang_match": MatchResult(
+                            "buttons/tan_chuang.png", (500, 900), 0.9
+                        ),
+                    },
+                )
+
+        executor = FakeExecutor(verified=False)
+        with caplog.at_level(logging.INFO, logger="wlxq_bot.runner"):
+            make_runner()._run_loop(
+                FakeScreen(make_window_ctx()),
+                _PopupMidVerifyPerception(),
+                executor,
+                task,
+                SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+                1,
+                max_steps=6,
+            )
+
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "弹窗出现，优先关闭" in messages
+        # 拖动的验证被放弃（无重试告警），第二个动作立即转为关弹窗
+        assert "merge_heroes 动作后验证失败" not in messages
+        assert [a.tag for a in executor.actions][0] == "merge_heroes"
+        assert "close_popup" in [a.tag for a in executor.actions][1:]
+
+    def test_close_popup_pending_not_pre_empted_by_itself(self, tmp_path, caplog) -> None:
+        """挂起动作本身是关弹窗时，弹窗仍可见=本次关闭未生效，走既有重试预算。"""
+        from wlxq_bot.models import Action
+        from wlxq_bot.tasks.base import TaskContext
+
+        class _StuckPopupTask:
+            def __init__(self) -> None:
+                self.ctx = TaskContext(main_c="assault", max_rounds=1)
+                self.ctx.current_state = State.BUILD_MAIN_C
+                self.verify_calls = 0
+
+            def wants_board_watch(self) -> bool:
+                return False
+
+            def wants_gold_read(self) -> bool:
+                return False
+
+            def observation_mode(self):
+                return None
+
+            def in_match_states(self) -> bool:
+                return True
+
+            def determine_state(self, observation):
+                return State.BUILD_MAIN_C
+
+            def decide_action(self, observation, window_ctx):
+                return (
+                    Action(kind="click", target=(500, 1300), duration=0.08,
+                           verification="next_frame", tag="close_popup",
+                           reason="识别到击杀奖励弹窗，点击关闭"),
+                    State.BUILD_MAIN_C,
+                )
+
+            def verify_action(self, action, before, after) -> bool:
+                self.verify_calls += 1
+                return False  # 弹窗一直关不掉
+
+            def on_action_verified(self, action, to_state) -> None:
+                pass
+
+            def on_action_failed(self, action) -> None:
+                pass
+
+        task = _StuckPopupTask()
+
+        class _PopupAlwaysPerception(FakePerception):
+            def __init__(self) -> None:
+                super().__init__(Observation(frame_id=1))
+                self.observe_count = 0
+
+            def observe(self, ctx, frame, hint_state=State.UNKNOWN,
+                        observation_mode=None, read_gold=False):
+                self.observe_count += 1
+                return Observation(
+                    frame_id=ctx.frame_id,
+                    raw_data={
+                        "tan_chuang_visible": True,
+                        "tan_chuang_match": MatchResult(
+                            "buttons/tan_chuang.png", (500, 900), 0.9
+                        ),
+                    },
+                )
+
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="wlxq_bot.runner"):
+            make_runner()._run_loop(
+                FakeScreen(make_window_ctx()),
+                _PopupAlwaysPerception(),
+                FakeExecutor(verified=False),
+                task,
+                SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+                1,
+                max_steps=12,
+            )
+
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        # 关弹窗自身的验证走满帧预算、按重试预算重新点击（未被预占跳过）
+        assert task.verify_calls >= 5
+        assert "close_popup 动作后验证失败，重新点击关闭" in messages

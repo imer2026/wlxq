@@ -751,10 +751,23 @@ class Runner:
                 # 验证（合成/召唤/技能点击）必然不再满足，继续跑完剩余多帧
                 # 棋盘投票只是白等（2026-09-06 实机：合成/召唤各卡 ~80s 才进
                 # 结算）。丢弃挂起动作，本帧直接进入状态判断切结算。
-                if task.in_match_states and observation.flag("return_button_visible"):
+                # 弹窗预占：挂起动作不是关弹窗本身时，击杀/赠送弹窗出现即放弃
+                # 验证——决策层会优先关闭弹窗，之后再对棋盘重新决策
+                popup_pre_empts = pending.action.tag not in _POPUP_CLOSE_TAGS and (
+                    observation.flag("tan_chuang_visible")
+                    or observation.flag("zeng_song_ji_neng_visible")
+                )
+                if task.in_match_states and (
+                    observation.flag("return_button_visible") or popup_pre_empts
+                ):
+                    reason = (
+                        "对局已结束（返回按钮可见）" if observation.flag("return_button_visible")
+                        else "弹窗出现，优先关闭"
+                    )
                     logger.info(
-                        "frame=%d 验证期间识别到返回按钮，对局已结束，跳过 %s 的剩余验证",
+                        "frame=%d 验证期间%s，跳过 %s 的剩余验证",
                         ctx.frame_id,
+                        reason,
                         pending.action.tag,
                     )
                     pending = None

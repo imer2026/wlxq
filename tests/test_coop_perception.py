@@ -590,7 +590,12 @@ class TestInterfaceFlagGating:
 
         expectations = {
             State.ENTER_MATCH: {"zhun_bei.png"},
-            State.SELECT_OPENING_SKILLS: {"xuan_ze_ji_neng.png", "zhao_huan.png", "tan_chuang.png"},
+            State.SELECT_OPENING_SKILLS: {
+                "xuan_ze_ji_neng.png",
+                "zhao_huan.png",
+                "tan_chuang.png",
+                "fan_hui.png",
+            },
             State.BUILD_MAIN_C: {
                 "xuan_ze_ji_neng.png",
                 "4_xing_e_wai_ji_neng.png",

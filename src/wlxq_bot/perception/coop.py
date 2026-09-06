@@ -97,7 +97,9 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
 _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     State.FIND_COOP: frozenset(),
     State.ENTER_MATCH: frozenset({"ready_button"}),
-    State.SELECT_OPENING_SKILLS: frozenset({"select_skill_button", "summon_button", "tan_chuang"}),
+    State.SELECT_OPENING_SKILLS: frozenset(
+        {"select_skill_button", "summon_button", "tan_chuang", "return_button"}
+    ),
     State.BUILD_MAIN_C: frozenset(
         {
             "select_skill_button",
