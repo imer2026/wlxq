@@ -370,9 +370,15 @@ class TestModeProfile:
         assert set(cfg.mode_profiles) >= {"coop", "pet"}
         assert cfg.run.mode == "coop"
         assert cfg.mode_profiles["pet"].entry.difficulty.kind == "ocr"
-        assert (
-            cfg.mode_profiles["pet"].entry.difficulty.bar_locator
-            == "pet_difficulty_bar"
-        )
-        assert cfg.mode_profiles["coop"].entry.difficulty.bar_locator is None
         assert cfg.mode_profiles["pet"].main_c_overrides["assault"]["skill_selection_cap"] == 0
+
+    def test_repo_tasks_yaml_defines_pet_bar_anchor(self) -> None:
+        """仓库 tasks.yaml 必须定义保卫宠物收起栏锚点（弹窗开关的关闭态判据）。"""
+        from wlxq_bot.config import load_tasks_config
+
+        cfg = load_tasks_config(Path("configs/tasks.yaml"))
+        rec = cfg.pet_difficulty_recognition
+        assert rec["bar_roi"] == "pet_difficulty_bar_area"
+        assert rec["bar_text"] == "选择难度"
+        bar_roi = cfg.rois["pet_difficulty_bar_area"]
+        assert bar_roi.width_ratio > 0 and bar_roi.height_ratio > 0

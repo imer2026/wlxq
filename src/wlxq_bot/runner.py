@@ -271,7 +271,6 @@ class Runner:
             gold_reader=gold_reader,
             gold_read_interval=gold_read_interval,
             difficulty_kind=mode_profile.entry.difficulty.kind,
-            difficulty_bar_locator=mode_profile.entry.difficulty.bar_locator,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -461,7 +460,6 @@ class Runner:
             self.default_config.run.default_main_c,
             debug_recorder=debug_recorder,
             difficulty_kind=mode_profile.entry.difficulty.kind,
-            difficulty_bar_locator=mode_profile.entry.difficulty.bar_locator,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -1255,10 +1253,7 @@ class Runner:
             mode_profile.match.ready_button,
             mode_profile.match.leave_team,
             mode_profile.settlement.return_button,
-            mode_profile.entry.difficulty.bar_locator,
         ):
-            if not locator_name:
-                continue
             locator = self.tasks_config.locators.get(locator_name)
             if not locator:
                 missing_locators.append(f"{locator_name}(未定义)")
@@ -1283,6 +1278,17 @@ class Runner:
                 raise RuntimeError(
                     f"模式 {display!r} 的 OCR 难度识别 ROI 未标定: rois.{roi_name}"
                     "（OCR 必须限域，禁止全图识别）"
+                )
+            bar_roi_name = str(
+                self.tasks_config.pet_difficulty_recognition.get(
+                    "bar_roi", "pet_difficulty_bar_area"
+                )
+            )
+            bar_roi = self.tasks_config.rois.get(bar_roi_name)
+            if bar_roi is None or bar_roi.width_ratio <= 0 or bar_roi.height_ratio <= 0:
+                raise RuntimeError(
+                    f"模式 {display!r} 的收起栏锚点 ROI 未标定: rois.{bar_roi_name}"
+                    "（弹窗开关判定的关闭态锚点，缺失会导致关闭循环无法收敛）"
                 )
             try:
                 ensure_engine()

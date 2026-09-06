@@ -45,7 +45,7 @@
 |---|---|---|---|
 | 1 | 入口页签（两模式统一：进招募先点自己的模式页签） | 配置 | `entry.mode_tab_hotspot` |
 | 2 | 难度识别：模板+滚动 vs OCR 免滚动 | 配置+分派 | `difficulty.kind: template / ocr` |
-| 3 | 难度弹窗开关确认：标题图 vs「选择难度」收起栏反向判定 | 配置+分派 | `entry.difficulty.bar_locator` |
+| 3 | 难度弹窗开关确认：标题图 vs「选择难度」收起栏文字 OCR 反向判定 | 配置+分派 | `pet_difficulty_recognition.bar_roi/bar_text` |
 | 4 | 准备/返回/退队模板与识别区 | 配置 | locator 名按模式解析 |
 | 5 | 结算跳过点赞/宝箱 | 配置 | `settlement.like_chest: false` |
 | 6 | 结算返回后的聊天入口（兼退队非首页兜底） | 配置 | `mode_chat_hotspot` |
@@ -151,7 +151,7 @@ pet_difficulty_recognition:
   → 点 pet_chat → 补点一次招募（幂等）→ 点页签 → 开/关难度弹窗刷新邀请 → 再抢
 ```
 
-弹窗开关确认预算完全复用现有参数（`difficulty_open_settle_seconds` / `difficulty_poll_interval_seconds` / `difficulty_open_confirm_hits` / `difficulty_open_fail_misses` / `difficulty_open_max_reclicks` / `difficulty_close_confirm_frames` / `difficulty_close_max_attempts`），配置 `bar_locator`（保卫宠物=「选择难度」收起栏模板）时：栏可见 = 已收起，栏被展开面板盖住 = 打开；未配置时按标题图模板正向判定。实机修正（2026-09-06）：最初用 OCR 行存在性判开关，但弹窗关闭后邀请卡标题与难度行同区域，行存在性无法区分开关，实机首跑即踩中，改为收起栏锚点。
+弹窗开关确认预算完全复用现有参数（`difficulty_open_settle_seconds` / `difficulty_poll_interval_seconds` / `difficulty_open_confirm_hits` / `difficulty_open_fail_misses` / `difficulty_open_max_reclicks` / `difficulty_close_confirm_frames` / `difficulty_close_max_attempts`），配置 `bar_roi`/`bar_text`（保卫宠物=「选择难度」收起栏文字 OCR）时：栏文字可读 = 已收起，栏被展开面板盖住 = 打开；未配置时按标题图模板正向判定。实机修正（2026-09-06）：最初用 OCR 行存在性判开关，但弹窗关闭后邀请卡标题与难度行同区域，行存在性无法区分开关，实机首跑即踩中，改为收起栏锚点。
 
 ### 4.4 错误处理与保守停止
 

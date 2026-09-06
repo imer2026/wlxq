@@ -309,9 +309,6 @@ mode_profiles:
       difficulty:
         kind: ocr
         targets: [普通, 中等]
-        # 弹窗开关的关闭态锚点：「选择难度」收起栏模板（栏可见=已收起）。
-        # 弹窗关闭后邀请卡标题与难度行同区域，行文字存在性无法区分开关
-        bar_locator: pet_difficulty_bar
     match:
       ready_button: pet_ready_button
       leave_team: pet_leave_team

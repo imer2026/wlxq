@@ -278,14 +278,6 @@ locators:
     threshold: 0.82
     action_point:
       source: match_center
-  # 【保卫宠物-选择难度】收起栏（2026-09-06 实机标定，927×1727 客户区）。
-  # 保卫宠物难度弹窗开关的判定锚点：栏可见=弹窗已收起，栏被展开面板盖住=弹窗打开。
-  # 离线验证（2026-09-06 实机退出帧）：打开态得分 0.300、收起态 1.000，阈值 0.82 分离充足
-  pet_difficulty_bar:
-    strategy: template
-    template: buttons/xuan_ze_nan_du.png
-    threshold: 0.82
-    roi: pet_difficulty_bar_area
 
 # ROI 区域定义
 # 使用比例坐标（ratio），相对于客户区左上角
@@ -376,8 +368,9 @@ rois:
     height_ratio: 0.2362
 
   # 保卫宠物难度弹窗的「选择难度」收起栏区域（2026-09-06 实机标定）。
-  # 供 pet_difficulty_bar locator 判定弹窗开关：栏可见=已收起，栏被展开面板
-  # 盖住=打开。打开态得分 0.300、收起态 1.000（实机退出帧离线验证）
+  # 供弹窗开关判定：OCR 读栏文字，可见=已收起，被展开面板盖住=打开。
+  # 离线验证（2026-09-06 实机退出帧 20 帧）：可见帧稳定读出「选择难度」
+  # （conf 0.80），被盖住帧全空，15/15 开关判定一致
   pet_difficulty_bar_area:
     relative_to: client
     x_ratio: 0.3830
@@ -448,6 +441,11 @@ rois:
 pet_difficulty_recognition:
   candidate_roi: pet_difficulty_list
   min_confidence: 0.5
+  # 弹窗开关的关闭态锚点：OCR 读本区域文字，读到 bar_text=已收起（flag False），
+  # 读不到=弹窗打开。弹窗关闭后邀请卡标题与难度行同区域，行存在性无法区分
+  # 开关（2026-09-06 实机首跑踩中），故开关判定用收起栏文字而非难度行
+  bar_roi: pet_difficulty_bar_area
+  bar_text: 选择难度
 
 # 棋盘格子坐标模型
 # 由 wlxq-bot pick --rect 量测排1/排2 格子后计算得出（见 docs/game-rules.md）

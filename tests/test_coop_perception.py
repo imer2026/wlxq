@@ -1087,7 +1087,9 @@ class TestPetDifficultyOcr:
             _make_window_ctx(), self._frame(), observation_mode="coop_difficulty"
         )
         assert observation.raw_data["pet_difficulty_rows"] == []
-        assert observation.raw_data["difficulty_dialog_visible"] is False
+        # 低置信度行被过滤后，收起栏锚点也读不到「选择难度」→ 视为弹窗打开
+        # （保守：绝不在锚点未确认收起时推进关闭）
+        assert observation.raw_data["difficulty_dialog_visible"] is True
 
     def test_ocr_dialog_mode_reports_visibility_without_candidates(self, tmp_path) -> None:
         reader = FakeRowReader([("保卫宠物-普通", 0.85, (120, 50))])
@@ -1096,7 +1098,8 @@ class TestPetDifficultyOcr:
             _make_window_ctx(), self._frame(), observation_mode="difficulty_dialog"
         )
         assert observation.raw_data["difficulty_dialog_visible"] is True
-        assert "pet_difficulty_rows" in observation.raw_data
+        # 关闭轮询只跑收起栏锚点，不读难度列表（控制单帧耗时）
+        assert "pet_difficulty_rows" not in observation.raw_data
 
 
 class TestLocatorAliases:
@@ -1202,30 +1205,22 @@ class TestLocatorAliases:
 
 
 class TestPetDifficultyBar:
-    """保卫宠物难度弹窗开关的「选择难度」收起栏锚点测试（2026-09-06 实机 bug 回归）。
+    """保卫宠物难度弹窗开关的「选择难度」收起栏 OCR 锚点测试（2026-09-06 实机 bug 回归）。
 
     实机 bug：弹窗关闭后邀请卡标题（保卫宠物-中等）落在难度行同一 ROI，
-    行文字存在性把"已关闭"误判为"仍打开"。修复后开关判定用收起栏模板：
-    栏可见=已关闭（flag False），栏被展开面板盖住=打开（flag True）。
+    行文字存在性把"已关闭"误判为"仍打开"。修复后开关判定改用收起栏文字
+    OCR：栏文字可见=已关闭（flag False），栏被展开面板盖住=打开（flag True）。
     """
 
     def _tasks_cfg(self) -> TasksConfig:
         return TasksConfig(
-            locators={
-                "pet_difficulty_bar": {
-                    "strategy": "template",
-                    "template": "buttons/xuan_ze_nan_du.png",
-                    "threshold": 0.82,
-                    "roi": "pet_difficulty_bar_area",
-                }
-            },
             rois={
                 "pet_difficulty_bar_area": {
                     "relative_to": "client",
                     "x_ratio": 0.0,
                     "y_ratio": 0.0,
                     "width_ratio": 0.5,
-                    "height_ratio": 0.5,
+                    "height_ratio": 0.125,
                 },
                 "pet_difficulty_list": {
                     "relative_to": "client",
@@ -1235,83 +1230,104 @@ class TestPetDifficultyBar:
                     "height_ratio": 0.5,
                 },
             },
-            pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
-                                        "min_confidence": 0.5},
+            pet_difficulty_recognition={
+                "candidate_roi": "pet_difficulty_list",
+                "min_confidence": 0.5,
+                "bar_roi": "pet_difficulty_bar_area",
+                "bar_text": "选择难度",
+            },
         )
 
-    def _perception(self, tmp_path, vision, reader: FakeRowReader | None):
+    def _perception(self, tmp_path, reader: "FakeBarRowReader"):
         from wlxq_bot.assets import TemplatePack
 
         pack_root = tmp_path / "3000x2000"
-        buttons = pack_root / "buttons"
-        buttons.mkdir(parents=True, exist_ok=True)
-        (buttons / "xuan_ze_nan_du.png").write_bytes(b"t")
+        pack_root.mkdir(parents=True, exist_ok=True)
         return CoopPerception(
-            vision,
+            _RecordingVision(),
             TemplatePack(client_size=(923, 1723), root=pack_root),
             self._tasks_cfg(),
             CoopRole.HELPER,
             "assault",
             difficulty_kind="ocr",
-            difficulty_bar_locator="pet_difficulty_bar",
             difficulty_reader=reader,
         )
 
-    def test_bar_visible_means_dialog_closed(self, tmp_path) -> None:
-        """收起栏可见（模板命中）→ 弹窗已关闭，即使 OCR 行文字存在也不误判。"""
-        from wlxq_bot.assets import TemplatePack
+    def _frame(self) -> np.ndarray:
+        return np.zeros((1723, 923, 3), dtype=np.uint8)
 
-        pack_root = tmp_path / "3000x2000"
-        buttons = pack_root / "buttons"
-        buttons.mkdir(parents=True, exist_ok=True)
-        (buttons / "xuan_ze_nan_du.png").write_bytes(b"t")
-        bar_hit = MatchResult("xuan_ze_nan_du.png", (540, 1439), 0.99)
-        vision = _SingleTemplateVision("xuan_ze_nan_du.png", bar_hit)
-        reader = FakeRowReader([("保卫宠物-中等", 0.85, (100, 100))])
-        perception = self._perception(tmp_path, vision, reader)
+
+class FakeBarRowReader:
+    """按调用顺序返回预设 OCR 结果的 fake：第 1 次调用=难度列表 ROI，第 2 次=收起栏 ROI。
+
+    每项为 (text, confidence, (cx, cy)) 三元组列表；列表耗尽后重复最后一项。
+    """
+
+    def __init__(self, calls: list[list[tuple[str, float, tuple[int, int]]]]) -> None:
+        self.calls = calls
+        self.images: list[np.ndarray] = []
+
+    def read_with_confidence(self, image: np.ndarray):
+        self.images.append(image)
+        idx = min(len(self.images) - 1, len(self.calls) - 1)
+        return self.calls[idx]
+
+
+class TestPetDifficultyBarAnchor(TestPetDifficultyBar):
+    """收起栏 OCR 锚点。"""
+
+    def test_bar_visible_means_dialog_closed_even_with_invite_rows(self, tmp_path) -> None:
+        """核心回归：收起栏文字可读 → 已关闭（行文字存在与否不影响开关判定）。"""
+        reader = FakeBarRowReader([
+            [("选择难度", 0.80, (80, 60))],  # 收起栏 ROI：栏文字可见
+        ])
+        perception = self._perception(tmp_path, reader)
         observation = perception.observe(
-            _make_window_ctx(), None, observation_mode="difficulty_dialog"
+            _make_window_ctx(), np.zeros((1723, 923, 3), dtype=np.uint8),
+            observation_mode="difficulty_dialog",
         )
-        # 核心回归断言：行文字存在，但收起栏可见 → 已关闭
         assert observation.flag("difficulty_dialog_visible") is False
-        assert observation.raw_data["difficulty_bar_match"] == bar_hit
+        assert observation.raw_data["pet_difficulty_bar_visible"] is True
 
-    def test_bar_missing_means_dialog_open(self, tmp_path) -> None:
-        """收起栏被展开面板盖住（模板未命中）→ 弹窗打开。"""
-        reader = FakeRowReader([])
-        perception = self._perception(tmp_path, _RecordingVision(), reader)
+    def test_bar_missing_with_invite_rows_means_open(self, tmp_path) -> None:
+        """收起栏被盖住 + 行文字存在 → 弹窗打开（关闭轮询的常态判定）。"""
+        reader = FakeBarRowReader([
+            [("保卫宠物-中等", 0.85, (100, 100))],
+            [],  # 栏被面板盖住，OCR 全空
+        ])
+        perception = self._perception(tmp_path, reader)
         observation = perception.observe(
-            _make_window_ctx(), None, observation_mode="difficulty_dialog"
+            _make_window_ctx(), np.zeros((1723, 923, 3), dtype=np.uint8),
+            observation_mode="difficulty_dialog",
         )
         assert observation.flag("difficulty_dialog_visible") is True
-        assert "difficulty_bar_match" not in observation.raw_data
 
-    def test_close_poll_skips_ocr_rows(self, tmp_path) -> None:
-        """关闭轮询只做收起栏模板匹配，不跑 OCR（控制单帧耗时）。"""
-        reader = FakeRowReader([("保卫宠物-普通", 0.9, (10, 10))])
-        perception = self._perception(tmp_path, _RecordingVision(), reader)
+    def test_close_poll_ocr_targets_bar_roi(self, tmp_path) -> None:
+        """关闭轮询只 OCR 收起栏小区域（不跑整个难度列表）。"""
+        reader = FakeBarRowReader([[("选择难度", 0.80, (80, 60))]])
+        perception = self._perception(tmp_path, reader)
         perception.observe(
-            _make_window_ctx(), None, observation_mode="difficulty_dialog"
+            _make_window_ctx(), np.zeros((1723, 923, 3), dtype=np.uint8),
+            observation_mode="difficulty_dialog",
         )
-        assert reader.images == []
+        assert len(reader.images) == 1
+        # 收起栏 ROI 高 0.125*1723 ≈ 215，远小于难度列表（0.5*1723 ≈ 861）
+        assert reader.images[0].shape[0] == int(0.125 * 1723)
 
-    def test_selection_mode_reads_rows_and_bar_flag(self, tmp_path) -> None:
-        """勾选模式：OCR 行供点击，开关标志仍由收起栏决定。"""
-        import numpy as np
-        from wlxq_bot.assets import TemplatePack
-
-        pack_root = tmp_path / "3000x2000"
-        buttons = pack_root / "buttons"
-        buttons.mkdir(parents=True, exist_ok=True)
-        (buttons / "xuan_ze_nan_du.png").write_bytes(b"t")
-        bar_hit = MatchResult("xuan_ze_nan_du.png", (540, 1439), 0.99)
-        vision = _SingleTemplateVision("xuan_ze_nan_du.png", bar_hit)
-        reader = FakeRowReader([("保卫宠物-普通", 0.85, (100, 100))])
-        perception = self._perception(tmp_path, vision, reader)
-        frame = np.zeros((1723, 923, 3), dtype=np.uint8)
+    def test_selection_mode_reads_rows_then_bar(self, tmp_path) -> None:
+        """勾选模式：第 1 次 OCR 读难度列表（供点击），第 2 次读收起栏（供开关）。"""
+        reader = FakeBarRowReader([
+            [("保卫宠物-普通", 0.85, (100, 100))],
+            [("选择难度", 0.80, (80, 60))],
+        ])
+        perception = self._perception(tmp_path, reader)
         observation = perception.observe(
-            _make_window_ctx(), frame, observation_mode="coop_difficulty"
+            _make_window_ctx(), np.zeros((1723, 923, 3), dtype=np.uint8),
+            observation_mode="coop_difficulty",
         )
         rows = observation.raw_data["pet_difficulty_rows"]
         assert [row.text for row in rows] == ["保卫宠物-普通"]
         assert observation.flag("difficulty_dialog_visible") is False
+        assert len(reader.images) == 2
+        assert reader.images[0].shape[0] == int(0.5 * 1723)
+        assert reader.images[1].shape[0] == int(0.125 * 1723)

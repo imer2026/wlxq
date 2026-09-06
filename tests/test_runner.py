@@ -1864,10 +1864,19 @@ class TestModeAssets:
                     "y_ratio": 0.57,
                     "width_ratio": 0.30,
                     "height_ratio": 0.24,
-                }
+                },
+                "pet_difficulty_bar_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.38,
+                    "y_ratio": 0.80,
+                    "width_ratio": 0.38,
+                    "height_ratio": 0.07,
+                },
             },
             pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
-                                        "min_confidence": 0.5},
+                                        "min_confidence": 0.5,
+                                        "bar_roi": "pet_difficulty_bar_area",
+                                        "bar_text": "选择难度"},
         )
         return Runner(default_cfg, tasks_cfg, None)
 

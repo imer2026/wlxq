@@ -346,7 +346,7 @@ flowchart TD
 
 读不到目标难度行时不开环盲点：视为「目标不可见」，等待后重读；行文字持续不可见达 `difficulty_open_fail_misses` 预算（与打开确认共用）时由任务层保守停止——OCR 模式无滚动、也不重点打开按钮，会提示确认难度弹窗已打开且 `pet_difficulty_list` ROI 标定正确。OCR 引擎异常不被 `perception.observe` 捕获，将直接终止任务（比识别失败更保守），不静默跳过。
 
-弹窗打开/关闭确认复用合作的全套轮询参数（`difficulty_open_settle_seconds` / `difficulty_poll_interval_seconds` / `difficulty_open_confirm_hits` / `difficulty_open_fail_misses` / `difficulty_open_max_reclicks` / `difficulty_close_confirm_frames` / `difficulty_close_max_attempts`），只是「标识」从【合作模式】标题图模板换成「选择难度」收起栏模板的反向判定（标志名 `difficulty_dialog_visible` 不变）：栏可见 = 弹窗已收起（flag False），栏被展开面板盖住 = 弹窗打开（flag True）。离线验证（2026-09-06 实机退出帧）：打开态模板得分 0.300、收起态 1.000，阈值 0.82 分离充足。**不能用 OCR 行存在性判定开关**——弹窗关闭后招募频道的邀请卡标题（保卫宠物-××）与难度行同区域，会被误读为难度行导致永远判定"弹窗打开"（2026-09-06 实机首跑踩中，局 2 关闭循环 5 次耗尽保守停止）。勾选难度步骤仍用 OCR 行文字（弹窗打开时面板遮住邀请列表，读到的就是难度行）。
+弹窗打开/关闭确认复用合作的全套轮询参数（`difficulty_open_settle_seconds` / `difficulty_poll_interval_seconds` / `difficulty_open_confirm_hits` / `difficulty_open_fail_misses` / `difficulty_open_max_reclicks` / `difficulty_close_confirm_frames` / `difficulty_close_max_attempts`），只是「标识」从【合作模式】标题图模板换成「选择难度」收起栏文字 OCR 的反向判定（标志名 `difficulty_dialog_visible` 不变）：收起栏文字可读 = 弹窗已收起（flag False），栏被展开面板盖住 = 弹窗打开（flag True）。关闭轮询只 OCR 收起栏小区域，不跑难度列表。离线验证（2026-09-06 实机退出帧 20 帧）：可见帧稳定读出「选择难度」（conf 0.80），被盖住帧全空，15/15 开关判定一致；OCR 对皮肤换色免疫，比文字模板更通用。**不能用 OCR 行存在性判定开关**——弹窗关闭后招募频道的邀请卡标题（保卫宠物-××）与难度行同区域，会被误读为难度行导致永远判定"弹窗打开"（2026-09-06 实机首跑踩中，局 2 关闭循环 5 次耗尽保守停止）。勾选难度步骤仍用 OCR 行文字（弹窗打开时面板遮住邀请列表，读到的就是难度行）。
 
 实机验证时可手动打开宠物难度弹窗，再执行 `wlxq-bot exec select-difficulty --mode pet` 单独验证 OCR 勾选；命令只运行勾选步骤，完成后保持弹窗打开，不进入后续招募流程。
 

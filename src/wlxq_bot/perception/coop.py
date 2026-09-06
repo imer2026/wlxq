@@ -148,7 +148,6 @@ class CoopPerception:
         difficulty_kind: str = "template",
         locator_aliases: dict[str, str] | None = None,
         difficulty_reader: Any | None = None,
-        difficulty_bar_locator: str | None = None,
     ) -> None:
         self._vision = vision
         self._pack = template_pack
@@ -203,10 +202,6 @@ class CoopPerception:
         # coop_leave_team 三个可被重映射；标志名不变，任务层零改动）
         self._locator_aliases = dict(locator_aliases or {})
         self._difficulty_reader = difficulty_reader
-        # 保卫宠物难度弹窗开关的关闭态锚点（「选择难度」收起栏 locator 名）：
-        # 栏可见=弹窗已收起。弹窗关闭后邀请卡标题与难度行同区域，行文字存在性
-        # 无法区分开关（2026-09-06 实机），故配置了锚点时开关判定不用 OCR 行
-        self._difficulty_bar_locator = difficulty_bar_locator
 
     @property
     def available_heroes(self) -> list[str]:
@@ -285,21 +280,15 @@ class CoopPerception:
             if self._difficulty_kind == "ocr":
                 # 保卫宠物：OCR 读难度行（供勾选点击）；弹窗开关用收起栏判定
                 self._detect_pet_difficulty_rows(ctx, frame, raw_data)
-                if self._difficulty_bar_locator:
-                    self._detect_pet_difficulty_bar_flag(ctx, frame, raw_data, matches)
-                else:
-                    raw_data["difficulty_dialog_visible"] = bool(raw_data["pet_difficulty_rows"])
+                self._detect_pet_difficulty_bar_flag(ctx, frame, raw_data, matches)
             else:
                 self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
                 difficulty_candidates = self._detect_difficulty_candidates(ctx, frame, matches)
         elif observation_mode == "difficulty_dialog":
             # 关闭/确认关闭难度弹窗：只判定弹窗开关标识，跳过难度候选匹配；
-            # 配置了收起栏锚点时轮询只做模板匹配，不跑 OCR（控制单帧耗时）
-            if self._difficulty_bar_locator:
+            # 保卫宠物轮询只 OCR 收起栏小区域（控制单帧耗时）
+            if self._difficulty_kind == "ocr":
                 self._detect_pet_difficulty_bar_flag(ctx, frame, raw_data, matches)
-            elif self._difficulty_kind == "ocr":
-                self._detect_pet_difficulty_rows(ctx, frame, raw_data)
-                raw_data["difficulty_dialog_visible"] = bool(raw_data["pet_difficulty_rows"])
             else:
                 self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
 
@@ -587,19 +576,32 @@ class CoopPerception:
         raw_data: dict[str, Any],
         matches: list,
     ) -> None:
-        """以「选择难度」收起栏正向判定保卫宠物难度弹窗是否已收起。
+        """以「选择难度」收起栏文字正向判定保卫宠物难度弹窗是否已收起。
 
-        栏可见=弹窗已收起（difficulty_dialog_visible=False），栏被展开面板
-        盖住=弹窗打开（True）。弹窗关闭后邀请卡标题（保卫宠物-××）与难度行
-        同区域，行文字存在性无法区分开关（2026-09-06 实机退出帧：
-        打开态模板得分 0.300、收起态 1.000），故开关判定不使用 OCR 行。
+        栏文字可见=弹窗已收起（difficulty_dialog_visible=False），栏被展开
+        面板盖住=弹窗打开（True）。弹窗关闭后邀请卡标题（保卫宠物-××）与
+        难度行同区域，行文字存在性无法区分开关（2026-09-06 实机首跑踩中），
+        故开关判定改用收起栏文字；OCR 对皮肤换色免疫，比模板更通用。
+        ROI 与文字来自 pet_difficulty_recognition 的 bar_roi / bar_text；
+        离线验证（2026-09-06 实机退出帧 20 帧）：可见帧稳定读出「选择难度」
+        （conf 0.80），被盖住帧全空，15/15 开关判定一致。
         """
-        locator = self._cfg.locators.get(self._difficulty_bar_locator)
-        match = self._match_locator_template(ctx, frame, locator) if locator else None
-        raw_data["difficulty_dialog_visible"] = match is None
-        if match is not None:
-            matches.append(match)
-            raw_data["difficulty_bar_match"] = match
+        cfg = self._cfg.pet_difficulty_recognition
+        bar_roi_name = str(cfg.get("bar_roi", "pet_difficulty_bar_area"))
+        bar_roi = self._resolve_named_roi(bar_roi_name, ctx)
+        bar_text = str(cfg.get("bar_text", "选择难度"))
+        min_confidence = float(cfg.get("min_confidence", 0.5))
+        bar_rows = [
+            row
+            for row in read_difficulty_rows(frame, bar_roi, reader=self._difficulty_reader)
+            if row.confidence >= min_confidence and bar_text in row.text
+        ]
+        bar_visible = bool(bar_rows)
+        raw_data["pet_difficulty_bar_visible"] = bar_visible
+        raw_data["difficulty_dialog_visible"] = not bar_visible
+        logger.debug(
+            "frame=%d 选择难度栏可见=%s", ctx.frame_id, bar_visible
+        )
 
     def _detect_skill_candidates(
         self,
