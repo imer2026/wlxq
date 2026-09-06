@@ -278,6 +278,14 @@ locators:
     threshold: 0.82
     action_point:
       source: match_center
+  # 【保卫宠物-选择难度】收起栏（2026-09-06 实机标定，927×1727 客户区）。
+  # 保卫宠物难度弹窗开关的判定锚点：栏可见=弹窗已收起，栏被展开面板盖住=弹窗打开。
+  # 离线验证（2026-09-06 实机退出帧）：打开态得分 0.300、收起态 1.000，阈值 0.82 分离充足
+  pet_difficulty_bar:
+    strategy: template
+    template: buttons/xuan_ze_nan_du.png
+    threshold: 0.82
+    roi: pet_difficulty_bar_area
 
 # ROI 区域定义
 # 使用比例坐标（ratio），相对于客户区左上角
@@ -366,6 +374,16 @@ rois:
     y_ratio: 0.5732
     width_ratio: 0.3010
     height_ratio: 0.2362
+
+  # 保卫宠物难度弹窗的「选择难度」收起栏区域（2026-09-06 实机标定）。
+  # 供 pet_difficulty_bar locator 判定弹窗开关：栏可见=已收起，栏被展开面板
+  # 盖住=打开。打开态得分 0.300、收起态 1.000（实机退出帧离线验证）
+  pet_difficulty_bar_area:
+    relative_to: client
+    x_ratio: 0.3830
+    y_ratio: 0.7956
+    width_ratio: 0.3840
+    height_ratio: 0.0724
 
   # 金币感知三区域，标定自 927×1727 客户区（2026-09-05 实机截图）。
   # 供回补召唤与付费选技能的金币门控；只框数字本身，不含图标。

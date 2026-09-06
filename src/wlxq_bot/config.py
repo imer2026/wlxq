@@ -106,6 +106,10 @@ class DifficultyProfile(BaseModel):
     kind: Literal["template", "ocr"] = "template"
     # ocr 模式的目标难度（行文字子串，如「普通」⊂「保卫宠物-普通」）；配置顺序即点击顺序
     targets: list[str] = Field(default_factory=list)
+    # 难度弹窗开关的关闭态锚点 locator 名（configs/tasks.yaml）：锚点可见=弹窗已收起，
+    # 锚点被展开面板盖住=弹窗打开。保卫宠物用「选择难度」收起栏模板——
+    # 弹窗关闭后邀请卡标题与难度行同区域，行文字存在性无法区分开关（2026-09-06 实机）
+    bar_locator: str | None = None
 
 
 class EntryProfile(BaseModel):

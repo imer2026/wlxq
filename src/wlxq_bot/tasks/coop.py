@@ -123,15 +123,16 @@ class CoopTask(Task):
         self._difficulty_scroll_count = 0
         # 本目标难度的尝试期间是否见过彩虹候选：决定跳过后是否重置滚动预算
         self._difficulty_saw_candidates = False
-        # 弹窗打开确认：settle → 轮询连续命中【合作模式】标题图（见
-        # _action_confirm_difficulty_open）；重点打开按钮时全部重置
+        # 弹窗打开确认：settle → 轮询连续命中难度弹窗标识（合作=【合作模式】标题图；
+        # 保卫宠物=「选择难度」收起栏被面板盖住，见 perception 配置）
+        # （见 _action_confirm_difficulty_open）；重点打开按钮时全部重置
         self._difficulty_open_settled = False
         self._difficulty_open_hits = 0
         self._difficulty_open_misses = 0
         self._difficulty_open_reclicks = 0
         # 本次打开确认来自下一局刷新路径（确认后进 CLOSE_REFRESH 而非勾选）
         self._difficulty_open_is_refresh = False
-        # 弹窗关闭确认：连续不可见标题图（见 _action_close_difficulty_dialog）
+        # 弹窗关闭确认：连续不可见弹窗标识（见 _action_close_difficulty_dialog）
         self._difficulty_close_attempts = 0
         self._difficulty_close_streak = 0
 
@@ -348,7 +349,7 @@ class CoopTask(Task):
             _RecruitStep.CLOSE_DIFFICULTY_DIALOG,
             _RecruitStep.CLOSE_REFRESH_DIFFICULTY_DIALOG,
         ):
-            # 打开/关闭确认只需【合作模式】标题图判定弹窗开关，不做 16 个
+            # 打开/关闭确认只需难度弹窗标识判定弹窗开关，不做 16 个
             # 难度候选匹配：候选匹配会把单帧识别拖慢到超过截图时效
             # （实机 2026-08-17：慢速机器上每帧 6 秒导致动作全部被时效拒绝）
             return "difficulty_dialog"
@@ -496,8 +497,9 @@ class CoopTask(Task):
         """正向确认难度弹窗真的打开，再进入勾选/关闭步骤（2026-08-21 实机定案）。
 
         弹窗打开快慢不定：点击打开按钮后先固定等待 ``difficulty_open_settle_seconds``
-        吸收时序差异，再每 ``difficulty_poll_interval_seconds`` 识别一次【合作模式】
-        标题图，连续 ``difficulty_open_confirm_hits`` 次可见才算打开（弹出动画帧
+        吸收时序差异，再每 ``difficulty_poll_interval_seconds`` 识别一次难度弹窗
+        标识（合作=【合作模式】标题图；保卫宠物=「选择难度」收起栏被面板盖住），
+        连续 ``difficulty_open_confirm_hits`` 次可见才算打开（弹出动画帧
         凑不够连续命中）。连续 ``difficulty_open_fail_misses`` 次不可见说明本次
         点击未生效：重点打开按钮（最多 ``difficulty_open_max_reclicks`` 次），
         重试用尽仍打不开则保守停止——绝不带着「没打开」的假设进入后续步骤
@@ -522,14 +524,14 @@ class CoopTask(Task):
                     duration=0.0,
                     verification="immediate",
                     tag="difficulty_open_confirmed",
-                    reason="难度弹窗已确认打开（标题图连续命中）",
+                    reason="难度弹窗已确认打开（弹窗标识连续命中）",
                 ),
                 State.FIND_COOP,
             )
         if self._difficulty_open_misses >= cfg.difficulty_open_fail_misses:
             if self._difficulty_open_reclicks >= cfg.difficulty_open_max_reclicks:
                 logger.error(
-                    "难度弹窗重点 %d 次后仍识别不到【合作模式】标识，保守停止 frame=%d",
+                    "难度弹窗重点 %d 次后仍识别不到弹窗标识，保守停止 frame=%d",
                     self._difficulty_open_reclicks,
                     observation.frame_id,
                 )
@@ -549,7 +551,7 @@ class CoopTask(Task):
                     duration=cfg.difficulty_poll_interval_seconds,
                     verification="immediate",
                     tag="difficulty_open_hit",
-                    reason=f"难度弹窗标题图可见（连续 "
+                    reason=f"难度弹窗标识可见（连续 "
                     f"{self._difficulty_open_hits + 1}/{cfg.difficulty_open_confirm_hits}）",
                 ),
                 State.FIND_COOP,
@@ -560,7 +562,7 @@ class CoopTask(Task):
                 duration=cfg.difficulty_poll_interval_seconds,
                 verification="immediate",
                 tag="difficulty_open_miss",
-                reason=f"难度弹窗标题图不可见（连续 "
+                    reason=f"难度弹窗标识不可见（连续 "
                 f"{self._difficulty_open_misses + 1}/{cfg.difficulty_open_fail_misses}）",
             ),
             State.FIND_COOP,
@@ -575,13 +577,14 @@ class CoopTask(Task):
         closed_tag: str,
         reason_prefix: str,
     ) -> tuple[Action, State] | None:
-        """关闭难度弹窗，并以【合作模式】标题图（he_zuo_mo_shi）判定弹窗开关。
+        """关闭难度弹窗，并以难度弹窗标识判定弹窗开关（合作=he_zuo_mo_shi 标题图；
+        保卫宠物=「选择难度」收起栏，不可见=打开）。
 
         打开确认步骤已保证弹窗真的打开过，这里统一按「连续
-        ``difficulty_close_confirm_frames`` 次识别不到标题图」判定关闭（间隔
+        ``difficulty_close_confirm_frames`` 次识别不到弹窗标识」判定关闭（间隔
         ``difficulty_poll_interval_seconds``）：单帧漏检不再致命；收起动画期间
-        标题图可见只触发再次点击（实机确认：面板已收起时再点招募按钮无反应，
-        重复点击无副作用）。标题图可见 = 没关住，重点关闭按钮，最多
+        标识可见只触发再次点击（实机确认：面板已收起时再点招募按钮无反应，
+        重复点击无副作用）。标识可见 = 没关住，重点关闭按钮，最多
         ``difficulty_close_max_attempts`` 次，仍可见则保守停止——绝不带着未关闭
         的弹窗进入抢合作（弹窗挡住 join_coop，连点还会落在难度行上误改勾选）。
         """
@@ -589,7 +592,8 @@ class CoopTask(Task):
         if observation.flag("difficulty_dialog_visible"):
             if self._difficulty_close_attempts >= cfg.difficulty_close_max_attempts:
                 logger.error(
-                    "难度弹窗关闭点击 %d 次后仍识别到【合作模式】标识，保守停止 frame=%d",
+                    "难度弹窗关闭点击 %d 次后弹窗标识仍可见，保守停止 frame=%d"
+                    "（合作=标题图仍在；保卫宠物=「选择难度」收起栏未出现）",
                     self._difficulty_close_attempts,
                     observation.frame_id,
                 )
@@ -1809,7 +1813,7 @@ class CoopTask(Task):
         elif tag == "open_mode_tab":
             self._recruit_step = self._after_tab_step
         elif tag in {"open_difficulty_dialog", "open_refresh_difficulty_dialog"}:
-            # 打开点击已发送：进入打开确认步骤（settle → 轮询连续命中标题图）。
+            # 打开点击已发送：进入打开确认步骤（settle → 轮询连续命中弹窗标识）。
             # 首局与下一局刷新共用确认，确认成功后按来源分流到各自后续步骤
             self._difficulty_open_settled = False
             self._difficulty_open_hits = 0
@@ -1874,7 +1878,7 @@ class CoopTask(Task):
             self._after_tab_step = _RecruitStep.OPEN_REFRESH_DIFFICULTY_DIALOG
             self._recruit_step = _RecruitStep.SELECT_MODE_TAB
         elif tag in {"close_difficulty_dialog", "close_refresh_difficulty_dialog"}:
-            # 点击已发送但弹窗未必关住：留在本步骤，等标题图连续不可见才推进
+            # 点击已发送但弹窗未必关住：留在本步骤，等弹窗标识连续不可见才推进
             self._difficulty_close_attempts += 1
             self._difficulty_close_streak = 0
         elif tag == "difficulty_close_miss_check":

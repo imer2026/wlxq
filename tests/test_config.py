@@ -370,4 +370,9 @@ class TestModeProfile:
         assert set(cfg.mode_profiles) >= {"coop", "pet"}
         assert cfg.run.mode == "coop"
         assert cfg.mode_profiles["pet"].entry.difficulty.kind == "ocr"
+        assert (
+            cfg.mode_profiles["pet"].entry.difficulty.bar_locator
+            == "pet_difficulty_bar"
+        )
+        assert cfg.mode_profiles["coop"].entry.difficulty.bar_locator is None
         assert cfg.mode_profiles["pet"].main_c_overrides["assault"]["skill_selection_cap"] == 0

@@ -1199,3 +1199,119 @@ class TestLocatorAliases:
         # 确实匹配的是宠物专属模板（template_calls 记录解析后的绝对路径）
         assert len(vision.template_calls) == 1
         assert vision.template_calls[0].endswith("zhun_bei.png")
+
+
+class TestPetDifficultyBar:
+    """保卫宠物难度弹窗开关的「选择难度」收起栏锚点测试（2026-09-06 实机 bug 回归）。
+
+    实机 bug：弹窗关闭后邀请卡标题（保卫宠物-中等）落在难度行同一 ROI，
+    行文字存在性把"已关闭"误判为"仍打开"。修复后开关判定用收起栏模板：
+    栏可见=已关闭（flag False），栏被展开面板盖住=打开（flag True）。
+    """
+
+    def _tasks_cfg(self) -> TasksConfig:
+        return TasksConfig(
+            locators={
+                "pet_difficulty_bar": {
+                    "strategy": "template",
+                    "template": "buttons/xuan_ze_nan_du.png",
+                    "threshold": 0.82,
+                    "roi": "pet_difficulty_bar_area",
+                }
+            },
+            rois={
+                "pet_difficulty_bar_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.0,
+                    "y_ratio": 0.0,
+                    "width_ratio": 0.5,
+                    "height_ratio": 0.5,
+                },
+                "pet_difficulty_list": {
+                    "relative_to": "client",
+                    "x_ratio": 0.0,
+                    "y_ratio": 0.0,
+                    "width_ratio": 0.5,
+                    "height_ratio": 0.5,
+                },
+            },
+            pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
+                                        "min_confidence": 0.5},
+        )
+
+    def _perception(self, tmp_path, vision, reader: FakeRowReader | None):
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        buttons = pack_root / "buttons"
+        buttons.mkdir(parents=True, exist_ok=True)
+        (buttons / "xuan_ze_nan_du.png").write_bytes(b"t")
+        return CoopPerception(
+            vision,
+            TemplatePack(client_size=(923, 1723), root=pack_root),
+            self._tasks_cfg(),
+            CoopRole.HELPER,
+            "assault",
+            difficulty_kind="ocr",
+            difficulty_bar_locator="pet_difficulty_bar",
+            difficulty_reader=reader,
+        )
+
+    def test_bar_visible_means_dialog_closed(self, tmp_path) -> None:
+        """收起栏可见（模板命中）→ 弹窗已关闭，即使 OCR 行文字存在也不误判。"""
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        buttons = pack_root / "buttons"
+        buttons.mkdir(parents=True, exist_ok=True)
+        (buttons / "xuan_ze_nan_du.png").write_bytes(b"t")
+        bar_hit = MatchResult("xuan_ze_nan_du.png", (540, 1439), 0.99)
+        vision = _SingleTemplateVision("xuan_ze_nan_du.png", bar_hit)
+        reader = FakeRowReader([("保卫宠物-中等", 0.85, (100, 100))])
+        perception = self._perception(tmp_path, vision, reader)
+        observation = perception.observe(
+            _make_window_ctx(), None, observation_mode="difficulty_dialog"
+        )
+        # 核心回归断言：行文字存在，但收起栏可见 → 已关闭
+        assert observation.flag("difficulty_dialog_visible") is False
+        assert observation.raw_data["difficulty_bar_match"] == bar_hit
+
+    def test_bar_missing_means_dialog_open(self, tmp_path) -> None:
+        """收起栏被展开面板盖住（模板未命中）→ 弹窗打开。"""
+        reader = FakeRowReader([])
+        perception = self._perception(tmp_path, _RecordingVision(), reader)
+        observation = perception.observe(
+            _make_window_ctx(), None, observation_mode="difficulty_dialog"
+        )
+        assert observation.flag("difficulty_dialog_visible") is True
+        assert "difficulty_bar_match" not in observation.raw_data
+
+    def test_close_poll_skips_ocr_rows(self, tmp_path) -> None:
+        """关闭轮询只做收起栏模板匹配，不跑 OCR（控制单帧耗时）。"""
+        reader = FakeRowReader([("保卫宠物-普通", 0.9, (10, 10))])
+        perception = self._perception(tmp_path, _RecordingVision(), reader)
+        perception.observe(
+            _make_window_ctx(), None, observation_mode="difficulty_dialog"
+        )
+        assert reader.images == []
+
+    def test_selection_mode_reads_rows_and_bar_flag(self, tmp_path) -> None:
+        """勾选模式：OCR 行供点击，开关标志仍由收起栏决定。"""
+        import numpy as np
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        buttons = pack_root / "buttons"
+        buttons.mkdir(parents=True, exist_ok=True)
+        (buttons / "xuan_ze_nan_du.png").write_bytes(b"t")
+        bar_hit = MatchResult("xuan_ze_nan_du.png", (540, 1439), 0.99)
+        vision = _SingleTemplateVision("xuan_ze_nan_du.png", bar_hit)
+        reader = FakeRowReader([("保卫宠物-普通", 0.85, (100, 100))])
+        perception = self._perception(tmp_path, vision, reader)
+        frame = np.zeros((1723, 923, 3), dtype=np.uint8)
+        observation = perception.observe(
+            _make_window_ctx(), frame, observation_mode="coop_difficulty"
+        )
+        rows = observation.raw_data["pet_difficulty_rows"]
+        assert [row.text for row in rows] == ["保卫宠物-普通"]
+        assert observation.flag("difficulty_dialog_visible") is False

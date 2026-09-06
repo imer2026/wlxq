@@ -271,6 +271,7 @@ class Runner:
             gold_reader=gold_reader,
             gold_read_interval=gold_read_interval,
             difficulty_kind=mode_profile.entry.difficulty.kind,
+            difficulty_bar_locator=mode_profile.entry.difficulty.bar_locator,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -460,6 +461,7 @@ class Runner:
             self.default_config.run.default_main_c,
             debug_recorder=debug_recorder,
             difficulty_kind=mode_profile.entry.difficulty.kind,
+            difficulty_bar_locator=mode_profile.entry.difficulty.bar_locator,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -1253,7 +1255,10 @@ class Runner:
             mode_profile.match.ready_button,
             mode_profile.match.leave_team,
             mode_profile.settlement.return_button,
+            mode_profile.entry.difficulty.bar_locator,
         ):
+            if not locator_name:
+                continue
             locator = self.tasks_config.locators.get(locator_name)
             if not locator:
                 missing_locators.append(f"{locator_name}(未定义)")
