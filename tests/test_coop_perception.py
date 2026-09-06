@@ -1096,6 +1096,19 @@ class TestPetDifficultyOcr:
         # （保守：绝不在锚点未确认收起时推进关闭）
         assert observation.raw_data["difficulty_dialog_visible"] is True
 
+    def test_light_mode_skips_skill_candidates_and_title_ocr(self, tmp_path) -> None:
+        """light 验证帧只算界面标志：跳过技能卡 OCR（含标题识别）与采集。"""
+        reader = FakeRowReader([("保卫宠物-普通", 0.85, (120, 50))])
+        perception = self._perception(reader, tmp_path)
+        observation = perception.observe(
+            _make_window_ctx(), self._frame(),
+            hint_state=State.SELECT_MAIN_C_SKILLS, light=True,
+        )
+        assert observation.skill_candidates == []
+        assert reader.images == []  # 技能标题 OCR 未执行
+        # 界面标志（含弹窗标识）仍然计算——这是验证帧的本职
+        assert "tan_chuang_visible" in observation.raw_data
+
     def test_ocr_dialog_mode_reports_visibility_without_candidates(self, tmp_path) -> None:
         reader = FakeRowReader([("保卫宠物-普通", 0.85, (120, 50))])
         perception = self._perception(reader, tmp_path)

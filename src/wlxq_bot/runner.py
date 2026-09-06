@@ -734,6 +734,7 @@ class Runner:
                     task.ctx.current_state,
                     task.observation_mode(),
                     read_gold=task.wants_gold_read(),
+                    light=light_verify,
                 )
             observe_ms = (time.perf_counter() - observe_started) * 1000
 

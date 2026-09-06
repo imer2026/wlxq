@@ -219,6 +219,7 @@ class CoopPerception:
         hint_state: State = State.UNKNOWN,
         observation_mode: str | None = None,
         read_gold: bool = False,
+        light: bool = False,
     ) -> Observation:
         """对一帧截图做识别，返回 Observation。
 
@@ -229,6 +230,10 @@ class CoopPerception:
             observation_mode: 任务内部步骤要求的专项识别模式
             read_gold: 当前是否需要金币感知（任务层 wants_gold_read 声明）；
                 按最小间隔读取，间隔内复用上次结果
+
+        Args:
+            light: 轻量模式（动作后验证帧用）：只算界面标志，跳过技能卡
+                OCR、金币读取与采集——验证只需要「标志还在不在」
 
         Returns:
             Observation，界面标志存 raw_data，培养阶段附带 board 快照
@@ -254,6 +259,7 @@ class CoopPerception:
             raw_data,
             matches,
             observation_mode=observation_mode,
+            light=light,
         )
         # 金币感知（按需）：仅任务层声明需要（回补召唤/付费选技能门控）时读取。
         # 技能页/赠送页已打开时金币已支付，读了也无意义——跳过，把帧时间让给标题 OCR
@@ -265,7 +271,7 @@ class CoopPerception:
                 "tian_shi_kai_ju_visible",
             )
         )
-        if self._gold_reader is not None and read_gold and not page_open:
+        if self._gold_reader is not None and read_gold and not page_open and not light:
             now_monotonic = perf_counter()
             if now_monotonic - self._last_gold_read >= self._gold_read_interval:
                 self._last_gold_read = now_monotonic
@@ -412,6 +418,7 @@ class CoopPerception:
         matches: list,
         *,
         observation_mode: str | None = None,
+        light: bool = False,
     ) -> list[SkillCandidate]:
         """按状态识别需要的界面标志按钮，结果写入 raw_data（bool）和 matches。
 
@@ -489,21 +496,22 @@ class CoopPerception:
                 matches.append(leave_match)
                 raw_data["leave_team_match"] = leave_match
 
-        if hint_state in {State.SELECT_OPENING_SKILLS, State.SELECT_MAIN_C_SKILLS}:
-            return self._detect_skill_candidates(
-                ctx, frame, matches, raw_data, page=hint_state.name
-            )
-        if hint_state == State.BUILD_MAIN_C and (
-            raw_data.get("select_skill_button_visible")
-            or raw_data.get("merge_gift_skill_page_visible")
-        ):
-            # 合成 4 星后系统赠送的技能选择页（实机确认 2026-08-16）：与常规
-            # 技能页同一个 3 选 1 界面，会遮住棋盘导致识别为空。页面打开时才做
-            # 技能卡识别，不增加常规培养帧的开销；主标识为【请选择1个额外技能】
-            # 提示条（2026-08-21 实机确认【选技能】图在该页不稳定），命中任一即识别
-            return self._detect_skill_candidates(
-                ctx, frame, matches, raw_data, page=hint_state.name
-            )
+        if not light:
+            if hint_state in {State.SELECT_OPENING_SKILLS, State.SELECT_MAIN_C_SKILLS}:
+                return self._detect_skill_candidates(
+                    ctx, frame, matches, raw_data, page=hint_state.name
+                )
+            if hint_state == State.BUILD_MAIN_C and (
+                raw_data.get("select_skill_button_visible")
+                or raw_data.get("merge_gift_skill_page_visible")
+            ):
+                # 合成 4 星后系统赠送的技能选择页（实机确认 2026-08-16）：与常规
+                # 技能页同一个 3 选 1 界面，会遮住棋盘导致识别为空。页面打开时才做
+                # 技能卡识别，不增加常规培养帧的开销；主标识为【请选择1个额外技能】
+                # 提示条（2026-08-21 实机确认【选技能】图在该页不稳定），命中任一即识别
+                return self._detect_skill_candidates(
+                    ctx, frame, matches, raw_data, page=hint_state.name
+                )
         # 结算阶段识别【双倍奖励】确认弹窗（实机确认 2026-08-16：结算画面误点
         # 「双倍奖励」后弹出，挡住正常结算）；任务层点击其取消按钮关闭
         if hint_state in _SETTLEMENT_STATES:

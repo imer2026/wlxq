@@ -118,9 +118,12 @@ class FakePerception:
         hint_state=State.UNKNOWN,
         observation_mode=None,
         read_gold=False,
+        light=False,
     ):
         self.observe_count += 1
         self.observation_modes.append(observation_mode)
+        self.light_flags: list[bool] = getattr(self, "light_flags", [])
+        self.light_flags.append(light)
         if self._preserve_frame_id:
             return self._obs
         return replace(self._obs, frame_id=ctx.frame_id)
@@ -613,7 +616,7 @@ class TestLoopStopConditions:
                 )
                 self._gone = Observation(frame_id=2)
 
-            def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None, read_gold=False):
+            def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None, read_gold=False, **kwargs):
                 self.observe_count += 1
                 self.observation_modes.append(observation_mode)
                 return self._button if self.observe_count == 1 else self._gone
@@ -1299,7 +1302,7 @@ class TestCultivationLoop:
                 self.observe_count = 0
                 self.observations = []
 
-            def observe(self, c, f, hint, observation_mode=None, read_gold=False):
+            def observe(self, c, f, hint, observation_mode=None, read_gold=False, **kwargs):
                 obs = self.observations[min(self.observe_count, len(self.observations) - 1)]
                 self.observe_count += 1
                 return replace(obs, frame_id=c.frame_id)
@@ -1350,7 +1353,7 @@ class _PopupPerception:
         self._popup_frames = popup_frames
         self.observe_count = 0
 
-    def observe(self, c, f, hint, observation_mode=None, read_gold=False):
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False, **kwargs):
         self.observe_count += 1
         raw = (
             {"tan_chuang_visible": True, "tan_chuang_match": self._popup_match}
@@ -1476,7 +1479,7 @@ class _MergeBoardPerception:
         self.observe_count += 1
         return replace(obs, frame_id=ctx.frame_id)
 
-    def observe(self, c, f, hint, observation_mode=None, read_gold=False):
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False, **kwargs):
         return self._next(c)
 
     def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
@@ -1640,7 +1643,7 @@ class _OpeningSkillPagePerception:
     def __init__(self) -> None:
         self.observe_count = 0
 
-    def observe(self, c, f, hint, observation_mode=None, read_gold=False):
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False, **kwargs):
         self.observe_count += 1
         from wlxq_bot.models import SkillCandidate
 
@@ -1840,7 +1843,7 @@ class _ReturnButtonPerception(FakePerception):
         )
         self._gone = Observation(frame_id=2)
 
-    def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None, read_gold=False):
+    def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None, read_gold=False, **kwargs):
         self.observe_count += 1
         if self.observe_count == 1:
             return replace(self._button, frame_id=ctx.frame_id)
@@ -2192,7 +2195,7 @@ class TestVerifyAbortOnMatchEnd:
                 self.observe_count = 0
 
             def observe(self, ctx, frame, hint_state=State.UNKNOWN,
-                        observation_mode=None, read_gold=False):
+                        observation_mode=None, read_gold=False, **kwargs):
                 self.observe_count += 1
                 if self.observe_count == 1:
                     return Observation(frame_id=ctx.frame_id)
@@ -2384,7 +2387,7 @@ class TestPopupPreEmptsVerification:
                 self.observe_count = 0
 
             def observe(self, ctx, frame, hint_state=State.UNKNOWN,
-                        observation_mode=None, read_gold=False):
+                        observation_mode=None, read_gold=False, **kwargs):
                 self.observe_count += 1
                 if self.observe_count == 1:
                     return Observation(frame_id=ctx.frame_id)
@@ -2469,7 +2472,7 @@ class TestPopupPreEmptsVerification:
                 self.observe_count = 0
 
             def observe(self, ctx, frame, hint_state=State.UNKNOWN,
-                        observation_mode=None, read_gold=False):
+                        observation_mode=None, read_gold=False, **kwargs):
                 self.observe_count += 1
                 return Observation(
                     frame_id=ctx.frame_id,
