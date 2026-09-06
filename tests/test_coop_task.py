@@ -2509,6 +2509,23 @@ class TestModeProfileDispatch:
         dialog = task.decide_action(Observation(frame_id=4), make_window_ctx())
         assert dialog is not None and dialog[0].tag == "open_refresh_difficulty_dialog"
 
+    def test_return_action_requests_settlement_screenshot(self):
+        """点击返回的动作带 save_frame_before：调度层在该动作执行前保存结算画面。"""
+        task = make_task()
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+        match = MatchResult("buttons/fan_hui.png", (500, 1000), 0.9)
+        observation = Observation(
+            frame_id=1,
+            raw_data={"return_button_visible": True, "return_button_match": match},
+        )
+
+        decision = task.decide_action(observation, make_window_ctx())
+
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "return_result"
+        assert action.save_frame_before is True
+
     def test_pet_mode_uses_pet_chat_hotspot(self):
         task = make_task(
             hotspots=self._spots_with_tabs(),

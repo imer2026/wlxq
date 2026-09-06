@@ -190,6 +190,16 @@ class CoopTask(Task):
         self._topup_active = False
 
     @property
+    def in_match_states(self) -> bool:
+        """当前是否处于对局进行态（等待开局/培养/选技能）。
+
+        供 runner 在动作后验证时判断「对局结束信号优先于动作验证」：
+        返回按钮在这些状态下出现即意味着本局结束，棋盘类动作的验证
+        必然不再满足，继续跑完验证帧只是白等（2026-09-06 实机）。
+        """
+        return self.ctx.current_state in _MATCH_STATES
+
+    @property
     def skipped_difficulties(self) -> tuple[int, ...]:
         """诊断难度选择中未识别到的目标，按从大到小返回。"""
         return tuple(sorted(self._skipped_difficulties, reverse=True))
@@ -1703,6 +1713,8 @@ class CoopTask(Task):
                 target=match.position,
                 duration=0.08,
                 verification="next_frame",
+                # 一局结束、点击返回前保存结算画面（合作/保卫宠物共用此路径）
+                save_frame_before=True,
                 tag="return_result",
                 reason="点击返回并完成本局",
             ),

@@ -86,7 +86,8 @@
 |           `-- heroes/
 |-- screenshots/
 |   |-- raw/                  # 原始截图
-|   `-- debug/                # 调试标注图
+|   |-- debug/                # 调试标注图
+|   `-- settlement/           # 结算截图（每局点返回前自动保存，按 模式/日期 归档）
 |-- src/
 |   `-- wlxq_bot/
 |       |-- __init__.py
@@ -301,6 +302,9 @@ run:
   coop_difficulties: "1-16"
   # 主 C 培养时每批连续识别的棋盘帧数；范围 1～60
   board_recognition_frames: 10
+  # 一局结束、点击返回前保存结算画面（按 模式/日期 归档到
+  # screenshots/settlement/<模式>/<日期>/）
+  settlement_screenshot: true
 ```
 
 使用 `wlxq-bot --debug run coop --main-c assault` 可查看每批棋盘识别的总耗时，以及单帧截图、ONNX 批量推理的平均/最小/最大耗时，再据此调整 `board_recognition_frames`。

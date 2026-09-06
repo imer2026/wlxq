@@ -45,6 +45,10 @@ class TestRunConfig:
         assert cfg.coop_difficulties == list(range(1, 17))
         assert cfg.difficulty_max_scrolls == 15
 
+    def test_settlement_screenshot_defaults_enabled(self) -> None:
+        """结算截图默认开启：一局结束点击返回前保存结算画面。"""
+        assert RunConfig().settlement_screenshot is True
+
     @pytest.mark.parametrize(
         ("spec", "expected"),
         [

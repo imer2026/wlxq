@@ -37,8 +37,10 @@ Thumbs.db
 # 截图不提交（可能含真实账号信息）
 screenshots/raw/*
 screenshots/debug/*
+screenshots/settlement/*
 !screenshots/raw/.gitkeep
 !screenshots/debug/.gitkeep
+!screenshots/settlement/.gitkeep
 
 # 敏感配置（本地校准结果、真实账号信息等）
 configs/local.yaml

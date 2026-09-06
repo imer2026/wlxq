@@ -25,6 +25,7 @@ from wlxq_bot.models import (
     BoardCapacity,
     BoardHero,
     BoardSnapshot,
+    MatchResult,
     Observation,
     State,
     WindowContext,
@@ -1820,6 +1821,165 @@ class TestExitFrameSaving:
         assert list(tmp_path.glob("exit_*")) == []
 
 
+# ---------------------------------------------------------------------------
+# 结算截图（点击返回前保存当前结算画面）
+# ---------------------------------------------------------------------------
+
+
+class _ReturnButtonPerception(FakePerception):
+    """第一帧返回按钮可见（决策点击返回），之后按钮消失（验证通过）。"""
+
+    def __init__(self):
+        super().__init__(Observation(frame_id=1))
+        self._button = Observation(
+            frame_id=1,
+            raw_data={
+                "return_button_visible": True,
+                "return_button_match": MatchResult("buttons/fan_hui.png", (500, 1000), 0.9),
+            },
+        )
+        self._gone = Observation(frame_id=2)
+
+    def observe(self, ctx, frame, hint_state=State.UNKNOWN, observation_mode=None, read_gold=False):
+        self.observe_count += 1
+        if self.observe_count == 1:
+            return replace(self._button, frame_id=ctx.frame_id)
+        return replace(self._gone, frame_id=ctx.frame_id)
+
+
+class _ContextRecordingScreen(FakeScreen):
+    """记录每次返回的 WindowContext，便于核对截图与决策同帧。"""
+
+    def __init__(self, ctx, frame=None) -> None:
+        super().__init__(ctx, frame)
+        self.contexts = []
+
+    def capture(self, handle: int):
+        ctx, frame = super().capture(handle)
+        self.contexts.append(ctx)
+        return ctx, frame
+
+
+class _RecordingSettlementSaver:
+    """假结算截图保存器：记录调用参数，可注入保存失败。"""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[tuple[object, str, int, float]] = []
+        self._error = error
+
+    def save(self, frame, mode: str, round_number: int, captured_at: float) -> Path:
+        self.calls.append((frame, mode, round_number, captured_at))
+        if self._error is not None:
+            raise self._error
+        return Path("fake/settlement.png")
+
+
+class _OrderRecordingExecutor(FakeExecutor):
+    """在共享事件表里记录执行时机，用于验证「先截图、后点击」的顺序。"""
+
+    def __init__(self, events: list[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._events = events
+
+    def execute(self, ctx, action):
+        self._events.append("execute")
+        return super().execute(ctx, action)
+
+
+class TestSettlementScreenshot:
+    def _settlement_task(self):
+        from wlxq_bot.config import RunConfig
+        from wlxq_bot.models import CoopRole
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import CoopTask
+
+        ctx = TaskContext(main_c="assault", max_rounds=1)
+        ctx.current_state = State.CHECK_ROUND_LIMIT
+        return CoopTask(ctx, RunConfig(max_rounds=1), CoopRole.HELPER, {})
+
+    def test_saves_current_frame_before_return_click(self):
+        """点击返回前保存当前帧：同帧、当前局号，且先保存后执行。"""
+        import numpy as np
+
+        events: list[str] = []
+        saver = _RecordingSettlementSaver()
+        original_save = saver.save
+
+        def _record_save(frame, mode, round_number, captured_at):
+            events.append("save")
+            return original_save(frame, mode, round_number, captured_at)
+
+        saver.save = _record_save
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        screen = _ContextRecordingScreen(make_window_ctx(), frame=frame)
+        executor = _OrderRecordingExecutor(events, verified=False)
+
+        final = make_runner()._run_loop(
+            screen,
+            _ReturnButtonPerception(),
+            executor,
+            self._settlement_task(),
+            SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+            1,
+            max_steps=5,
+            settlement_saver=saver,
+            settlement_mode="pet",
+        )
+
+        assert final == State.COMPLETED
+        # 保存发生在返回点击执行之前
+        assert events == ["save", "execute"]
+        # 保存的是决策依据的同一帧、同一时刻，模式与当前局号（round_count+1）正确
+        assert len(saver.calls) == 1
+        saved_frame, mode, round_number, captured_at = saver.calls[0]
+        assert saved_frame is frame
+        assert mode == "pet"
+        assert round_number == 1
+        assert captured_at == screen.contexts[0].captured_at
+
+    def test_settlement_save_failure_does_not_block_return_click(self):
+        """保存失败只记日志：返回点击照常执行，任务正常完成。"""
+        import numpy as np
+
+        saver = _RecordingSettlementSaver(error=RuntimeError("fake disk full"))
+        executor = FakeExecutor(verified=False)
+
+        final = make_runner()._run_loop(
+            FakeScreen(make_window_ctx(), frame=np.zeros((4, 4, 3), dtype=np.uint8)),
+            _ReturnButtonPerception(),
+            executor,
+            self._settlement_task(),
+            SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+            1,
+            max_steps=5,
+            settlement_saver=saver,
+            settlement_mode="coop",
+        )
+
+        assert final == State.COMPLETED
+        assert [action.tag for action in executor.actions] == ["return_result"]
+        assert len(saver.calls) == 1
+
+    def test_return_click_without_saver_runs_normally(self):
+        """未提供保存器（开关关闭/独立能力入口）时不保存，流程不受影响。"""
+        import numpy as np
+
+        executor = FakeExecutor(verified=False)
+
+        final = make_runner()._run_loop(
+            FakeScreen(make_window_ctx(), frame=np.zeros((4, 4, 3), dtype=np.uint8)),
+            _ReturnButtonPerception(),
+            executor,
+            self._settlement_task(),
+            SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+            1,
+            max_steps=5,
+        )
+
+        assert final == State.COMPLETED
+        assert [action.tag for action in executor.actions] == ["return_result"]
+
+
 class TestModeAssets:
     """模式启动检查与模式解析。"""
 
@@ -1953,3 +2113,112 @@ class TestModeAssets:
                 TemplatePack(client_size=(923, 1723), root=pack_root),
                 State.FIND_COOP,
             )
+
+
+class TestVerifyAbortOnMatchEnd:
+    """对局结束信号优先于动作后验证（2026-09-06 实机回归）。
+
+    实机 bug：游戏在合成拖动/召唤点击的验证窗口内结束，棋盘类验证必然
+    失败，5 轮多帧棋盘投票白跑 ~80s 才进入结算。修复后每帧验证前先查
+    对局结束信号（返回按钮可见），立即放弃剩余验证并切入结算。
+    """
+
+    def _task(self):
+        from wlxq_bot.models import Action
+        from wlxq_bot.tasks.base import TaskContext
+
+        class _EndDuringVerifyTask:
+            """最小任务桩：第一帧发拖动合成，之后返回按钮一直可见且验证恒失败。"""
+
+            def __init__(self) -> None:
+                self.ctx = TaskContext(main_c="assault", max_rounds=1)
+                self.ctx.current_state = State.BUILD_MAIN_C
+                self.failed: list[Action] = []
+                self.verify_calls = 0
+
+            def wants_board_watch(self) -> bool:
+                return False
+
+            def wants_gold_read(self) -> bool:
+                return False
+
+            def observation_mode(self):
+                return None
+
+            def in_match_states(self) -> bool:
+                return True
+
+            def determine_state(self, observation):
+                if observation.flag("return_button_visible"):
+                    return State.HANDLE_RESULT
+                return State.BUILD_MAIN_C
+
+            def decide_action(self, observation, window_ctx):
+                if observation.flag("return_button_visible"):
+                    return (
+                        Action(kind="wait", duration=0.1, verification="immediate",
+                               tag="settle_wait", reason="对局已结束，等待结算"),
+                        State.HANDLE_RESULT,
+                    )
+                return (
+                    Action(kind="drag", target=(1, 1), end=(2, 2), duration=0.5,
+                           verification="next_frame", tag="merge_heroes",
+                           reason="测试：拖动合成"),
+                    State.BUILD_MAIN_C,
+                )
+
+            def verify_action(self, action, before, after) -> bool:
+                self.verify_calls += 1
+                return False
+
+            def on_action_verified(self, action, to_state) -> None:
+                pass
+
+            def on_action_failed(self, action) -> None:
+                self.failed.append(action)
+
+        return _EndDuringVerifyTask()
+
+    def test_match_end_aborts_action_verification(self, caplog) -> None:
+        import logging
+
+        task = self._task()
+
+        class _EndObservation(FakePerception):
+            """第一帧正常棋盘（触发拖动），之后返回按钮可见（对局已结束）。"""
+
+            def __init__(self) -> None:
+                super().__init__(Observation(frame_id=1))
+                self.observe_count = 0
+
+            def observe(self, ctx, frame, hint_state=State.UNKNOWN,
+                        observation_mode=None, read_gold=False):
+                self.observe_count += 1
+                if self.observe_count == 1:
+                    return Observation(frame_id=ctx.frame_id)
+                return Observation(
+                    frame_id=ctx.frame_id,
+                    raw_data={
+                        "return_button_visible": True,
+                        "return_button_match": MatchResult(
+                            "buttons/bao_wei_chong_wu/fan_hui.png", (500, 1000), 0.9
+                        ),
+                    },
+                )
+
+        with caplog.at_level(logging.INFO, logger="wlxq_bot.runner"):
+            make_runner()._run_loop(
+                FakeScreen(make_window_ctx()),
+                _EndObservation(),
+                FakeExecutor(verified=False),
+                task,
+                SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+                1,
+                max_steps=6,
+            )
+
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "验证期间识别到返回按钮" in messages
+        # 修复后：对局结束信号在对局态下优先于验证——注定失败的验证一次都不跑
+        assert task.verify_calls == 0
+        assert len(task.failed) == 0

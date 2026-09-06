@@ -32,6 +32,7 @@ from wlxq_bot.config import (
     resolve_main_c_profile,
 )
 from wlxq_bot.debug.recorder import DebugRecorder
+from wlxq_bot.debug.settlement import SettlementScreenshotSaver
 from wlxq_bot.models import Action, CoopRole, Observation, State
 from wlxq_bot.orchestration.coop_grab import CoopGrabCoordinator
 from wlxq_bot.perception.coop import _BOARD_WATCH_STATES, CoopPerception
@@ -249,6 +250,11 @@ class Runner:
             if self.default_config.vision.debug
             else None
         )
+        # 结算截图：一局结束、点击返回前保存当前画面；开关关闭时不构造保存器。
+        # 与 debug_recorder 无关（不依赖 --debug），默认启用
+        settlement_saver = (
+            SettlementScreenshotSaver() if run_config.settlement_screenshot else None
+        )
         hero_cell_classifier = self._load_hero_cell_classifier(mc)
         skill_collector = self._build_skill_collector(run_config)
         title_reader, skill_tiers, new_skill_dir = self._build_skill_priority(mc)
@@ -374,6 +380,8 @@ class Runner:
                 handle,
                 grab_coordinator=grab_coordinator,
                 debug_recorder=debug_recorder,
+                settlement_saver=settlement_saver,
+                settlement_mode=mode_name,
             )
         except KeyboardInterrupt:
             # Ctrl+C 用户主动中断：按约定不保存退出帧（清空缓冲后原样上抛）
@@ -540,6 +548,8 @@ class Runner:
         max_steps: int | None = None,
         grab_coordinator: CoopGrabCoordinator | None = None,
         debug_recorder: DebugRecorder | None = None,
+        settlement_saver: SettlementScreenshotSaver | None = None,
+        settlement_mode: str = "coop",
     ) -> State:
         """调度循环：截图 -> 识别 -> 状态判断 -> 决策 -> 执行。
 
@@ -549,6 +559,8 @@ class Runner:
         ``debug_recorder`` 提供时，每张主循环截图进入退出帧缓冲，由调用方
         ``_flush_exit_frames`` 在任务结束时统一落盘（培养阶段识别管线内部的
         多帧截图不进缓冲，缓冲按主循环节奏采样）。
+        ``settlement_saver`` 提供时，带 ``save_frame_before`` 标志的动作
+        （结算点击返回）在执行前把当前帧存档到 ``screenshots/settlement/``。
         """
         max_steps_per_round = (
             max_steps if max_steps is not None else self.default_config.run.max_steps_per_round
@@ -722,7 +734,18 @@ class Runner:
 
             # 严格输入动作使用后续截图验证，不把“输入已发送”当成成功。
             if pending is not None:
-                if task.verify_action(pending.action, pending.before, observation):
+                # 对局结束信号优先于动作验证：对局态下返回按钮出现，棋盘类
+                # 验证（合成/召唤/技能点击）必然不再满足，继续跑完剩余多帧
+                # 棋盘投票只是白等（2026-09-06 实机：合成/召唤各卡 ~80s 才进
+                # 结算）。丢弃挂起动作，本帧直接进入状态判断切结算。
+                if task.in_match_states and observation.flag("return_button_visible"):
+                    logger.info(
+                        "frame=%d 验证期间识别到返回按钮，对局已结束，跳过 %s 的剩余验证",
+                        ctx.frame_id,
+                        pending.action.tag,
+                    )
+                    pending = None
+                elif task.verify_action(pending.action, pending.before, observation):
                     logger.info(
                         "frame=%d 动作后验证通过 tag=%s",
                         ctx.frame_id,
@@ -917,6 +940,27 @@ class Runner:
                     continue
                 continue
             stale_decisions = 0
+
+            # 结算截图：动作显式声明 save_frame_before 且保存器就位时，
+            # 在执行前把决策依据的当前帧存档（一局结束、点击返回前的画面）。
+            # 保存失败只记日志，不阻断动作、不消耗安全失败预算
+            if action.save_frame_before and settlement_saver is not None:
+                round_number = task.ctx.round_count + 1
+                try:
+                    shot_path = settlement_saver.save(
+                        frame,
+                        mode=settlement_mode,
+                        round_number=round_number,
+                        captured_at=ctx.captured_at,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "frame=%d 结算截图保存失败（不影响返回点击）: %r", ctx.frame_id, exc
+                    )
+                else:
+                    logger.info(
+                        "frame=%d 已保存第 %d 局结算截图 %s", ctx.frame_id, round_number, shot_path
+                    )
 
             # 7. 执行
             result = executor.execute(ctx, action)

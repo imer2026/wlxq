@@ -545,6 +545,8 @@ class Action:
             ``next_frame`` 表示必须由下一帧业务状态验证。
         tag: 稳定的动作语义标识，供验证通过后更新任务内部状态
         reason: 触发该动作的原因，用于调试记录
+        save_frame_before: 置 True 时调度层在执行该动作前把当前帧存为结算
+            截图（一局结束、点击返回前的画面存档）；只影响记录，不影响决策
     """
 
     kind: str
@@ -556,6 +558,7 @@ class Action:
     verification: Literal["immediate", "next_frame"] = "next_frame"
     tag: str = ""
     reason: str = ""
+    save_frame_before: bool = False
 
 
 @dataclass(frozen=True)

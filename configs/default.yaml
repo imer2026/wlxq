@@ -155,6 +155,10 @@ run:
   close_popup_max_retries: 4
   # 领取结算宝箱后、点返回按钮前的稳定等待（秒）；实机确认宝箱动画未播完时点返回无响应
   reward_claim_return_delay: 4.0
+  # 一局结束、点击返回前保存结算画面（合作/保卫宠物共用），按 模式/日期
+  # 归档到 screenshots/settlement/<模式>/<日期>/roundNN_HHMMSS.png；
+  # 保存失败只记日志，不影响任务
+  settlement_screenshot: true
   # 合成拖动验证失败时的重试上限；拖动可能落空（英雄仍在原位），重新决策后再拖；
   # 每次验证失败会输出棋盘诊断日志（起点英雄是否仍在、终点格星级）。
   # 重试耗尽仍失败才保守停止。

@@ -125,6 +125,10 @@ class TestAction:
         assert a.kind == "wait"
         assert a.duration == 1.5
 
+    def test_save_frame_before_defaults_false(self) -> None:
+        a = Action(kind="click", target=(100, 200))
+        assert a.save_frame_before is False
+
 
 class TestDebugEvent:
     """DebugEvent 测试。"""
