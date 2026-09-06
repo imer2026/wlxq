@@ -2222,3 +2222,90 @@ class TestVerifyAbortOnMatchEnd:
         # 修复后：对局结束信号在对局态下优先于验证——注定失败的验证一次都不跑
         assert task.verify_calls == 0
         assert len(task.failed) == 0
+
+
+class TestPopupCloseUsesLightObserve:
+    """关弹窗验证用单帧轻量识别，不跑多帧棋盘投票（2026-09-06 实机回归）。
+
+    实机：击杀 Boss 弹窗的关闭验证只需要弹窗标志（单次模板匹配），
+    但验证帧在培养状态会触发 10 帧多帧棋盘投票（单次十几秒），
+    连杀几个 Boss 就是几分钟的无效等待。
+    """
+
+    def test_popup_close_verify_skips_board_vote(self, caplog) -> None:
+        from wlxq_bot.models import Action
+        from wlxq_bot.tasks.base import TaskContext
+
+        class _PopupCloseTask:
+            """最小任务桩：先发关弹窗点击（验证通过），随后进入结算等待。"""
+
+            def __init__(self) -> None:
+                self.ctx = TaskContext(main_c="assault", max_rounds=1)
+                self.ctx.current_state = State.BUILD_MAIN_C
+                self.closed = False
+
+            def wants_board_watch(self) -> bool:
+                return True  # 培养状态默认会走多帧棋盘投票——必须被跳过
+
+            def wants_gold_read(self) -> bool:
+                return False
+
+            def observation_mode(self):
+                return None
+
+            def in_match_states(self) -> bool:
+                return True
+
+            def determine_state(self, observation):
+                if self.closed:
+                    return State.HANDLE_RESULT
+                return State.BUILD_MAIN_C
+
+            def decide_action(self, observation, window_ctx):
+                if self.closed:
+                    return (
+                        Action(kind="wait", duration=0.1, verification="immediate",
+                               tag="settle_wait", reason="对局已结束，等待结算"),
+                        State.HANDLE_RESULT,
+                    )
+                return (
+                    Action(kind="click", target=(500, 1300), duration=0.08,
+                           verification="next_frame", tag="close_popup",
+                           reason="测试：关闭击杀弹窗"),
+                    State.BUILD_MAIN_C,
+                )
+
+            def verify_action(self, action, before, after) -> bool:
+                # 关弹窗验证 = 弹窗标志消失（fake：第一次验证即通过）
+                return True
+
+            def on_action_verified(self, action, to_state) -> None:
+                self.closed = True
+
+            def on_action_failed(self, action) -> None:
+                pass
+
+        task = _PopupCloseTask()
+
+        class _CountingPerception(FakePerception):
+            def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+                # 不抛异常：决策帧的合法多帧投票照常记录，断言里核对它只发生一次
+                self.cultivation_n_frames.append(n_frames)
+                return ctx, replace(self._obs, frame_id=ctx.frame_id)
+
+        perception = _CountingPerception(Observation(frame_id=1))
+        make_runner()._run_loop(
+            FakeScreen(make_window_ctx()),
+            perception,
+            FakeExecutor(verified=False),
+            task,
+            SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+            1,
+            max_steps=6,
+        )
+
+        assert task.closed is True
+        # 多帧棋盘投票只允许发生在决策帧（决定关弹窗之前）；
+        # 点击后的验证帧必须走单帧轻量识别——每次关弹窗不再白等十几秒
+        assert perception.cultivation_n_frames == [10]
+        assert perception.observe_count >= 3

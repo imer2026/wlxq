@@ -57,6 +57,12 @@ logger = get_logger(__name__)
 TEMPLATES_ROOT = Path("assets/templates")
 
 # 窗口非前台/最小化时的检查间隔（秒）；日志每 _FG_LOG_EVERY_CHECKS 次提示一次
+# 击杀/结算弹窗的关闭动作标签：这些动作的验证只需要弹窗标志（单帧轻量
+# 识别），不需要多帧棋盘投票——投票单次十几秒，会让每次关弹窗都卡顿
+_POPUP_CLOSE_TAGS = frozenset(
+    {"close_popup", "close_double_reward", "close_bonus_popup"}
+)
+
 _FG_CHECK_INTERVAL_SECONDS = 0.5
 _FG_LOG_EVERY_CHECKS = 20  # 20 × 0.5s = 每 10 秒一条
 # 自动切回前台失败后的重试间隔（秒），避免高频反复激活
@@ -699,9 +705,16 @@ class Runner:
 
             # 3. 识别：培养阶段多帧累积（应对英雄动态漏检），其他单帧。
             # 强制召唤等不以棋盘为门禁的快速阶段（wants_board_watch=False）
-            # 退回单帧界面标志识别，避免每步白付多帧识别的耗时
+            # 退回单帧界面标志识别，避免每步白付多帧识别的耗时。
+            # 关弹窗验证同样只需要弹窗标志：多帧棋盘投票单次十几秒，
+            # 会让每次关弹窗（连杀 Boss 时连续多次）都白等（2026-09-06 实机）
             observe_started = time.perf_counter()
-            if task.ctx.current_state in _BOARD_WATCH_STATES and task.wants_board_watch():
+            light_verify = pending is not None and pending.action.tag in _POPUP_CLOSE_TAGS
+            if (
+                task.ctx.current_state in _BOARD_WATCH_STATES
+                and task.wants_board_watch()
+                and not light_verify
+            ):
                 ctx, observation = perception.observe_cultivation(
                     screen,
                     window_handle,
@@ -752,11 +765,7 @@ class Runner:
                         pending.action.tag,
                     )
                     error_restarts = 0
-                    if (
-                        pending.action.tag == "close_popup"
-                        or pending.action.tag == "close_double_reward"
-                        or pending.action.tag == "close_bonus_popup"
-                    ):
+                    if pending.action.tag in _POPUP_CLOSE_TAGS:
                         popup_close_retries = 0
                     elif pending.action.tag == "merge_heroes":
                         merge_retries = 0
@@ -775,7 +784,7 @@ class Runner:
                         if tag == "merge_heroes":
                             _log_merge_verify_failure(pending, observation)
                         if (
-                            tag in {"close_popup", "close_double_reward", "close_bonus_popup"}
+                            tag in _POPUP_CLOSE_TAGS
                             and popup_close_retries
                             < self.default_config.run.close_popup_max_retries
                         ):
