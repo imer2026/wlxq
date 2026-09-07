@@ -188,6 +188,9 @@ class CoopTask(Task):
         # 处于数量回补阶段（选满 N 次技能回到培养）：此时培养门禁才检查主C数量；
         # 首次培养只看星级，让技能选择尽早开始
         self._topup_active = False
+        # 本局主C数量已确认达标（回补补够或首次培养时数量就已够）：数量在选技能
+        # 期间不会减少，2026-09-07 用户策略——本局内不再回培养复查数量，一直选技能
+        self._topup_done = False
 
     @property
     def in_match_states(self) -> bool:
@@ -1169,8 +1172,10 @@ class CoopTask(Task):
             )
 
         # 主C档案配置了数量回补：局内选满 N 次技能后回培养阶段把主C数量
-        # 补到目标以上（棋盘数量判断在 BUILD_MAIN_C，该状态才识别棋盘）
-        if self._strategy.should_topup(self._main_skill_selections):
+        # 补到目标以上（棋盘数量判断在 BUILD_MAIN_C，该状态才识别棋盘）。
+        # 数量已确认达标的局不再复查（2026-09-07 用户策略）：选技能期间
+        # 数量不会减少，补够一次后一直选技能到对局结束
+        if not self._topup_done and self._strategy.should_topup(self._main_skill_selections):
             logger.info(
                 "已选 %d 次主C技能，回培养阶段检查/补充主C数量",
                 self._main_skill_selections,
@@ -1620,6 +1625,9 @@ class CoopTask(Task):
         self._last_board_signature = signature
 
         if self._strategy.main_c_ready(board, require_hero_count=self._topup_active):
+            # 数量已达标：本局内不再回培养复查数量（选技能期间数量不会减少）
+            if self._strategy.hero_count_satisfied(board):
+                self._topup_done = True
             return (
                 Action(
                     kind="wait",
@@ -1633,10 +1641,15 @@ class CoopTask(Task):
                 State.SELECT_MAIN_C_SKILLS,
             )
 
-        candidates = board.find_merge_candidates(self.ctx.main_c)
-        # 合成/避让/失败对跳过等策略决策由 CultivationStrategy 负责；
-        # 返回 None 表示本次不合并，落入下方召唤分支
-        pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
+        # 回补阶段（2026-09-07 用户策略）：棋盘有空位时直接召唤不合成——
+        # 合成要拖动加验证耗时，先召唤占满空位更快；棋盘占满且数量未达标
+        # 才合成腾格子
+        pair = None
+        if not (self._topup_active and board.capacity.available > 0):
+            candidates = board.find_merge_candidates(self.ctx.main_c)
+            # 合成/避让/失败对跳过等策略决策由 CultivationStrategy 负责；
+            # 返回 None 表示本次不合并，落入下方召唤分支
+            pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
         if pair is not None:
             source, dest = CultivationStrategy.drag_direction(pair)
             pair_kind = "主C对" if pair.is_main_c else "非主C对"
@@ -1674,7 +1687,10 @@ class CoopTask(Task):
         point = self._hotspot_point("add_hero", window_ctx)
         if point is None:
             return None
-        reason = "无合法合成对，召唤1个英雄"
+        if self._topup_active and board.capacity.available > 0:
+            reason = "回补阶段棋盘有空位，直接召唤不合成"
+        else:
+            reason = "无合法合成对，召唤1个英雄"
         if gold is not None:
             reason += (
                 f"（金币：现有 {gold.get('current')} / "
@@ -1908,6 +1924,7 @@ class CoopTask(Task):
             self._main_skill_selections = 0
             self._main_skill_selections_total = 0
             self._topup_active = False
+            self._topup_done = False
             self._summon_retry_at = None
             # 点过准备 = 本会话已完成难度勾选（无论程序选的还是手动选的）
             self._difficulty_done_session = True
@@ -2066,6 +2083,7 @@ class CoopTask(Task):
         self._main_skill_selections = 0
         self._main_skill_selections_total = 0
         self._topup_active = False
+        self._topup_done = False
 
     @staticmethod
     def _board_signature(board: BoardSnapshot) -> tuple:

@@ -1147,6 +1147,163 @@ class TestOtherStates:
         task.on_action_verified(Action(kind="wait", tag="main_c_ready"), State.SELECT_MAIN_C_SKILLS)
         assert task._topup_active is False
 
+    def test_topup_not_retriggered_after_count_satisfied(self):
+        """数量补够后本局不再复查：再选满 4 次技能不回培养（2026-09-07 用户策略）。"""
+        profile = MainCProfile(
+            display_name="强袭",
+            hero_template_dir="heroes/assault",
+            topup_after_skill_selections=4,
+            topup_hero_count=4,
+        )
+        task = make_task(main_c_profile=profile)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        task.on_action_verified(*decision)
+        assert task._topup_done is True
+
+        # 再选满 4 次技能：旧逻辑会再次触发回补，新逻辑本局不再检查数量
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        for _ in range(4):
+            task.on_action_verified(
+                Action(kind="click", tag="main_skill_candidate", target=(1, 1)),
+                State.SELECT_MAIN_C_SKILLS,
+            )
+        assert task._main_skill_selections == 4
+        decision = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "main_c_topup"
+        assert decision[0].kind == "wait"
+        assert decision[0].reason == "等待下一次金币检查"
+
+    def test_first_entry_with_enough_count_skips_topup(self):
+        """首次培养时数量就已达标：main_c_ready 即置位，本局不再回补复查。"""
+        profile = MainCProfile(
+            display_name="强袭",
+            hero_template_dir="heroes/assault",
+            topup_after_skill_selections=4,
+            topup_hero_count=4,
+        )
+        task = make_task(main_c_profile=profile)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        task.on_action_verified(*decision)
+        assert task._topup_done is True
+
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        for _ in range(4):
+            task.on_action_verified(
+                Action(kind="click", tag="main_skill_candidate", target=(1, 1)),
+                State.SELECT_MAIN_C_SKILLS,
+            )
+        decision = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "main_c_topup"
+
+    def test_topup_done_resets_for_new_round(self):
+        """数量达标标志只对本局有效：新一局（准备/被踢重进）后复位。"""
+        task = make_task()
+        task._topup_done = True
+        task.on_action_verified(
+            Action(kind="click", tag="ready_match", target=(1, 1)),
+            State.SELECT_OPENING_SKILLS,
+        )
+        assert task._topup_done is False
+        task._topup_done = True
+        task._reset_for_home_reentry()
+        assert task._topup_done is False
+
+    def test_topup_summons_instead_of_merge_when_board_has_space(self):
+        """回补阶段棋盘有空位：有非主C合成对也不拖动，直接召唤（2026-09-07 用户策略）。"""
+        profile = MainCProfile(
+            display_name="强袭",
+            hero_template_dir="heroes/assault",
+            avoid_main_c_merge=True,
+            topup_after_skill_selections=4,
+            topup_hero_count=4,
+        )
+        task = make_task(main_c_profile=profile)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        # 数量 1 < 4，monkey 存在合法对，棋盘 3/12 有空位
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("monkey", star=1, pos=(300, 300)),
+                make_hero("monkey", star=1, pos=(400, 400)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "summon_hero"
+
+    def test_topup_merges_when_board_full(self):
+        """回补阶段棋盘占满且数量未达标：恢复合成腾格子。"""
+        profile = MainCProfile(
+            display_name="强袭",
+            hero_template_dir="heroes/assault",
+            avoid_main_c_merge=True,
+            topup_after_skill_selections=4,
+            topup_hero_count=4,
+        )
+        task = make_task(main_c_profile=profile)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        heroes = [
+            make_hero("monkey", star=1, pos=(100, 100)),
+            make_hero("monkey", star=1, pos=(200, 200)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1,
+            heroes=heroes,
+            capacity=BoardCapacity(total_slots=2, occupied=2),
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+
+    def test_non_topup_merge_still_preferred_when_board_has_space(self):
+        """非回补阶段（首次培养）保持原行为：有合法对优先合成。"""
+        task = make_task()
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+
     def test_main_c_ready_resets_skill_selection_counter(self):
         """数量达标进入选技能时清零选择计数，开始新一轮「选 N 次 → 检查」。"""
         profile = MainCProfile(

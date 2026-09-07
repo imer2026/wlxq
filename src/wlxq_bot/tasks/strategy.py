@@ -10,7 +10,9 @@ Task Engine 内部组合，见 docs/architecture.md。
   且棋盘有空位时召唤新英雄；棋盘占满时才把合并主C对作为腾格子的
   最后手段（2026-08-16 实机规则，当前仅强袭启用）。
 - ``topup_after_skill_selections`` / ``topup_hero_count``：局内选满
-  N 次技能后回培养阶段，把主C总数补到目标以上再继续选技能。
+  N 次技能后回培养阶段，把主C总数补到目标以上再继续选技能。数量补够后
+  本局不再复查（2026-09-07 用户策略）；回补阶段棋盘有空位时只召唤不合成，
+  占满才合成腾格子。
 """
 
 from __future__ import annotations
@@ -58,6 +60,13 @@ class CultivationStrategy:
     def main_c_count(self, board: BoardSnapshot) -> int:
         """棋盘上主 C 英雄总数（不分星级）。"""
         return sum(hero.hero_type == self._main_c for hero in board.heroes)
+
+    def hero_count_satisfied(self, board: BoardSnapshot) -> bool:
+        """主C数量是否已达回补目标；未启用数量回补时视为已满足。"""
+        if not self.topup_enabled:
+            return True
+        assert self._profile is not None
+        return self.main_c_count(board) >= self._profile.topup_hero_count
 
     def main_c_ready(
         self,
