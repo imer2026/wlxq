@@ -49,6 +49,12 @@ class TestRunConfig:
         """结算截图默认开启：一局结束点击返回前保存结算画面。"""
         assert RunConfig().settlement_screenshot is True
 
+    def test_settlement_screenshot_retention_days_default_and_bounds(self) -> None:
+        """结算截图按天目录默认保留 7 天；保留天数必须 >= 1。"""
+        assert RunConfig().settlement_screenshot_retention_days == 7
+        with pytest.raises(ValidationError, match="settlement_screenshot_retention_days"):
+            RunConfig(settlement_screenshot_retention_days=0)
+
     @pytest.mark.parametrize(
         ("spec", "expected"),
         [

@@ -228,6 +228,21 @@ class Runner:
             skip_difficulty,
             run_config.max_rounds,
         )
+        # 结算截图：一局结束、点击返回前保存当前画面；开关关闭时不构造保存器
+        # （也不清理旧数据），与 --debug 无关。放在窗口查找之前：清理是安全
+        # 幂等的删除，就算随后找不到窗口也已清完
+        settlement_saver = (
+            SettlementScreenshotSaver() if run_config.settlement_screenshot else None
+        )
+        if settlement_saver is not None:
+            removed = settlement_saver.cleanup(run_config.settlement_screenshot_retention_days)
+            if removed:
+                logger.info(
+                    "已清理 %d 个过期结算截图目录（保留最近 %d 天）: %s",
+                    len(removed),
+                    run_config.settlement_screenshot_retention_days,
+                    ", ".join(f"{path.parent.name}/{path.name}" for path in removed),
+                )
 
         screen = ScreenCapture()
         handle = self._find_game_window(screen)
@@ -255,11 +270,6 @@ class Runner:
             )
             if self.default_config.vision.debug
             else None
-        )
-        # 结算截图：一局结束、点击返回前保存当前画面；开关关闭时不构造保存器。
-        # 与 debug_recorder 无关（不依赖 --debug），默认启用
-        settlement_saver = (
-            SettlementScreenshotSaver() if run_config.settlement_screenshot else None
         )
         hero_cell_classifier = self._load_hero_cell_classifier(mc)
         skill_collector = self._build_skill_collector(run_config)

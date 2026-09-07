@@ -334,6 +334,8 @@ flowchart TD
 
 当前不单独处理断线状态。状态名对应关系：`HANDLE_RESULT` 负责点赞，`CLAIM_REWARD` 负责领取宝箱，`CHECK_ROUND_LIMIT` 负责点击返回、累计局数并决定下一局或停止。
 
+结算截图的按天目录由 `run` 启动时自动清理：删除超过 `run.settlement_screenshot_retention_days`（默认 7，含今天）的 `YYYYMMDD` 目录，只保留最近一周。目录名不是合法日期的一律不动（绝不误删）；单个目录删除失败只记 WARNING 跳过，不影响启动；`settlement_screenshot` 开关关闭时保存器不构造，也不做清理。
+
 ## 保卫宠物模式
 
 「保卫宠物」是合作模式之外的组队对局模式，通过 `wlxq-bot run coop --mode pet` 启动（默认模式由 `configs/default.yaml` 的 `run.mode` 控制，当前为 `coop`；`--mode` 只覆盖本次运行）。游戏事实与实机标定出处见 [游戏规则知识库](game-rules.md) 的「保卫宠物模式」一节。

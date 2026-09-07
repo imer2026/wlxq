@@ -4,16 +4,23 @@
 供玩家事后查看每局结果（游戏次数按天算，目录也按天分）。
 
 只做记录，不参与业务决策；保存失败由调用方记日志后继续主流程。
+启动时可调用 cleanup 删除超过保留期的按天目录，只保留最近一周。
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from wlxq_bot.utils.log import get_logger
+
+logger = get_logger(__name__)
 
 DEFAULT_SETTLEMENT_DIR = "screenshots/settlement"
 
@@ -52,6 +59,38 @@ class SettlementScreenshotSaver:
             raise RuntimeError(f"PNG 编码失败: {path}")
         encoded.tofile(str(path))
         return path
+
+    def cleanup(self, retention_days: int) -> list[Path]:
+        """删除超过保留期的按天目录，返回已删除的目录路径列表。
+
+        扫描 ``<root>/<模式>/<YYYYMMDD>/``：目录名能解析成日期且不晚于
+        「今天 - retention_days」的整目录删除，即保留今天往前数
+        retention_days 天。目录名不是合法日期（或同名文件）一律不动，
+        绝不误删；单个目录删除失败记 WARNING 跳过并继续。
+        """
+        cutoff = date.today() - timedelta(days=retention_days)
+        deleted: list[Path] = []
+        if not self._root_dir.is_dir():
+            return deleted
+        for mode_dir in sorted(self._root_dir.iterdir()):
+            if not mode_dir.is_dir():
+                continue
+            for day_dir in sorted(mode_dir.iterdir()):
+                if not day_dir.is_dir():
+                    continue
+                try:
+                    day = time.strptime(day_dir.name, "%Y%m%d")
+                except ValueError:
+                    continue
+                if date(day.tm_year, day.tm_mon, day.tm_mday) > cutoff:
+                    continue
+                try:
+                    shutil.rmtree(day_dir)
+                except OSError as exc:
+                    logger.warning("结算截图过期目录删除失败，跳过 %s: %r", day_dir, exc)
+                    continue
+                deleted.append(day_dir)
+        return deleted
 
     @staticmethod
     def _as_image(frame: object) -> np.ndarray:

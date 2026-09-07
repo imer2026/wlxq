@@ -296,6 +296,9 @@ class RunConfig(BaseModel):
     # 模式/日期归档到 screenshots/settlement/<mode>/<YYYYMMDD>/；
     # 保存失败只记日志不影响任务
     settlement_screenshot: bool = True
+    # run 启动时清理超过该天数的按天截图目录（保留最近 N 天，含今天）；
+    # 仅 settlement_screenshot 开启时执行
+    settlement_screenshot_retention_days: int = Field(default=7, ge=1)
     # 合成拖动验证失败时的重试上限；拖动可能落空（英雄仍在原位），
     # 重新决策后通常直接再拖一次即可。重试耗尽仍失败才保守停止。
     merge_max_retries: int = Field(default=3, ge=0, le=10)
