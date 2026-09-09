@@ -1349,3 +1349,143 @@ class TestPetDifficultyBarAnchor(TestPetDifficultyBar):
         assert len(reader.images) == 2
         assert reader.images[0].shape[0] == int(0.5 * 1723)
         assert reader.images[1].shape[0] == int(0.125 * 1723)
+
+
+# ---------------------------------------------------------------------------
+# 领地入口观察分支（territory_nav / mode_select / challenge_page）
+# ---------------------------------------------------------------------------
+
+
+class _FakeRowsReader:
+    """假 OCR reader：返回固定 (文字, 置信度, 中心) 行，坐标相对输入图。"""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def read_with_confidence(self, image):
+        return self.rows
+
+
+def _frame() -> np.ndarray:
+    """裁剪用零矩阵帧（923×1723 客户区尺寸）。"""
+    return np.zeros((1723, 923, 3), dtype=np.uint8)
+
+
+def _build_entry_perception(tmp_path, reader) -> CoopPerception:
+    """构造带领地入口 ROI 的 CoopPerception（模板包指向临时目录）。"""
+    from wlxq_bot.assets import TemplatePack
+
+    pack_root = tmp_path / "3000x2000"
+    pack_root.mkdir(parents=True, exist_ok=True)
+    pack = TemplatePack(client_size=(3000, 2000), root=pack_root)
+    tasks_cfg = TasksConfig(
+        rois={
+            "territory_nav_area": {
+                "relative_to": "client", "x_ratio": 0.64,
+                "y_ratio": 0.96, "width_ratio": 0.11, "height_ratio": 0.04,
+            },
+            "mode_select_title_area": {
+                "relative_to": "client", "x_ratio": 0.25,
+                "y_ratio": 0.16, "width_ratio": 0.49, "height_ratio": 0.06,
+            },
+            "pet_mode_label_area": {
+                "relative_to": "client", "x_ratio": 0.60,
+                "y_ratio": 0.65, "width_ratio": 0.16, "height_ratio": 0.06,
+            },
+            "pet_challenge_start_area": {
+                "relative_to": "client", "x_ratio": 0.43,
+                "y_ratio": 0.90, "width_ratio": 0.17, "height_ratio": 0.05,
+            },
+        },
+        mode_select_recognition={
+            "title_roi": "mode_select_title_area",
+            "title_text": "模式选择",
+            "min_confidence": 0.5,
+        },
+    )
+    return CoopPerception(
+        FakeVision([]),
+        pack,
+        tasks_cfg,
+        CoopRole.HELPER,
+        "assault",
+        difficulty_reader=reader,
+        territory_nav_roi="territory_nav_area",
+        mode_select_title_roi="mode_select_title_area",
+        mode_card_roi="pet_mode_label_area",
+        challenge_roi="pet_challenge_start_area",
+        mode_select_min_confidence=0.5,
+    )
+
+
+class TestTerritoryEntryDetection:
+    """领地入口三个观察分支：限域 OCR、置信度过滤、子串匹配写 flag。"""
+
+    def test_territory_nav_text_written(self, tmp_path):
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("领地", 0.666, (10, 20))])
+        )
+        raw: dict = {}
+        perception._detect_territory_nav_text(_make_window_ctx(), _frame(), raw)
+        assert raw["territory_nav_text"] == "领地"
+
+    def test_territory_nav_empty_when_no_text(self, tmp_path):
+        perception = _build_entry_perception(tmp_path, _FakeRowsReader([]))
+        raw: dict = {}
+        perception._detect_territory_nav_text(_make_window_ctx(), _frame(), raw)
+        assert raw["territory_nav_text"] == ""
+
+    def test_mode_select_title_uses_substring_match(self, tmp_path):
+        """标题装饰星星读作「模式选择·」也应命中：必须子串匹配而非全等。"""
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("模式选择·", 0.747, (100, 40))])
+        )
+        raw: dict = {}
+        perception._detect_mode_select_title(_make_window_ctx(), _frame(), raw)
+        assert raw["mode_select_visible"] is True
+
+    def test_mode_select_title_false_on_other_text(self, tmp_path):
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("其他文字", 0.9, (100, 40))])
+        )
+        raw: dict = {}
+        perception._detect_mode_select_title(_make_window_ctx(), _frame(), raw)
+        assert raw["mode_select_visible"] is False
+
+    def test_mode_card_rows_filtered_by_confidence(self, tmp_path):
+        perception = _build_entry_perception(
+            tmp_path,
+            _FakeRowsReader([("保卫宠物", 0.666, (30, 40)), ("噪声", 0.2, (50, 60))]),
+        )
+        raw: dict = {}
+        perception._detect_mode_card_rows(_make_window_ctx(), _frame(), raw)
+        rows = raw["mode_card_rows"]
+        assert [row.text for row in rows] == ["保卫宠物"]
+        # 文字框中心 = ROI 左上角偏移（0.60*923=553, 0.65*1723=1119）+ 行内坐标
+        assert rows[0].position == (553 + 30, 1119 + 40)
+
+    def test_challenge_text_written(self, tmp_path):
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("开始挑战", 0.798, (60, 30))])
+        )
+        raw: dict = {}
+        perception._detect_challenge_text(_make_window_ctx(), _frame(), raw)
+        assert raw["challenge_text"] == "开始挑战"
+
+    def test_uncalibrated_roi_degrades_to_empty(self, tmp_path):
+        """ROI 未标定（0x0）：OCR 必须限域，退化为读空而不是全图识别。"""
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        pack_root.mkdir(parents=True, exist_ok=True)
+        perception = CoopPerception(
+            FakeVision([]),
+            TemplatePack(client_size=(3000, 2000), root=pack_root),
+            TasksConfig(),
+            CoopRole.HELPER,
+            "assault",
+            difficulty_reader=_FakeRowsReader([("领地", 0.9, (1, 1))]),
+        )
+        raw: dict = {}
+        perception._detect_territory_nav_text(_make_window_ctx(), _frame(), raw)
+        assert raw["territory_nav_text"] == ""

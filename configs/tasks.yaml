@@ -62,17 +62,19 @@ hotspots:
     y_ratio: 0.5541
     description: 宠物挑战页面的聊天按钮
 
-  # 首页聊天按钮
+  # 首页聊天按钮（2026-09-08 实机重新标定，927×1727 客户区，pixel (857, 949)）。
+  # 2026-09-09 起招募入口改走领地入口，自动化流程不再点击本坐标，
+  # 保留作 wlxq-bot click 手动点击与标定记录
   home_chat:
-    x_ratio: 0.9274
-    y_ratio: 0.5490
-    description: 首页的聊天按钮
+    x_ratio: 0.9245
+    y_ratio: 0.5495
+    description: 首页的聊天按钮（已退役，仅手动点击/标定用）
 
-  # 聊天页面招募按钮
+  # 聊天页面招募按钮。2026-09-09 起自动化流程不再点击本坐标（同 home_chat 退役）
   open_recruit:
     x_ratio: 0.0758
     y_ratio: 0.6413
-    description: 聊天页面的招募按钮
+    description: 聊天页面的招募按钮（已退役，仅手动点击/标定用）
 
   # 合作难度选择按钮，点击后弹出难度面板。面板列表分两区：普通难度
   # （合作模式-第1~12层）在前、彩虹难度（合作模式-彩虹1~19层）在后，
@@ -104,17 +106,23 @@ hotspots:
     y_ratio: 0.7754
     description: 难度列表滚动终点（列表偏下）
 
-  # 招募页模式页签（2026-09-05 实机标定，927×1727 客户区）：进入招募后默认
-  # 停在「合作模式」，旁边即「保卫宠物」页签。保卫宠物流程：点宠物页签 →
-  # 首次勾选保卫宠物-普通/中等 → 关闭难度弹窗 → 连点 join_coop（坐标同抢合作）
+  # 招募页模式页签（2026-09-08 实机标定，927×1727 客户区）：游戏新增第三个页签
+  # 「共战灭尊」后，模式行从两页签变为三等分分段控件，整行内容左移。现布局为
+  # 「合作模式 | 保卫宠物 | 共战灭尊」，容器 x 约 0.2255~0.9040（像素 209~838），
+  # 中段选中态黄色胶囊（像素 423~624）中心即 recruit_pet_tab。
+  # 自动流程已改用页签行 OCR 定位（rois.mode_tab_row_area + default.yaml
+  # mode_tab_text），本组坐标保留作 wlxq-bot click 手动点击与标定记录。
+  # 保卫宠物流程：点宠物页签 → 首次勾选保卫宠物-普通/中等 → 关闭难度弹窗 →
+  # 连点 join_coop（坐标同抢合作）
   recruit_coop_tab:
-    x_ratio: 0.3937
-    y_ratio: 0.8871
+    x_ratio: 0.3387
+    y_ratio: 0.8859
     description: 招募页「合作模式」页签（默认选中）
   recruit_pet_tab:
-    x_ratio: 0.7368
-    y_ratio: 0.8877
-    description: 招募页「保卫宠物」页签
+    x_ratio: 0.5647
+    y_ratio: 0.8859
+    description: 招募页「保卫宠物」页签（新增共战灭尊后左移，2026-09-08 重标）
+  # 「共战灭尊」页签文字中心约 (0.7913, 0.8859)，暂无自动化流程，仅留标定记录
 
   # 保卫宠物组队大厅【退队】按钮实测点击点（2026-09-05 实机，927×1727 客户区）。
   # 与合作的退队不同位：合作退队走模板匹配 coop_leave_team（识别区 leave_team_area，
@@ -125,6 +133,25 @@ hotspots:
     x_ratio: 0.7994
     y_ratio: 0.8616
     description: 保卫宠物组队大厅【退队】按钮实测点（专属模板 locator，全图识别起步）
+
+  # 底部导航「领地」按钮点击点（2026-09-09 实机标定，territory_nav_area 的
+  # 几何中心，pixel (651, 1691)）。领地入口：读到「领地」才点（防误点
+  # 「返回」退出领地页），点击后等 territory_nav_area 文字变「返回」
+  territory_nav:
+    x_ratio: 0.7023
+    y_ratio: 0.9795
+    description: 底部导航「领地」按钮（领地入口第一步）
+
+  # 领地页进入「模式选择」弹窗的按钮（2026-09-09 实机标定，927×1727 客户区，
+  # wlxq-bot pick，pixel (553, 514)）。计划流程：先点领地（rois.territory_nav_area
+  # 读到「返回」=已在领地页），再点本按钮弹出模式选择弹窗（左合作模式、右
+  # 保卫宠物）；点击后弹窗有延迟，用 rois.mode_select_title_area 的 OCR 轮询
+  # 确认打开，不固定等待。弹窗内两张模式卡由 OCR 定位（rois.coop_mode_label_area /
+  # rois.pet_mode_label_area），点击文字框中心，无需手动坐标
+  open_mode_select:
+    x_ratio: 0.5965
+    y_ratio: 0.2976
+    description: 领地页进入合作/保卫宠物模式选择弹窗的按钮
 
 # 定位器配置
 # 每个定位器声明策略、ROI 和动作点来源
@@ -378,6 +405,86 @@ rois:
     width_ratio: 0.3840
     height_ratio: 0.0724
 
+  # 招募页模式页签行区域（2026-09-08 实机标定，927×1727 客户区）：三个模式
+  # 页签（合作模式/保卫宠物/共战灭尊）共用本区域做一次 OCR，按模式档案的
+  # mode_tab_text 子串匹配并点击文字框中心（开环，同难度勾选策略）。区域为
+  # 分段控件容器（约 0.2255~0.9040）外扩边距。离线验证：三行文字全部读对，
+  # 置信度 0.71~0.80（2026-09-08 实机截图）
+  mode_tab_row_area:
+    relative_to: client
+    x_ratio: 0.2050
+    y_ratio: 0.8512
+    width_ratio: 0.7174
+    height_ratio: 0.0666
+
+  # 底部导航第 4 格（商城/英雄/国王/?/公会）文字区域，2026-09-09 实机标定
+  # （927×1727 客户区，wlxq-bot pick）。该格文字随页面状态切换：招募页为
+  # 「领地」入口；进入领地主界面后同位置变为「返回」（橙色 X 图标 + 选中
+  # 高亮）。OCR 离线验证（TitleReader 原始裁剪，无需放大）：领地 6/6 帧、
+  # 返回 1/1 帧全部读对，置信度均 0.666（2026-09-09 实机截图）
+  territory_nav_area:
+    relative_to: client
+    x_ratio: 0.6462
+    y_ratio: 0.9618
+    width_ratio: 0.1122
+    height_ratio: 0.0353
+
+  # 「模式选择」弹窗标题区域（2026-09-09 实机标定，927×1727 客户区，
+  # wlxq-bot pick）。弹窗打开锚点：OCR 读到「模式选择」=弹窗已打开。标题
+  # 左右各有装饰小星星，偶被读作「模式选择·」，须用子串匹配。离线验证：
+  # 1/1 帧读对，置信度 0.747（2026-09-09 实机截图，open_mode_select 点击后弹出）
+  mode_select_title_area:
+    relative_to: client
+    x_ratio: 0.2481
+    y_ratio: 0.1633
+    width_ratio: 0.4941
+    height_ratio: 0.0643
+
+  # 模式选择弹窗左卡「合作」文字区域（2026-09-09 实机标定，只框卡名前两字，
+  # 按用户约定识别「合作」而非「合作模式」，区域更小）。OCR 读到「合作」即
+  # 定位左卡，点击文字框中心（开环）。右缘略越入第三字但实测仍稳定读出
+  # 「合作」（0.665）；负样本（弹窗关闭，背景有「玩法大厅」）实测读空
+  coop_mode_label_area:
+    relative_to: client
+    x_ratio: 0.143
+    y_ratio: 0.657
+    width_ratio: 0.147
+    height_ratio: 0.056
+
+  # 模式选择弹窗右卡「保卫」文字区域（2026-09-09 实机标定，只框卡名前两字）。
+  # 用法同 coop_mode_label_area，实测读出「保卫」conf 0.666；负样本读空
+  pet_mode_label_area:
+    relative_to: client
+    x_ratio: 0.605
+    y_ratio: 0.657
+    width_ratio: 0.155
+    height_ratio: 0.056
+
+  # 合作挑战页底部「开始挑战」按钮文字区域（2026-09-09 实机标定，927×1727
+  # 客户区，wlxq-bot pick）。页面锚点 + 点击点二合一：OCR 读到「开始挑战」
+  # =已进入合作挑战页（模式选择弹窗点「合作」卡后到达），点击文字框中心
+  # （开环）。离线验证：1/1 帧读对，置信度 0.798，文字中心比例
+  # (0.5286, 0.9543)
+  coop_challenge_start_area:
+    relative_to: client
+    x_ratio: 0.4088
+    y_ratio: 0.9299
+    width_ratio: 0.2535
+    height_ratio: 0.0469
+
+  # 保卫宠物挑战页底部「挑战」按钮文字区域（2026-09-09 实机标定，927×1727
+  # 客户区，wlxq-bot pick）。页面锚点 + 点击点二合一，用法同
+  # coop_challenge_start_area：OCR 读到「挑战」=已进入保卫宠物挑战页（模式
+  # 选择弹窗点「保卫」卡后到达），点击文字框中心（开环）。离线验证：1/1 帧
+  # 读对，置信度 0.665，文字中心比例 (0.534, 0.9328)；按钮内文字略偏右，
+  # 以 OCR 文字框中心为准，勿用 ROI 几何中心
+  pet_challenge_start_area:
+    relative_to: client
+    x_ratio: 0.4326
+    y_ratio: 0.8969
+    width_ratio: 0.1694
+    height_ratio: 0.0533
+
   # 金币感知三区域，标定自 927×1727 客户区（2026-09-05 实机截图）。
   # 供回补召唤与付费选技能的金币门控；只框数字本身，不含图标。
   # 现有金币（左下金币徽章的数字，如 764 / 1.3K）
@@ -446,6 +553,31 @@ pet_difficulty_recognition:
   # 开关（2026-09-06 实机首跑踩中），故开关判定用收起栏文字而非难度行
   bar_roi: pet_difficulty_bar_area
   bar_text: 选择难度
+
+# 招募页模式页签行 OCR 配置；三个页签共用一条识别区、一套识别逻辑，各模式
+# 按 default.yaml mode_profiles 的 mode_tab_text 子串匹配。min_confidence 是
+# OCR 文字置信度（离线验证三行 0.71~0.80），语义与模板匹配置信度不同，不得
+# 混用；miss_limit 是连续识别不到页签文字的报错上限（帧数）
+mode_tab_recognition:
+  candidate_roi: mode_tab_row_area
+  min_confidence: 0.5
+  miss_limit: 8
+
+# 「模式选择」弹窗 OCR 配置（领地页进入合作/保卫宠物的新入口）。标题区域
+# 做弹窗开关锚点（读到 title_text=打开），两张模式卡只框卡名前两字（合作/
+# 保卫，2026-09-09 按用户约定），按子串匹配并点击文字框中心（开环）。
+# min_confidence 是 OCR 文字置信度（离线验证 0.665/0.666，单帧），语义与
+# 模板匹配置信度不同，不得混用；entry_wait_timeout_seconds 是入口链每个
+# 等待步骤（领地变返回/弹窗出现/挑战页出现）的秒级上限，超时保守停止
+mode_select_recognition:
+  title_roi: mode_select_title_area
+  title_text: 模式选择
+  coop_roi: coop_mode_label_area
+  coop_text: 合作
+  pet_roi: pet_mode_label_area
+  pet_text: 保卫
+  min_confidence: 0.5
+  entry_wait_timeout_seconds: 60
 
 # 棋盘格子坐标模型
 # 由 wlxq-bot pick --rect 量测排1/排2 格子后计算得出（见 docs/game-rules.md）

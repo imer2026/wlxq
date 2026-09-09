@@ -1,6 +1,16 @@
 # 默认运行配置
 # 通用运行默认值；任务坐标和 ROI 统一放在 configs/tasks.yaml
 
+logging:
+  # 文件日志（详见 docs/logging.md「文件日志」）：每次命令调用在 logs/ 下写一个
+  # wlxq-bot_日期_时间.log，首行记录完整命令行；文件固定 file_level 级别
+  # （默认 DEBUG，比控制台详细，与 --debug 无关），控制台行为不受影响；
+  # 启动时按 retention_days 清理过期的 .log 文件（按修改时间）
+  enabled: true
+  dir: 'logs'
+  file_level: 'DEBUG'
+  retention_days: 7
+
 screen:
   # 截图模式：fullscreen 全屏 / window 指定窗口客户区
   mode: window
@@ -133,9 +143,10 @@ run:
   # 确认开局技能选完所需的连续「页面已关闭」帧数；每次选完一张卡后页面会先关闭、
   # 下一组技能卡再弹出，间隙里召唤按钮会短暂露出，单帧不能判定选完（会漏选最后一组）
   opening_exit_confirm_frames: 3
-  # 选技能/召唤的金币检查间隔（秒）：每 2 秒读一次金币，够就操作，不够就等
-  # （2026-09-05 定案：节奏跟着金币走，取代旧的随机间隔）
-  gold_check_interval_seconds: 2.0
+  # 选技能/召唤的金币检查间隔（秒）：每 0.5 秒读一次金币，够就操作，不够就等
+  # （2026-09-05 定案：节奏跟着金币走，取代旧的随机间隔；
+  # 2026-09-09 实机调为 0.5 秒：选技能节奏和金币不足等待都明显加快）
+  gold_check_interval_seconds: 0.5
   # 其他队友英雄的技能卡图标（对应 hero_classifier.lineup_others 的三名英雄，
   # 实机采集 2026-08-15）：技能页已打开但未识别到主C图标时，识别到任一队友
   # 图标即确认页面已稳定、本组没有主C技能卡，立即随机选一张，
@@ -299,6 +310,15 @@ mode_profiles:
     mode_chat_hotspot: coop_chat
     entry:
       mode_tab_hotspot: recruit_coop_tab
+      # 页签 OCR 定位文字（识别区 tasks.yaml rois.mode_tab_row_area，三个页签
+      # 共用）；删除本行回退为按 mode_tab_hotspot 固定坐标点击（旧行为）
+      mode_tab_text: 合作模式
+      # 领地入口（2026-09-09 新流程）：模式选择弹窗左卡「合作」+ 合作挑战页
+      # 「开始挑战」；ROI 名见 tasks.yaml rois
+      mode_card_roi: coop_mode_label_area
+      mode_card_text: 合作
+      challenge_roi: coop_challenge_start_area
+      challenge_text: 开始挑战
       difficulty:
         kind: template
     match:
@@ -315,6 +335,13 @@ mode_profiles:
     mode_chat_hotspot: pet_chat
     entry:
       mode_tab_hotspot: recruit_pet_tab
+      mode_tab_text: 保卫宠物
+      # 领地入口（2026-09-09 新流程）：模式选择弹窗右卡「保卫」+ 保卫宠物
+      # 挑战页「挑战」；ROI 名见 tasks.yaml rois
+      mode_card_roi: pet_mode_label_area
+      mode_card_text: 保卫
+      challenge_roi: pet_challenge_start_area
+      challenge_text: 挑战
       difficulty:
         kind: ocr
         targets: [普通, 中等]

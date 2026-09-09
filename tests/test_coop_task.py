@@ -23,6 +23,7 @@ from wlxq_bot.models import (
     WindowContext,
 )
 from wlxq_bot.perception.locator import roi_column_centers
+from wlxq_bot.perception.mode_tab import ModeTabRow
 from wlxq_bot.tasks.base import TaskContext
 from wlxq_bot.tasks.coop import _EMPTY_BOARD_RETRY, CoopTask, _RecruitStep
 
@@ -70,8 +71,8 @@ def make_task(
         hotspots
         if hotspots is not None
         else {
-            "home_chat": Hotspot(x_ratio=0.1, y_ratio=0.2),
-            "open_recruit": Hotspot(x_ratio=0.2, y_ratio=0.3),
+            "territory_nav": Hotspot(x_ratio=0.11, y_ratio=0.21),
+            "open_mode_select": Hotspot(x_ratio=0.21, y_ratio=0.31),
             "open_difficulty_dialog": Hotspot(x_ratio=0.3, y_ratio=0.4),
             "difficulty_scroll_start": Hotspot(x_ratio=0.5, y_ratio=0.3),
             "difficulty_scroll_end": Hotspot(x_ratio=0.5, y_ratio=0.7),
@@ -103,7 +104,7 @@ def make_task(
         difficulty_selection_only=difficulty_selection_only,
         skip_difficulty_selection=skip_difficulty_selection,
         main_c_profile=main_c_profile,
-        mode_profile=mode_profile,
+        mode_profile=mode_profile or default_entry_mode_profile(),
         pet_difficulty_targets=pet_difficulty_targets,
     )
 
@@ -125,6 +126,7 @@ def make_hero(
 
 def make_mode_profile(
     mode_tab_hotspot: str | None = "recruit_coop_tab",
+    mode_tab_text: str | None = None,
     mode_chat_hotspot: str = "coop_chat",
     difficulty_kind: str = "template",
     difficulty_targets: list[str] | None = None,
@@ -132,12 +134,17 @@ def make_mode_profile(
     ready_button: str = "ready_button",
     leave_team: str = "coop_leave_team",
     return_button: str = "return_button",
+    mode_card_text: str | None = "合作",
+    challenge_text: str | None = "开始挑战",
 ) -> ModeProfile:
     return ModeProfile(
         display_name="测试模式",
         mode_chat_hotspot=mode_chat_hotspot,
         entry={
             "mode_tab_hotspot": mode_tab_hotspot,
+            "mode_tab_text": mode_tab_text,
+            "mode_card_text": mode_card_text,
+            "challenge_text": challenge_text,
             "difficulty": {"kind": difficulty_kind, "targets": difficulty_targets or []},
         },
         match={"ready_button": ready_button, "leave_team": leave_team},
@@ -185,18 +192,65 @@ def advance_confirm_difficulty_open(task: CoopTask, *levels: int, frame_id: int 
         task.on_action_verified(*decision)
 
 
-def advance_initial_entry_to_join(task: CoopTask) -> None:
-    observations = [
-        home_observation(frame_id=1),
-        Observation(frame_id=2),
-        Observation(frame_id=3),
-    ]
-    for observation in observations:
+def default_entry_mode_profile() -> ModeProfile:
+    """make_task 未显式传档案时的默认值：领地入口链可驱动，其余行为等价
+    旧 mode=None（coop_chat 兜底、结算点赞宝箱、无页签步骤）。"""
+    return ModeProfile(
+        display_name="测试模式",
+        mode_chat_hotspot="coop_chat",
+        entry={
+            "mode_card_text": "合作",
+            "challenge_text": "开始挑战",
+        },
+        match={"ready_button": "ready_button", "leave_team": "coop_leave_team"},
+        settlement={"like_chest": True, "return_button": "return_button"},
+    )
+
+
+def territory_entry_observations(frame_id: int = 1) -> list[Observation]:
+    """领地入口链的逐帧观察（6 帧各推进一步）：领地点击→返回确认→进入
+    按钮点击→弹窗标题确认→选卡点击→挑战页确认。除导航文字逐帧变化外，
+    其余识别数据每帧都在（各步骤只读取自己需要的那一份）。"""
+    base = {
+        "mode_select_visible": True,
+        "mode_card_rows": [ModeTabRow("合作模式", 0.9, (250, 1174))],
+        "challenge_text": "开始挑战",
+    }
+
+    def obs(index: int, nav: str) -> Observation:
+        raw = {**base, "territory_nav_text": nav} if nav else dict(base)
+        return Observation(frame_id=frame_id + index, raw_data=raw)
+
+    return [obs(0, "领地"), obs(1, "返回"), obs(2, ""), obs(3, ""), obs(4, ""), obs(5, "")]
+
+
+def advance_territory_entry_to_recruit(task: CoopTask, frame_id: int = 1) -> None:
+    """驱动领地入口链到 SELECT_MODE_TAB（挑战页聊天点击已验证）。"""
+    for observation in territory_entry_observations(frame_id):
         decision = task.decide_action(observation, make_window_ctx())
         assert decision is not None
         task.on_action_verified(*decision)
+    decision = task.decide_action(Observation(frame_id=frame_id + 6), make_window_ctx())
+    assert decision is not None and decision[0].tag == "open_challenge_chat"
+    task.on_action_verified(*decision)
+
+
+def advance_entry_to_difficulty_dialog(task: CoopTask, frame_id: int = 1) -> None:
+    """驱动领地入口链到 CONFIRM_DIFFICULTY_OPEN（打开难度弹窗点击已验证）。"""
+    advance_territory_entry_to_recruit(task, frame_id=frame_id)
+    decision = task.decide_action(Observation(frame_id=frame_id + 7), make_window_ctx())
+    assert decision is not None and decision[0].tag == "open_difficulty_dialog"
+    task.on_action_verified(*decision)
+
+
+def advance_initial_entry_to_join(task: CoopTask) -> None:
+    advance_territory_entry_to_recruit(task, frame_id=1)
+    # 页签（默认档案未配置 → 跳过）后打开难度弹窗
+    decision = task.decide_action(Observation(frame_id=8), make_window_ctx())
+    assert decision is not None and decision[0].tag == "open_difficulty_dialog"
+    task.on_action_verified(*decision)
     # 打开确认：settle → 连续 2 次命中标题 → 确认打开进入勾选
-    advance_confirm_difficulty_open(task, 2, 1, frame_id=4)
+    advance_confirm_difficulty_open(task, 2, 1, frame_id=8)
     # 勾选 1、2 后进入关闭步骤
     for frame_id in (10, 11):
         decision = task.decide_action(
@@ -272,21 +326,20 @@ class TestFindCoopAction:
         task = make_task()
         task.ctx.current_state = State.FIND_COOP
         tags = []
-        entry_observations = [
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-            Observation(frame_id=4),  # 打开确认：固定等待（settle）
-            difficulty_observation(2, 1, frame_id=5),  # 命中 1
-            difficulty_observation(2, 1, frame_id=6),  # 命中 2
-            difficulty_observation(2, 1, frame_id=7),  # 确认打开 → 进入勾选
-            difficulty_observation(2, 1, frame_id=8),
-            difficulty_observation(2, 1, frame_id=9),
+        entry_observations = territory_entry_observations(frame_id=1) + [
+            Observation(frame_id=7),  # 挑战页聊天 → SELECT_MODE_TAB → 打开难度弹窗
+            Observation(frame_id=8),  # 打开确认：固定等待（settle）
+            difficulty_observation(2, 1, frame_id=9),  # 命中 1
+            difficulty_observation(2, 1, frame_id=10),  # 命中 2
+            difficulty_observation(2, 1, frame_id=11),  # 确认打开 → 进入勾选
+            difficulty_observation(2, 1, frame_id=12),
+            difficulty_observation(2, 1, frame_id=13),
+            difficulty_observation(2, 1, frame_id=14),
             # 弹窗仍打开 → 点击关闭；之后连续 2 次复核不可见 → 确认关闭
-            difficulty_observation(2, 1, frame_id=10),
-            Observation(frame_id=11),
-            Observation(frame_id=12),
-            Observation(frame_id=13),
+            difficulty_observation(2, 1, frame_id=15),
+            Observation(frame_id=16),
+            Observation(frame_id=17),
+            Observation(frame_id=18),
         ]
         for observation in entry_observations:
             decision = task.decide_action(observation, make_window_ctx())
@@ -298,8 +351,13 @@ class TestFindCoopAction:
             task.on_action_verified(action, to_state)
 
         assert tags == [
-            "open_home_chat",
-            "open_recruit",
+            "open_territory",
+            "territory_open_confirmed",
+            "open_mode_select",
+            "mode_select_open_confirmed",
+            "mode_card_selected",
+            "challenge_page_confirmed",
+            "open_challenge_chat",
             "open_difficulty_dialog",
             "difficulty_open_settle",
             "difficulty_open_hit",
@@ -313,7 +371,7 @@ class TestFindCoopAction:
             "difficulty_dialog_closed",
         ]
         # 进入 JOIN_COOP 后发出抢合作信号动作（由 Runner 双线程协调器执行）
-        grab_decision = task.decide_action(Observation(frame_id=14), make_window_ctx())
+        grab_decision = task.decide_action(Observation(frame_id=19), make_window_ctx())
         assert grab_decision is not None
         assert grab_decision[0].kind == "grab_coop"
         assert grab_decision[0].tag == "find_coop_grab"
@@ -324,18 +382,18 @@ class TestFindCoopAction:
         task.ctx.current_state = State.FIND_COOP
         tags = []
         # 跳过模式：打开确认通过后直接进关闭步骤，不进入 SELECT_DIFFICULTIES
-        for observation in [
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-            Observation(frame_id=4),  # settle
-            difficulty_observation(10, frame_id=5),
-            difficulty_observation(10, frame_id=6),
-            difficulty_observation(10, frame_id=7),  # 确认打开 → 直接关闭
-            difficulty_observation(10, frame_id=8),  # 点击关闭
-            Observation(frame_id=9),
-            Observation(frame_id=10),
-            Observation(frame_id=11),
+        for observation in territory_entry_observations(frame_id=1) + [
+            Observation(frame_id=7),  # 挑战页聊天 → SELECT_MODE_TAB → 打开难度弹窗
+            Observation(frame_id=8),  # settle
+            difficulty_observation(10, frame_id=9),
+            difficulty_observation(10, frame_id=10),
+            difficulty_observation(10, frame_id=11),  # 确认打开
+            difficulty_observation(10, frame_id=12),
+            # 弹窗仍打开 → 点击关闭；之后连续 2 次复核不可见 → 确认关闭
+            difficulty_observation(10, frame_id=13),
+            Observation(frame_id=14),
+            Observation(frame_id=15),
+            Observation(frame_id=16),
         ]:
             decision = task.decide_action(observation, make_window_ctx())
             assert decision is not None
@@ -346,8 +404,13 @@ class TestFindCoopAction:
 
         # 只跳过勾选难度等级；弹窗仍开/关一次刷新最新合作邀请
         assert tags == [
-            "open_home_chat",
-            "open_recruit",
+            "open_territory",
+            "territory_open_confirmed",
+            "open_mode_select",
+            "mode_select_open_confirmed",
+            "mode_card_selected",
+            "challenge_page_confirmed",
+            "open_challenge_chat",
             "open_difficulty_dialog",
             "difficulty_open_settle",
             "difficulty_open_hit",
@@ -358,7 +421,7 @@ class TestFindCoopAction:
             "difficulty_close_miss_check",
             "difficulty_dialog_closed",
         ]
-        grab_decision = task.decide_action(Observation(frame_id=12), make_window_ctx())
+        grab_decision = task.decide_action(Observation(frame_id=17), make_window_ctx())
         assert grab_decision is not None
         assert grab_decision[0].kind == "grab_coop"
         assert grab_decision[0].tag == "find_coop_grab"
@@ -418,16 +481,10 @@ class TestFindCoopAction:
         assert join_decision is not None
         assert join_decision[0].kind == "grab_coop"
 
-    def test_initial_recruit_requires_positive_home_page_match(self):
+    def test_initial_recruit_requests_territory_nav_observation(self):
+        """领地入口第一步不做首页校验：直接 OCR 底部导航领地格。"""
         task = make_task()
-        task.ctx.current_state = State.FIND_COOP
-
-        with pytest.raises(RuntimeError, match="当前界面不是游戏首页"):
-            task.decide_action(Observation(frame_id=1), make_window_ctx())
-
-    def test_initial_recruit_requests_home_page_observation(self):
-        task = make_task()
-        assert task.observation_mode() == "home_page"
+        assert task.observation_mode() == "territory_nav"
 
     def test_join_step_emits_grab_coop_signal(self):
         task = make_task()
@@ -440,9 +497,24 @@ class TestFindCoopAction:
         assert decision[0].tag == "find_coop_grab"
 
     def test_missing_entry_hotspot_stops_without_skipping_to_join(self):
-        task = make_task(hotspots={"join_coop": Hotspot(x_ratio=0.6, y_ratio=0.75)})
+        # 领地确认后缺 open_mode_select hotspot：无可用动作 → decide 返回 None
+        # （调度层按保守停止计数，绝不跳过入口直接抢）
+        task = make_task(
+            hotspots={
+                "territory_nav": Hotspot(x_ratio=0.11, y_ratio=0.21),
+                "join_coop": Hotspot(x_ratio=0.6, y_ratio=0.75),
+            }
+        )
         task.ctx.current_state = State.FIND_COOP
-        assert task.decide_action(home_observation(), make_window_ctx()) is None
+        first, second, *_ = territory_entry_observations()
+        d1 = task.decide_action(first, make_window_ctx())
+        assert d1 is not None and d1[0].tag == "open_territory"
+        task.on_action_verified(*d1)
+        d2 = task.decide_action(second, make_window_ctx())
+        assert d2 is not None and d2[0].tag == "territory_open_confirmed"
+        task.on_action_verified(*d2)
+        assert task._recruit_step == _RecruitStep.OPEN_MODE_SELECT
+        assert task.decide_action(Observation(frame_id=3), make_window_ctx()) is None
 
     def test_ready_button_is_clicked_by_match_center(self):
         task = make_task()
@@ -803,10 +875,13 @@ class TestOtherStates:
         task.on_action_verified(*decision)
         task.ctx.current_state = State.FIND_COOP
 
-        # 重新进入招募：从首页确认开始，而不是停在开局等待
-        follow_up = task.decide_action(home_observation(frame_id=frames + 1), make_window_ctx())
+        # 重新进入招募：从领地入口开始，而不是停在开局等待
+        follow_up = task.decide_action(
+            Observation(frame_id=frames + 1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
         assert follow_up is not None
-        assert follow_up[0].tag == "open_home_chat"
+        assert follow_up[0].tag == "open_territory"
 
     def test_single_home_frame_flash_does_not_reenter(self):
         """单帧首页命中（加载画面相似）不触发重进：下一帧回对局界面即计数归零。"""
@@ -841,9 +916,12 @@ class TestOtherStates:
         task.on_action_verified(*decision)
         task.ctx.current_state = State.FIND_COOP
 
-        follow_up = task.decide_action(home_observation(frame_id=2), make_window_ctx())
+        follow_up = task.decide_action(
+            Observation(frame_id=2, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
         assert follow_up is not None
-        assert follow_up[0].tag == "open_home_chat"
+        assert follow_up[0].tag == "open_territory"
 
     def test_kick_reentry_skips_difficulty_reselection(self):
         """已点过准备（本会话难度已勾选）后被踢回：重新进入不重复勾选难度。"""
@@ -853,11 +931,22 @@ class TestOtherStates:
             Action(kind="click", tag="ready_match", target=(1, 1)),
             State.SELECT_OPENING_SKILLS,
         )
-        # 被踢回首页后的重进路径：首页 → 聊天 → 招募 → 打开难度弹窗
-        for observation, expected in [
-            (home_observation(frame_id=1), "open_home_chat"),
-            (Observation(frame_id=2), "open_recruit"),
-            (Observation(frame_id=3), "open_difficulty_dialog"),
+        # 被踢回首页后的重进路径：领地入口 → 挑战页聊天 → 打开难度弹窗
+        for observation, expected in list(
+            zip(
+                territory_entry_observations(),
+                [
+                    "open_territory",
+                    "territory_open_confirmed",
+                    "open_mode_select",
+                    "mode_select_open_confirmed",
+                    "mode_card_selected",
+                    "challenge_page_confirmed",
+                ],
+            )
+        ) + [
+            (Observation(frame_id=7), "open_challenge_chat"),
+            (Observation(frame_id=8), "open_difficulty_dialog"),
         ]:
             decision = task.decide_action(observation, make_window_ctx())
             assert decision is not None
@@ -899,14 +988,17 @@ class TestOtherStates:
         task.on_action_verified(*decision)
         task.ctx.current_state = State.FIND_COOP
 
-        # 退队后落点探测：识别到首页 → 从首页入口进入招募
+        # 退队后落点探测：识别到首页 → 从领地入口进入招募
         detect = task.decide_action(home_observation(frame_id=3), make_window_ctx())
         assert detect is not None
         assert detect[0].tag == "entry_page_detected"
         task.on_action_verified(*detect)
-        follow = task.decide_action(home_observation(frame_id=4), make_window_ctx())
+        follow = task.decide_action(
+            Observation(frame_id=4, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
         assert follow is not None
-        assert follow[0].tag == "open_home_chat"
+        assert follow[0].tag == "open_territory"
 
     def test_leave_team_entry_detect_falls_back_to_coop_page(self):
         """退队后未识别到首页标志：按合作页面处理，从合作页面聊天进入。"""
@@ -1731,10 +1823,7 @@ class TestOtherStates:
         """面板打开停在普通区顶部、彩虹小号先出现：从小到大单程点击。"""
         task = make_task(coop_difficulties=[10, 9, 8])
         task.ctx.current_state = State.FIND_COOP
-        for observation in (home_observation(), Observation(frame_id=1), Observation(frame_id=1)):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
         advance_confirm_difficulty_open(task, 8, 10, 9, frame_id=2)
 
         observation = difficulty_observation(8, 10, 9)
@@ -1755,10 +1844,7 @@ class TestOtherStates:
     def test_scroll_distance_scales_with_client_size(self):
         task = make_task(coop_difficulties=[10])
         task.ctx.current_state = State.FIND_COOP
-        for observation in (home_observation(), Observation(frame_id=1), Observation(frame_id=1)):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
         advance_confirm_difficulty_open(task, 16, 15, 14, frame_id=2)
 
         decision = task.decide_action(
@@ -1796,15 +1882,8 @@ class TestOtherStates:
         task = make_task(coop_difficulties=[2, 1])
         task.ctx.current_state = State.FIND_COOP
 
-        # 首页确认 → 聊天 → 招募 → 打开难度弹窗，进入打开确认步骤
-        for observation in (
-            home_observation(),
-            Observation(frame_id=1),
-            Observation(frame_id=1),
-        ):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        # 领地入口 → 挑战页聊天 → 打开难度弹窗，进入打开确认步骤
+        advance_entry_to_difficulty_dialog(task)
         assert task._recruit_step is _RecruitStep.CONFIRM_DIFFICULTY_OPEN
         assert task.observation_mode() == "difficulty_dialog"
 
@@ -2334,14 +2413,7 @@ class TestBoardLogging:
         task = make_task()
         task.ctx.current_state = State.FIND_COOP
         # 走到关闭步骤：入口 → 打开确认 → 勾选 1、2
-        for observation in (
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-        ):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
         advance_confirm_difficulty_open(task, 2, 1, frame_id=4)
         for frame_id in (10, 11):
             decision = task.decide_action(
@@ -2367,14 +2439,7 @@ class TestBoardLogging:
         """关闭预算耗尽时不进入抢合作（弹窗挡住 join_coop 会导致无效连点）。"""
         task = make_task()
         task.ctx.current_state = State.FIND_COOP
-        for observation in (
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-        ):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
         advance_confirm_difficulty_open(task, 2, 1, frame_id=4)
         for frame_id in (10, 11):
             decision = task.decide_action(
@@ -2400,14 +2465,7 @@ class TestBoardLogging:
         """弹窗打开慢：settle 后先识别不到，随后出现并连续命中 → 确认打开，不误判。"""
         task = make_task(skip_difficulty_selection=True)
         task.ctx.current_state = State.FIND_COOP
-        for observation in (
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-        ):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
 
         # settle 固定等待
         settle = task.decide_action(Observation(frame_id=4), make_window_ctx())
@@ -2444,14 +2502,7 @@ class TestBoardLogging:
         """弹窗始终没打开：连续未命中达阈值 → 重点打开按钮；重试用尽 → 保守停止。"""
         task = make_task()
         task.ctx.current_state = State.FIND_COOP
-        for observation in (
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-        ):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
 
         cfg = task._run_config
         for _ in range(cfg.difficulty_open_max_reclicks):
@@ -2483,14 +2534,7 @@ class TestBoardLogging:
         """关闭验证以【合作模式】标识为准：标识消失后，残留的难度候选命中不再阻塞关闭。"""
         task = make_task(skip_difficulty_selection=True)
         task.ctx.current_state = State.FIND_COOP
-        for observation in (
-            home_observation(frame_id=1),
-            Observation(frame_id=2),
-            Observation(frame_id=3),
-        ):
-            decision = task.decide_action(observation, make_window_ctx())
-            assert decision is not None
-            task.on_action_verified(*decision)
+        advance_entry_to_difficulty_dialog(task)
         advance_confirm_difficulty_open(task, 10, frame_id=4)
 
         # 弹窗打开（标识可见）→ 点击关闭
@@ -2562,8 +2606,8 @@ class TestModeProfileDispatch:
 
     def _spots_with_tabs(self) -> dict[str, Hotspot]:
         spots = {
-            "home_chat": Hotspot(x_ratio=0.1, y_ratio=0.2),
-            "open_recruit": Hotspot(x_ratio=0.2, y_ratio=0.3),
+            "territory_nav": Hotspot(x_ratio=0.11, y_ratio=0.21),
+            "open_mode_select": Hotspot(x_ratio=0.21, y_ratio=0.31),
             "recruit_coop_tab": Hotspot(x_ratio=0.25, y_ratio=0.35),
             "recruit_pet_tab": Hotspot(x_ratio=0.4, y_ratio=0.35),
             "open_difficulty_dialog": Hotspot(x_ratio=0.3, y_ratio=0.4),
@@ -2597,15 +2641,14 @@ class TestModeProfileDispatch:
         )
         task.ctx.current_state = State.FIND_COOP
         tags = []
-        for observation in [
-            home_observation(frame_id=1),
-            Observation(frame_id=2),   # open_recruit
-            Observation(frame_id=3),   # open_mode_tab（新增步骤）
-            Observation(frame_id=4),   # open_difficulty_dialog
-            Observation(frame_id=5),   # settle
-            difficulty_observation(2, 1, frame_id=6),
-            difficulty_observation(2, 1, frame_id=7),
-            difficulty_observation(2, 1, frame_id=8),
+        for observation in territory_entry_observations(frame_id=1) + [
+            Observation(frame_id=7),   # open_challenge_chat（挑战页聊天）
+            Observation(frame_id=8),   # open_mode_tab（页签 hotspot 路径）
+            Observation(frame_id=9),   # open_difficulty_dialog
+            Observation(frame_id=10),  # settle
+            difficulty_observation(2, 1, frame_id=11),
+            difficulty_observation(2, 1, frame_id=12),
+            difficulty_observation(2, 1, frame_id=13),
         ]:
             decision = task.decide_action(observation, make_window_ctx())
             assert decision is not None
@@ -2613,8 +2656,13 @@ class TestModeProfileDispatch:
             tags.append(action.tag)
             task.on_action_verified(action, to_state)
         assert tags == [
-            "open_home_chat",
-            "open_recruit",
+            "open_territory",
+            "territory_open_confirmed",
+            "open_mode_select",
+            "mode_select_open_confirmed",
+            "mode_card_selected",
+            "challenge_page_confirmed",
+            "open_challenge_chat",
             "open_mode_tab",
             "open_difficulty_dialog",
             "difficulty_open_settle",
@@ -2628,14 +2676,106 @@ class TestModeProfileDispatch:
         # （调度层按保守停止计数，绝不跳过页签直接抢）
         task = make_task(mode_profile=make_mode_profile())  # make_task 默认 spots 无 recruit_coop_tab
         task.ctx.current_state = State.FIND_COOP
-        d1 = task.decide_action(home_observation(frame_id=1), make_window_ctx())
-        assert d1 is not None and d1[0].tag == "open_home_chat"
-        task.on_action_verified(*d1)
-        d2 = task.decide_action(Observation(frame_id=2), make_window_ctx())
-        assert d2 is not None and d2[0].tag == "open_recruit"
-        task.on_action_verified(*d2)
+        advance_territory_entry_to_recruit(task)
         assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
-        assert task.decide_action(Observation(frame_id=3), make_window_ctx()) is None
+        assert task.decide_action(Observation(frame_id=8), make_window_ctx()) is None
+
+    # ------------------------------------------------------------------
+    # 页签 OCR 定位（mode_tab_text 配置后替代固定 hotspot 坐标）
+    # ------------------------------------------------------------------
+
+    def _task_on_recruit_page(self, mode_profile: ModeProfile) -> CoopTask:
+        """构建已驱动到 SELECT_MODE_TAB 步骤的任务（领地入口 → 聊天已完成）。"""
+        task = make_task(hotspots=self._spots_with_tabs(), mode_profile=mode_profile)
+        task.ctx.current_state = State.FIND_COOP
+        advance_territory_entry_to_recruit(task)
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
+        return task
+
+    def test_mode_tab_ocr_clicks_text_center(self):
+        task = self._task_on_recruit_page(
+            make_mode_profile(mode_tab_text="合作模式"),
+        )
+        assert task.observation_mode() == "mode_tab"
+        observation = Observation(
+            frame_id=3,
+            raw_data={
+                "mode_tab_rows": [
+                    ModeTabRow(text="合作模式", confidence=0.71, position=(314, 1535)),
+                    ModeTabRow(text="保卫宠物", confidence=0.75, position=(523, 1535)),
+                    ModeTabRow(text="共战灭尊", confidence=0.77, position=(733, 1535)),
+                ]
+            },
+        )
+        decision = task.decide_action(observation, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "open_mode_tab"
+        assert action.kind == "click"
+        assert action.target == (314, 1535)
+        assert to_state == State.FIND_COOP
+
+    def test_mode_tab_ocr_substring_match_prefers_confidence(self):
+        task = self._task_on_recruit_page(
+            make_mode_profile(mode_tab_text="保卫宠物"),
+        )
+        observation = Observation(
+            frame_id=3,
+            raw_data={
+                "mode_tab_rows": [
+                    # 子串目标命中多行时取置信度最高者（如皮肤换色产生重影识别）
+                    ModeTabRow(text="保卫宠物", confidence=0.75, position=(523, 1535)),
+                    ModeTabRow(text="保卫宠", confidence=0.60, position=(520, 1540)),
+                    ModeTabRow(text="共战灭尊", confidence=0.90, position=(733, 1535)),
+                ]
+            },
+        )
+        decision = task.decide_action(observation, make_window_ctx())
+        assert decision is not None
+        assert decision[0].target == (523, 1535)
+
+    def test_mode_tab_ocr_miss_waits_then_stops_conservatively(self):
+        task = self._task_on_recruit_page(
+            make_mode_profile(mode_tab_text="保卫宠物"),
+        )
+        task._mode_tab_miss_limit = 3
+        # 未识别到页签文字：不盲点固定坐标，返回 None 等待下一帧
+        for frame_id in (3, 4):
+            assert task.decide_action(Observation(frame_id=frame_id), make_window_ctx()) is None
+        # 连续 miss 达上限：报错停止（大概率不在招募页，任何点击都不安全）
+        with pytest.raises(RuntimeError, match="保卫宠物"):
+            task.decide_action(Observation(frame_id=5), make_window_ctx())
+
+    def test_mode_tab_ocr_hit_resets_miss_counter(self):
+        task = self._task_on_recruit_page(
+            make_mode_profile(mode_tab_text="合作模式"),
+        )
+        task._mode_tab_miss_limit = 2
+        miss = Observation(frame_id=3, raw_data={"mode_tab_rows": []})
+        assert task.decide_action(miss, make_window_ctx()) is None
+        hit = Observation(
+            frame_id=4,
+            raw_data={
+                "mode_tab_rows": [ModeTabRow(text="合作模式", confidence=0.7, position=(314, 1535))]
+            },
+        )
+        decision = task.decide_action(hit, make_window_ctx())
+        assert decision is not None and decision[0].target == (314, 1535)
+        assert task._mode_tab_misses == 0
+
+    def test_mode_tab_hotspot_path_used_when_text_unset(self):
+        # 未配置 mode_tab_text：保持旧行为（固定 hotspot 坐标），观察提示为空
+        task = self._task_on_recruit_page(make_mode_profile(mode_tab_text=None))
+        assert task.observation_mode() is None
+        decision = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "open_mode_tab"
+        # recruit_coop_tab (0.25, 0.35) → 客户区像素
+        assert action.target == (
+            int(0.25 * make_window_ctx().client_size[0]),
+            int(0.35 * make_window_ctx().client_size[1]),
+        )
 
     def test_next_round_refresh_clicks_mode_tab_after_chat(self):
         task = make_task(
@@ -2849,3 +2989,131 @@ class TestModeProfileDispatch:
             State.FIND_COOP,
         )
         assert task._recruit_step == _RecruitStep.CLOSE_DIFFICULTY_DIALOG
+
+
+class TestTerritoryEntry:
+    """领地入口链（2026-09-09 新流程）：导航判定、选卡、挑战页确认、超时。"""
+
+    def test_open_territory_clicks_when_nav_reads_lingdi(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "open_territory"
+        assert action.kind == "click"
+        # territory_nav (0.11, 0.21) → 客户区像素
+        assert action.target == (
+            int(0.11 * make_window_ctx().client_size[0]),
+            int(0.21 * make_window_ctx().client_size[1]),
+        )
+        assert to_state == State.FIND_COOP
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.CONFIRM_TERRITORY_OPEN
+
+    def test_open_territory_skips_when_already_open(self):
+        """导航已读「返回」=领地页已打开：跳过点击与等待直进模式选择。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "territory_open_confirmed"
+        assert decision[0].kind == "wait"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.OPEN_MODE_SELECT
+
+    def test_open_territory_unreadable_waits_without_click(self):
+        """导航文字读不到：不盲点，等待下一帧复识。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "territory_nav_pending"
+        assert decision[0].kind == "wait"
+
+    def test_territory_confirm_waits_for_fanhui_then_advances(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+        pending = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert pending is not None and pending[0].tag == "territory_open_pending"
+        confirmed = task.decide_action(
+            Observation(frame_id=2, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
+        assert confirmed is not None and confirmed[0].tag == "territory_open_confirmed"
+        task.on_action_verified(*confirmed)
+        assert task._recruit_step == _RecruitStep.OPEN_MODE_SELECT
+
+    def test_select_mode_card_clicks_text_center(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_MODE_CARD
+        observation = Observation(
+            frame_id=1,
+            raw_data={"mode_card_rows": [ModeTabRow("合作模式", 0.9, (250, 1174))]},
+        )
+        decision = task.decide_action(observation, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "mode_card_selected"
+        assert action.kind == "click"
+        assert action.target == (250, 1174)
+
+    def test_confirm_challenge_advances_to_chat_then_tab(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "challenge_page_confirmed"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
+        # 聊天点击验证后进页签步骤，且页签去向是首局难度弹窗
+        chat = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert chat is not None and chat[0].tag == "open_challenge_chat"
+        task.on_action_verified(*chat)
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
+        assert task._after_tab_step == _RecruitStep.OPEN_DIFFICULTY_DIALOG
+
+    def test_entry_wait_timeout_stops_conservatively(self):
+        """等待超上限：保守停止（decide 返回 None），不盲点不无限重试。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+        task._entry_wait_started_at = 0.0
+        task._clock = lambda: task._entry_wait_timeout_seconds + 1.0
+        assert task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        ) is None
+
+    def test_entry_wait_within_timeout_keeps_polling(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+        task._entry_wait_started_at = 0.0
+        task._clock = lambda: 1.0
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "territory_open_pending"
+
+    def test_missing_card_text_stops_conservatively(self):
+        """模式档案缺卡片文字：无法选卡，保守停止而不是盲点。"""
+        task = make_task(mode_profile=make_mode_profile(mode_card_text=None))
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.SELECT_MODE_CARD
+        assert task.decide_action(Observation(frame_id=1), make_window_ctx()) is None

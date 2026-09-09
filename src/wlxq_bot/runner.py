@@ -298,6 +298,17 @@ class Runner:
                 "return_button": mode_profile.settlement.return_button,
                 "coop_leave_team": mode_profile.match.leave_team,
             },
+            territory_nav_roi="territory_nav_area",
+            mode_select_title_roi=str(
+                self.tasks_config.mode_select_recognition.get(
+                    "title_roi", "mode_select_title_area"
+                )
+            ),
+            mode_card_roi=mode_profile.entry.mode_card_roi,
+            challenge_roi=mode_profile.entry.challenge_roi,
+            mode_select_min_confidence=float(
+                self.tasks_config.mode_select_recognition.get("min_confidence", 0.5)
+            ),
         )
 
         required_heroes = {mc, *self.default_config.hero_classifier.lineup_others}
@@ -352,6 +363,14 @@ class Runner:
             pet_difficulty_targets=mode_profile.entry.difficulty.targets or None,
             pet_difficulty_min_confidence=float(
                 self.tasks_config.pet_difficulty_recognition.get("min_confidence", 0.5)
+            ),
+            mode_tab_miss_limit=int(
+                self.tasks_config.mode_tab_recognition.get("miss_limit", 8)
+            ),
+            entry_wait_timeout_seconds=float(
+                self.tasks_config.mode_select_recognition.get(
+                    "entry_wait_timeout_seconds", 60.0
+                )
             ),
         )
         task.ctx.current_state = initial_state
@@ -489,6 +508,17 @@ class Runner:
                 "return_button": mode_profile.settlement.return_button,
                 "coop_leave_team": mode_profile.match.leave_team,
             },
+            territory_nav_roi="territory_nav_area",
+            mode_select_title_roi=str(
+                self.tasks_config.mode_select_recognition.get(
+                    "title_roi", "mode_select_title_area"
+                )
+            ),
+            mode_card_roi=mode_profile.entry.mode_card_roi,
+            challenge_roi=mode_profile.entry.challenge_roi,
+            mode_select_min_confidence=float(
+                self.tasks_config.mode_select_recognition.get("min_confidence", 0.5)
+            ),
         )
         safety = SafetyGuard(
             max_failures=self.default_config.safety.max_failures,
@@ -1373,6 +1403,76 @@ class Runner:
                 raise RuntimeError(
                     f"模式 {display!r} 需要 OCR 引擎: {exc}"
                 ) from exc
+        tab_text = mode_profile.entry.mode_tab_text
+        if tab_text:
+            # 页签 OCR 定位：识别区必须已标定（OCR 必须限域），引擎必须可用
+            roi_name = str(
+                self.tasks_config.mode_tab_recognition.get(
+                    "candidate_roi", "mode_tab_row_area"
+                )
+            )
+            roi = self.tasks_config.rois.get(roi_name)
+            if roi is None or roi.width_ratio <= 0 or roi.height_ratio <= 0:
+                raise RuntimeError(
+                    f"模式 {display!r} 的模式页签 OCR ROI 未标定: rois.{roi_name}"
+                    "（OCR 必须限域，禁止全图识别）"
+                )
+            try:
+                ensure_engine()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"模式 {display!r} 需要 OCR 引擎: {exc}"
+                ) from exc
+        # 领地入口（2026-09-09 新流程）：所有模式都经领地页进招募，配置缺失
+        # 直接拒绝启动（OCR 识别区缺失会退化成全图识别，禁止）
+        entry = mode_profile.entry
+        entry_missing = [
+            f"entry.{name}"
+            for name, value in (
+                ("mode_card_roi", entry.mode_card_roi),
+                ("mode_card_text", entry.mode_card_text),
+                ("challenge_roi", entry.challenge_roi),
+                ("challenge_text", entry.challenge_text),
+            )
+            if not value
+        ]
+        if entry_missing:
+            raise RuntimeError(
+                f"模式 {display!r} 的领地入口配置缺失: {entry_missing}"
+                "（configs/default.yaml mode_profiles）"
+            )
+        missing_entry_hotspots = [
+            name
+            for name in ("territory_nav", "open_mode_select")
+            if name not in self.tasks_config.hotspots
+        ]
+        if missing_entry_hotspots:
+            raise RuntimeError(
+                f"模式 {display!r} 缺少领地入口 hotspot: {missing_entry_hotspots}"
+                "（configs/tasks.yaml）"
+            )
+        entry_title_roi = str(
+            self.tasks_config.mode_select_recognition.get(
+                "title_roi", "mode_select_title_area"
+            )
+        )
+        missing_entry_rois = []
+        for roi_name in ("territory_nav_area", entry_title_roi,
+                         str(entry.mode_card_roi), str(entry.challenge_roi)):
+            roi = self.tasks_config.rois.get(roi_name)
+            if roi is None or roi.width_ratio <= 0 or roi.height_ratio <= 0:
+                missing_entry_rois.append(roi_name)
+        if missing_entry_rois:
+            raise RuntimeError(
+                f"模式 {display!r} 的领地入口 OCR ROI 未标定: "
+                f"rois.{missing_entry_rois}（OCR 必须限域，禁止全图识别）"
+            )
+        try:
+            ensure_engine()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"模式 {display!r} 的领地入口需要 OCR 引擎: {exc}"
+            ) from exc
 
     def _check_home_page_template(self, start_state: State, pack: TemplatePack) -> None:
         """正常合作流程启动前确认首页正向识别模板存在。"""

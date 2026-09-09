@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from wlxq_bot.config import (
     DefaultConfig,
     Hotspot,
+    TasksConfig,
     MainCProfile,
     ModeProfile,
     RoiConfig,
@@ -382,6 +383,52 @@ class TestModeProfile:
         assert cfg.mode_profiles["pet"].entry.difficulty.kind == "ocr"
         assert cfg.mode_profiles["pet"].main_c_overrides["assault"]["skill_selection_cap"] == 0
 
+    def test_repo_default_yaml_entry_profiles_define_territory_entry(self) -> None:
+        """两个模式档案的领地入口字段齐备（卡片文字 + 挑战页锚点）。"""
+        from pathlib import Path
+
+        from wlxq_bot.config import load_default_config
+
+        cfg = load_default_config(Path("configs/default.yaml"))
+        for mode, card_text, challenge_text in (
+            ("coop", "合作", "开始挑战"),
+            ("pet", "保卫", "挑战"),
+        ):
+            entry = cfg.mode_profiles[mode].entry
+            assert entry.mode_card_text == card_text, mode
+            assert entry.mode_card_roi, mode
+            assert entry.challenge_text == challenge_text, mode
+            assert entry.challenge_roi, mode
+
+    def test_repo_tasks_yaml_defines_mode_select_recognition(self) -> None:
+        """领地入口 OCR 配置段齐备（标题锚点 + 等待上限）。"""
+        from pathlib import Path
+
+        from wlxq_bot.config import load_tasks_config
+
+        cfg = load_tasks_config(Path("configs/tasks.yaml"))
+        rec = cfg.mode_select_recognition
+        assert rec["title_roi"] == "mode_select_title_area"
+        assert rec["title_text"] == "模式选择"
+        assert rec["min_confidence"] == 0.5
+        assert rec["entry_wait_timeout_seconds"] == 60
+        for roi_name in (
+            "territory_nav_area",
+            "coop_mode_label_area",
+            "pet_mode_label_area",
+            "coop_challenge_start_area",
+            "pet_challenge_start_area",
+        ):
+            roi = cfg.rois[roi_name]
+            assert roi.width_ratio > 0 and roi.height_ratio > 0, roi_name
+        assert "territory_nav" in cfg.hotspots
+        assert "open_mode_select" in cfg.hotspots
+
+    def test_mode_select_recognition_defaults_to_empty_dict(self) -> None:
+        """YAML 空值统一转空字典：缺段不报错，由启动缺口检查兜底。"""
+        cfg = TasksConfig()
+        assert cfg.mode_select_recognition == {}
+
     def test_repo_tasks_yaml_defines_pet_bar_anchor(self) -> None:
         """仓库 tasks.yaml 必须定义保卫宠物收起栏锚点（弹窗开关的关闭态判据）。"""
         from wlxq_bot.config import load_tasks_config
@@ -392,3 +439,75 @@ class TestModeProfile:
         assert rec["bar_text"] == "选择难度"
         bar_roi = cfg.rois["pet_difficulty_bar_area"]
         assert bar_roi.width_ratio > 0 and bar_roi.height_ratio > 0
+
+
+class TestLoggingConfig:
+    """文件日志配置（configs/default.yaml ``logging`` 段）测试。"""
+
+    def test_defaults(self) -> None:
+        from wlxq_bot.config import LoggingConfig
+
+        cfg = LoggingConfig()
+        assert cfg.enabled is True
+        assert cfg.dir == "logs"
+        assert cfg.file_level == "DEBUG"
+        assert cfg.retention_days == 7
+
+    def test_retention_days_must_be_positive(self) -> None:
+        from wlxq_bot.config import LoggingConfig
+
+        with pytest.raises(ValidationError, match="retention_days"):
+            LoggingConfig(retention_days=0)
+
+    def test_load_missing_file_returns_defaults(self, tmp_path: Path) -> None:
+        from wlxq_bot.config import LoggingConfig, load_logging_config
+
+        cfg = load_logging_config(tmp_path / "not_exist.yaml")
+        assert cfg == LoggingConfig()
+
+    def test_load_missing_section_returns_defaults(self, tmp_path: Path) -> None:
+        from wlxq_bot.config import LoggingConfig, load_logging_config
+
+        path = tmp_path / "default.yaml"
+        path.write_text("screen:\n  mode: window\n", encoding="utf-8")
+        assert load_logging_config(path) == LoggingConfig()
+
+    def test_load_custom_section(self, tmp_path: Path) -> None:
+        from wlxq_bot.config import load_logging_config
+
+        path = tmp_path / "default.yaml"
+        path.write_text(
+            "logging:\n  enabled: false\n  dir: 'mylogs'\n"
+            "  file_level: 'INFO'\n  retention_days: 3\n",
+            encoding="utf-8",
+        )
+        cfg = load_logging_config(path)
+        assert cfg.enabled is False
+        assert cfg.dir == "mylogs"
+        assert cfg.file_level == "INFO"
+        assert cfg.retention_days == 3
+
+    def test_load_invalid_section_type_rejected(self, tmp_path: Path) -> None:
+        from wlxq_bot.config import load_logging_config
+
+        path = tmp_path / "default.yaml"
+        path.write_text("logging: not_a_dict\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="logging"):
+            load_logging_config(path)
+
+    def test_load_invalid_field_rejected(self, tmp_path: Path) -> None:
+        from wlxq_bot.config import load_logging_config
+
+        path = tmp_path / "default.yaml"
+        path.write_text("logging:\n  retention_days: 0\n", encoding="utf-8")
+        with pytest.raises(ValidationError):
+            load_logging_config(path)
+
+    def test_repo_default_yaml_logging_section(self) -> None:
+        """仓库自带 default.yaml：文件日志默认开启、DEBUG、保留 7 天。"""
+        from wlxq_bot.config import load_logging_config
+
+        cfg = load_logging_config(Path("configs/default.yaml"))
+        assert cfg.enabled is True
+        assert cfg.file_level == "DEBUG"
+        assert cfg.retention_days == 7

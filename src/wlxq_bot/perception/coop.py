@@ -46,6 +46,7 @@ from wlxq_bot.perception.locator import (
     hero_cell_rois,
     ratio_to_pixel_roi,
 )
+from wlxq_bot.perception.mode_tab import ModeTabRow, read_mode_tab_rows
 from wlxq_bot.perception.pet_difficulty import read_difficulty_rows
 from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
@@ -150,6 +151,11 @@ class CoopPerception:
         difficulty_kind: str = "template",
         locator_aliases: dict[str, str] | None = None,
         difficulty_reader: Any | None = None,
+        territory_nav_roi: str | None = None,
+        mode_select_title_roi: str | None = None,
+        mode_card_roi: str | None = None,
+        challenge_roi: str | None = None,
+        mode_select_min_confidence: float = 0.5,
     ) -> None:
         self._vision = vision
         self._pack = template_pack
@@ -204,6 +210,14 @@ class CoopPerception:
         # coop_leave_team 三个可被重映射；标志名不变，任务层零改动）
         self._locator_aliases = dict(locator_aliases or {})
         self._difficulty_reader = difficulty_reader
+        # 领地入口（2026-09-09 新流程）识别区：导航文字区共用，模式卡与挑战
+        # 按钮区按模式档案传入（rois 名）；OCR 结果只写 raw_data，子串匹配
+        # 与点击决策归任务层
+        self._territory_nav_roi = territory_nav_roi
+        self._mode_select_title_roi = mode_select_title_roi
+        self._mode_card_roi = mode_card_roi
+        self._challenge_roi = challenge_roi
+        self._mode_select_min_confidence = mode_select_min_confidence
 
     @property
     def available_heroes(self) -> list[str]:
@@ -299,6 +313,22 @@ class CoopPerception:
                 self._detect_pet_difficulty_bar_flag(ctx, frame, raw_data, matches)
             else:
                 self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
+        elif observation_mode == "mode_tab":
+            # 点模式页签前 OCR 页签行定位文字：三个页签共用一条识别区，
+            # 仅进招募后的一两帧识别，不在高频循环内
+            self._detect_mode_tab_rows(ctx, frame, raw_data)
+        elif observation_mode == "territory_nav":
+            # 领地入口第一步：读底部导航领地格文字（领地=未进领地页，
+            # 返回=已在领地页），仅入口步骤识别，不在高频循环内
+            self._detect_territory_nav_text(ctx, frame, raw_data)
+        elif observation_mode == "mode_select":
+            # 领地入口：OCR 模式选择弹窗标题（弹窗开关锚点）+ 本模式卡片
+            # 文字行（供点击文字框中心）
+            self._detect_mode_select_title(ctx, frame, raw_data)
+            self._detect_mode_card_rows(ctx, frame, raw_data)
+        elif observation_mode == "challenge_page":
+            # 领地入口最后一步：OCR 挑战页按钮文字（页面到达锚点）
+            self._detect_challenge_text(ctx, frame, raw_data)
 
         # 2. 培养阶段做棋盘英雄识别
         board: BoardSnapshot | None = None
@@ -577,6 +607,118 @@ class CoopPerception:
         raw_data["pet_difficulty_rows"] = rows
         logger.debug(
             "frame=%d 宠物难度行=%s", ctx.frame_id, [row.text for row in rows]
+        )
+
+    def _detect_mode_tab_rows(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 读招募页模式页签行，写入 mode_tab_rows（已按 min_confidence 过滤）。
+
+        ROI 来自 mode_tab_recognition.candidate_roi；缺失或零面积时返回空
+        （OCR 必须限域，启动检查会另行为缺失报错）。任务层按模式档案的
+        mode_tab_text 子串匹配并点击文字框中心（开环，同难度勾选策略）。
+        """
+        cfg = self._cfg.mode_tab_recognition
+        roi_name = str(cfg.get("candidate_roi", "mode_tab_row_area"))
+        roi = self._resolve_named_roi(roi_name, ctx)
+        min_confidence = float(cfg.get("min_confidence", 0.5))
+        rows = [
+            row
+            for row in read_mode_tab_rows(frame, roi, reader=self._difficulty_reader)
+            if row.confidence >= min_confidence
+        ]
+        raw_data["mode_tab_rows"] = rows
+        logger.debug(
+            "frame=%d 模式页签行=%s", ctx.frame_id, [row.text for row in rows]
+        )
+
+    def _read_entry_roi_rows(
+        self,
+        roi_name: str | None,
+        ctx: WindowContext,
+        frame: Any,
+    ) -> list[ModeTabRow]:
+        """领地入口共用的限域 OCR：按 rois 名读一个小区域的文字行。
+
+        已按 mode_select_recognition.min_confidence 过滤；ROI 缺失或零面积
+        返回空（OCR 必须限域，启动检查会另行为缺失报错）。
+        """
+        roi = self._resolve_named_roi(roi_name, ctx)
+        rows = [
+            row
+            for row in read_mode_tab_rows(frame, roi, reader=self._difficulty_reader)
+            if row.confidence >= self._mode_select_min_confidence
+        ]
+        return rows
+
+    def _detect_territory_nav_text(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 读底部导航领地格文字，写入 territory_nav_text（无文字为空串）。
+
+        「领地」=未进领地页（可点），「返回」=已在领地页（跳过点击）。
+        """
+        rows = self._read_entry_roi_rows(self._territory_nav_roi, ctx, frame)
+        raw_data["territory_nav_text"] = rows[0].text if rows else ""
+        logger.debug(
+            "frame=%d 领地导航文字=%s", ctx.frame_id, raw_data["territory_nav_text"]
+        )
+
+    def _detect_mode_select_title(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 模式选择弹窗标题，按 title_text 子串匹配写 mode_select_visible。
+
+        标题两侧装饰小星星偶被读进文字（「模式选择·」），必须子串匹配；
+        弹窗关闭时读空。
+        """
+        cfg = self._cfg.mode_select_recognition
+        title_text = str(cfg.get("title_text", "模式选择"))
+        rows = self._read_entry_roi_rows(self._mode_select_title_roi, ctx, frame)
+        visible = any(title_text in row.text for row in rows)
+        raw_data["mode_select_visible"] = visible
+        logger.debug("frame=%d 模式选择标题可见=%s", ctx.frame_id, visible)
+
+    def _detect_mode_card_rows(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 本模式卡片文字行，写入 mode_card_rows（供任务层点文字框中心）。
+
+        ROI 名按模式档案 entry.mode_card_roi 由 runner 传入。
+        """
+        rows = self._read_entry_roi_rows(self._mode_card_roi, ctx, frame)
+        raw_data["mode_card_rows"] = rows
+        logger.debug(
+            "frame=%d 模式卡行=%s", ctx.frame_id, [row.text for row in rows]
+        )
+
+    def _detect_challenge_text(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 挑战页按钮文字，写入 challenge_text（无文字为空串）。
+
+        合作挑战页读「开始挑战」、保卫宠物挑战页读「挑战」，到达锚点由
+        任务层按模式档案 challenge_text 子串匹配。
+        """
+        rows = self._read_entry_roi_rows(self._challenge_roi, ctx, frame)
+        raw_data["challenge_text"] = rows[0].text if rows else ""
+        logger.debug(
+            "frame=%d 挑战按钮文字=%s", ctx.frame_id, raw_data["challenge_text"]
         )
 
     def _detect_pet_difficulty_bar_flag(

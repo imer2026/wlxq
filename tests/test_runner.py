@@ -552,6 +552,9 @@ class TestLoopStopConditions:
         from wlxq_bot.tasks.base import TaskContext
         from wlxq_bot.tasks.coop import CoopTask
 
+        from wlxq_bot.config import ModeProfile
+        from wlxq_bot.perception.mode_tab import ModeTabRow
+
         ctx = TaskContext(main_c="assault", max_rounds=10)
         ctx.current_state = State.FIND_COOP
         task = CoopTask(
@@ -559,13 +562,35 @@ class TestLoopStopConditions:
             RunConfig(),
             CoopRole.HELPER,
             {
-                "home_chat": Hotspot(x_ratio=0.1, y_ratio=0.2),
-                "open_recruit": Hotspot(x_ratio=0.2, y_ratio=0.3),
+                "territory_nav": Hotspot(x_ratio=0.1, y_ratio=0.2),
+                "open_mode_select": Hotspot(x_ratio=0.2, y_ratio=0.3),
+                "coop_chat": Hotspot(x_ratio=0.4, y_ratio=0.5),
                 "open_difficulty_dialog": Hotspot(x_ratio=0.3, y_ratio=0.4),
             },
             coop_difficulties=[1],
+            mode_profile=ModeProfile(
+                display_name="合作模式",
+                mode_chat_hotspot="coop_chat",
+                entry={
+                    "mode_card_text": "合作",
+                    "challenge_text": "开始挑战",
+                },
+                match={"ready_button": "ready_button", "leave_team": "coop_leave_team"},
+                settlement={"like_chest": True, "return_button": "return_button"},
+            ),
         )
-        perception = FakePerception(Observation(frame_id=1, raw_data={"home_page_visible": True}))
+        # 一帧推进一步的领地入口链：导航直接读「返回」跳过点领地
+        perception = FakePerception(
+            Observation(
+                frame_id=1,
+                raw_data={
+                    "territory_nav_text": "返回",
+                    "mode_select_visible": True,
+                    "mode_card_rows": [ModeTabRow("合作模式", 0.9, (100, 200))],
+                    "challenge_text": "开始挑战",
+                },
+            )
+        )
 
         make_runner()._run_loop(
             FakeScreen(make_window_ctx()),
@@ -574,12 +599,22 @@ class TestLoopStopConditions:
             task,
             SafetyGuard(max_failures=3, frame_ttl_ms=5000),
             1,
-            max_steps=4,
+            max_steps=8,
         )
 
         # 打开难度弹窗后先进入打开确认步骤：只用标题图轻量识别（difficulty_dialog），
-        # 候选识别（coop_difficulty）要到确认打开后的勾选步骤才启用
-        assert perception.observation_modes == ["home_page", None, None, "difficulty_dialog"]
+        # 候选识别（coop_difficulty）要到确认打开后的勾选步骤才启用；
+        # 领地入口各步只 OCR 对应小区域（territory_nav/mode_select/challenge_page）
+        assert perception.observation_modes == [
+            "territory_nav",
+            "mode_select",
+            "mode_select",
+            "mode_select",
+            "challenge_page",
+            None,
+            None,
+            "difficulty_dialog",
+        ]
 
     def test_decision_log_includes_round_number(self, caplog):
         """主决策日志带局号；一局完成时输出局号汇总。"""
@@ -2002,6 +2037,8 @@ class TestModeAssets:
                 "home_chat": {"x_ratio": 0.93, "y_ratio": 0.55},
                 "open_recruit": {"x_ratio": 0.08, "y_ratio": 0.64},
                 "open_difficulty_dialog": {"x_ratio": 0.58, "y_ratio": 0.83},
+                "territory_nav": {"x_ratio": 0.70, "y_ratio": 0.98},
+                "open_mode_select": {"x_ratio": 0.60, "y_ratio": 0.30},
             },
             locators={
                 "pet_ready_button": {
@@ -2035,6 +2072,34 @@ class TestModeAssets:
                     "width_ratio": 0.38,
                     "height_ratio": 0.07,
                 },
+                "territory_nav_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.64,
+                    "y_ratio": 0.96,
+                    "width_ratio": 0.11,
+                    "height_ratio": 0.04,
+                },
+                "mode_select_title_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.25,
+                    "y_ratio": 0.16,
+                    "width_ratio": 0.49,
+                    "height_ratio": 0.06,
+                },
+                "pet_mode_label_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.60,
+                    "y_ratio": 0.65,
+                    "width_ratio": 0.16,
+                    "height_ratio": 0.06,
+                },
+                "pet_challenge_start_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.43,
+                    "y_ratio": 0.90,
+                    "width_ratio": 0.17,
+                    "height_ratio": 0.05,
+                },
             },
             pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
                                         "min_confidence": 0.5,
@@ -2049,6 +2114,10 @@ class TestModeAssets:
             mode_chat_hotspot="pet_chat",
             entry={
                 "mode_tab_hotspot": "recruit_pet_tab",
+                "mode_card_roi": "pet_mode_label_area",
+                "mode_card_text": "保卫",
+                "challenge_roi": "pet_challenge_start_area",
+                "challenge_text": "挑战",
                 "difficulty": {"kind": "ocr", "targets": ["普通", "中等"]},
             },
             match={"ready_button": "pet_ready_button", "leave_team": "pet_leave_team"},

@@ -60,8 +60,16 @@ _NO_PROGRESS_LIMIT = 8
 class _RecruitStep(Enum):
     """`FIND_COOP` 内部的固定招募业务步骤。"""
 
-    VERIFY_HOME_PAGE = "verify_home_page"
-    OPEN_RECRUIT = "open_recruit"
+    # 领地入口（2026-09-09 新流程，取代首页→聊天→招募）：读底部导航领地格
+    # 文字，「领地」=点击并等「返回」；「返回」=已在领地页，跳过等待直进
+    # 模式选择弹窗步骤
+    OPEN_TERRITORY = "open_territory"
+    CONFIRM_TERRITORY_OPEN = "confirm_territory_open"
+    OPEN_MODE_SELECT = "open_mode_select"
+    CONFIRM_MODE_SELECT_OPEN = "confirm_mode_select_open"
+    SELECT_MODE_CARD = "select_mode_card"
+    CONFIRM_CHALLENGE_PAGE = "confirm_challenge_page"
+    OPEN_CHALLENGE_CHAT = "open_challenge_chat"
     SELECT_MODE_TAB = "select_mode_tab"
     OPEN_DIFFICULTY_DIALOG = "open_difficulty_dialog"
     CONFIRM_DIFFICULTY_OPEN = "confirm_difficulty_open"
@@ -92,6 +100,8 @@ class CoopTask(Task):
         mode_profile: ModeProfile | None = None,
         pet_difficulty_targets: list[str] | None = None,
         pet_difficulty_min_confidence: float = 0.5,
+        mode_tab_miss_limit: int = 8,
+        entry_wait_timeout_seconds: float = 60.0,
         main_c_profile: MainCProfile | None = None,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
@@ -112,14 +122,24 @@ class CoopTask(Task):
         self._selected_difficulties: set[int] = set()
         self._skipped_difficulties: set[int] = set()
         self._difficulty_summary_logged = False
+        # 页签 OCR 连续识别不到的帧计数（达 mode_tab_miss_limit 报错停止）
+        self._mode_tab_misses = 0
+        self._mode_tab_miss_limit = max(1, mode_tab_miss_limit)
+        # 领地入口各等待步骤（领地变返回/弹窗出现/挑战页出现）共用的秒级
+        # 上限；超时打 ERROR 保守停止，不盲点不无限重试
+        self._entry_wait_timeout_seconds = max(1.0, entry_wait_timeout_seconds)
+        # 当前入口等待步骤的 deadline 起点；None = 尚未开始计时
+        self._entry_wait_started_at: float | None = None
         self._clock = clock
         self._rng = rng or random.Random()
 
         self._recruit_step = (
             _RecruitStep.SELECT_DIFFICULTIES
             if difficulty_selection_only
-            else _RecruitStep.VERIFY_HOME_PAGE
+            else _RecruitStep.OPEN_TERRITORY
         )
+        if self._recruit_step is _RecruitStep.OPEN_TERRITORY:
+            self._start_entry_wait()
         self._difficulty_scroll_count = 0
         # 本目标难度的尝试期间是否见过彩虹候选：决定跳过后是否重置滚动预算
         self._difficulty_saw_candidates = False
@@ -352,8 +372,30 @@ class CoopTask(Task):
         return self._summon_count >= self._run_config.minimum_summon_count_before_skills
 
     def observation_mode(self) -> str | None:
-        if self._recruit_step in (_RecruitStep.VERIFY_HOME_PAGE, _RecruitStep.DETECT_ENTRY_PAGE):
+        if self._recruit_step is _RecruitStep.DETECT_ENTRY_PAGE:
+            # 退队落点探测：只区分首页/非首页，首页也改走领地入口
             return "home_page"
+        if self._recruit_step in (
+            _RecruitStep.OPEN_TERRITORY,
+            _RecruitStep.CONFIRM_TERRITORY_OPEN,
+        ):
+            # 领地入口：OCR 底部导航领地格文字（领地=可点，返回=已打开）
+            return "territory_nav"
+        if self._recruit_step in (
+            _RecruitStep.OPEN_MODE_SELECT,
+            _RecruitStep.CONFIRM_MODE_SELECT_OPEN,
+            _RecruitStep.SELECT_MODE_CARD,
+        ):
+            # 领地入口：OCR 模式选择弹窗标题（开关锚点）+ 本模式卡片文字
+            return "mode_select"
+        if self._recruit_step is _RecruitStep.CONFIRM_CHALLENGE_PAGE:
+            # 领地入口收尾：OCR 挑战页按钮文字（到达锚点）
+            return "challenge_page"
+        if self._recruit_step is _RecruitStep.SELECT_MODE_TAB and (
+            self._mode is not None and self._mode.entry.mode_tab_text
+        ):
+            # 点页签前 OCR 页签行定位文字：三个页签共用一条识别区
+            return "mode_tab"
         if self._recruit_step is _RecruitStep.SELECT_DIFFICULTIES:
             # 勾选难度需要识别候选列表（16 个难度模板）
             return "coop_difficulty"
@@ -392,6 +434,291 @@ class CoopTask(Task):
             State.FIND_COOP,
         )
 
+    def _action_select_mode_tab_ocr(
+        self,
+        observation: Observation,
+        tab_text: str,
+    ) -> tuple[Action, State] | None:
+        """按 OCR 文字定位点击本模式页签（三个页签共用一条识别区）。
+
+        命中即点文字框中心（开环，同难度勾选策略；页签点击幂等，后续步骤
+        自有门禁）。识别不到时不盲点固定坐标：先等待下一帧重试（进入招募
+        可能有动画），连续 miss 达上限报错停止——页签行读不到文字大概率
+        不在招募页，此时任何点击都不安全。
+        """
+        rows = [
+            row
+            for row in (observation.raw_data.get("mode_tab_rows") or [])
+            if tab_text in row.text
+        ]
+        if not rows:
+            self._mode_tab_misses += 1
+            if self._mode_tab_misses >= self._mode_tab_miss_limit:
+                raise RuntimeError(
+                    f"连续 {self._mode_tab_miss_limit} 帧未识别到「{tab_text}」页签文字，"
+                    "请确认当前在招募页后重新运行（mode_tab OCR）"
+                )
+            logger.warning(
+                "frame=%d 未识别到「%s」页签（第 %d/%d 帧），等待下一帧",
+                observation.frame_id,
+                tab_text,
+                self._mode_tab_misses,
+                self._mode_tab_miss_limit,
+            )
+            return None
+        best = max(rows, key=lambda row: row.confidence)
+        self._mode_tab_misses = 0
+        logger.info(
+            "OCR 定位「%s」页签 conf=%.2f client=%s",
+            tab_text,
+            best.confidence,
+            best.position,
+        )
+        return (
+            Action(
+                kind="click",
+                target=best.position,
+                duration=0.08,
+                verification="immediate",
+                tag="open_mode_tab",
+                reason=f"进入招募：点击「{tab_text}」页签",
+            ),
+            State.FIND_COOP,
+        )
+
+    def _start_entry_wait(self) -> None:
+        """重置领地入口等待的 deadline 起点（每进入一个等待步骤时调用）。"""
+        self._entry_wait_started_at = self._clock()
+
+    def _entry_deadline_exceeded(self, observation: Observation, what: str) -> bool:
+        """领地入口等待是否已达秒级上限；达到时打 ERROR（调用方保守停止）。
+
+        deadline 惰性起算：首次调用时从当前时刻开始计时。
+        """
+        if self._entry_wait_started_at is None:
+            self._entry_wait_started_at = self._clock()
+            return False
+        elapsed = self._clock() - self._entry_wait_started_at
+        if elapsed < self._entry_wait_timeout_seconds:
+            return False
+        logger.error(
+            "frame=%d 领地入口等待超时（%.0fs/%.0fs）：%s，保守停止",
+            observation.frame_id,
+            elapsed,
+            self._entry_wait_timeout_seconds,
+            what,
+        )
+        return True
+
+    def _entry_wait_action(self, tag: str, reason: str) -> tuple[Action, State]:
+        """领地入口等待步骤的轮询动作：短暂等待后下一帧复识。"""
+        return (
+            Action(
+                kind="wait",
+                duration=0.3,
+                verification="immediate",
+                tag=tag,
+                reason=reason,
+            ),
+            State.FIND_COOP,
+        )
+
+    def _action_open_territory(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """领地入口第一步：按导航文字决定点领地、直进弹窗或继续等。
+
+        读到「领地」=未进领地页，点击 territory_nav；读到「返回」=已在
+        领地页（如手动打开过），跳过点击与等待直进模式选择；读不到文字
+        不盲点（当前页面可能没有底部导航），等下一帧复识，超过入口等待
+        上限保守停止。
+        """
+        text = str(observation.raw_data.get("territory_nav_text") or "")
+        if "返回" in text:
+            logger.info(
+                "frame=%d 领地页已打开（导航读到「返回」），跳过点领地",
+                observation.frame_id,
+            )
+            self._recruit_step = _RecruitStep.OPEN_MODE_SELECT
+            self._start_entry_wait()
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="territory_open_confirmed",
+                    reason="领地页已打开（导航读到「返回」）",
+                ),
+                State.FIND_COOP,
+            )
+        if "领地" in text:
+            return self._hotspot_click(
+                "territory_nav",
+                "open_territory",
+                "领地入口：点击底部导航「领地」",
+                State.FIND_COOP,
+                window_ctx,
+            )
+        if self._entry_deadline_exceeded(observation, "底部导航未读到「领地/返回」文字"):
+            return None
+        return self._entry_wait_action(
+            "territory_nav_pending",
+            "底部导航未读到「领地/返回」文字，等待下一帧复识",
+        )
+
+    def _action_confirm_territory_open(
+        self,
+        observation: Observation,
+    ) -> tuple[Action, State] | None:
+        """正向确认领地页真的打开：导航文字从「领地」变成「返回」。
+
+        页面打开快慢不定：轮询复识，超过入口等待上限仍未变化说明点击未
+        生效或页面异常，保守停止——绝不带着「没打开」的假设点进入按钮。
+        """
+        text = str(observation.raw_data.get("territory_nav_text") or "")
+        if "返回" in text:
+            logger.info(
+                "frame=%d 领地页确认打开（导航读到「返回」）", observation.frame_id
+            )
+            self._recruit_step = _RecruitStep.OPEN_MODE_SELECT
+            self._start_entry_wait()
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="territory_open_confirmed",
+                    reason="领地页已确认打开（导航读到「返回」）",
+                ),
+                State.FIND_COOP,
+            )
+        if self._entry_deadline_exceeded(observation, "点领地后导航未变成「返回」"):
+            return None
+        return self._entry_wait_action(
+            "territory_open_pending",
+            "等待领地页打开（导航仍为「领地」）",
+        )
+
+    def _action_confirm_mode_select_open(
+        self,
+        observation: Observation,
+    ) -> tuple[Action, State] | None:
+        """正向确认模式选择弹窗打开：标题区域 OCR 读到「模式选择」。
+
+        点击进入按钮后弹窗有延迟；超过入口等待上限仍未出现说明点击未生效
+        或页面异常，保守停止。
+        """
+        if observation.flag("mode_select_visible"):
+            logger.info(
+                "frame=%d 模式选择弹窗确认打开", observation.frame_id
+            )
+            self._recruit_step = _RecruitStep.SELECT_MODE_CARD
+            self._start_entry_wait()
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="mode_select_open_confirmed",
+                    reason="模式选择弹窗已确认打开（标题 OCR 命中）",
+                ),
+                State.FIND_COOP,
+            )
+        if self._entry_deadline_exceeded(observation, "点进入按钮后模式选择弹窗未出现"):
+            return None
+        return self._entry_wait_action(
+            "mode_select_open_pending",
+            "等待模式选择弹窗打开（标题未命中）",
+        )
+
+    def _action_select_mode_card(
+        self,
+        observation: Observation,
+    ) -> tuple[Action, State] | None:
+        """按 OCR 文字定位点击本模式的卡片（合作=「合作」/宠物=「保卫」）。
+
+        命中即点文字框中心（开环，同页签/难度勾选策略；挑战页到达有独立
+        门禁）。识别不到时不盲点：等待下一帧复识，超过入口等待上限保守
+        停止——弹窗内读不到卡片文字大概率弹窗状态异常。
+        """
+        card_text = self._mode.entry.mode_card_text if self._mode else None
+        if not card_text:
+            logger.error(
+                "frame=%d 模式档案未配置 mode_card_text，领地入口无法选卡",
+                observation.frame_id,
+            )
+            return None
+        rows = [
+            row
+            for row in (observation.raw_data.get("mode_card_rows") or [])
+            if card_text in row.text
+        ]
+        if not rows:
+            if self._entry_deadline_exceeded(
+                observation, f"模式选择弹窗内未识别到「{card_text}」卡片"
+            ):
+                return None
+            return self._entry_wait_action(
+                "mode_card_pending",
+                f"未识别到「{card_text}」卡片文字，等待下一帧复识",
+            )
+        best = max(rows, key=lambda row: row.confidence)
+        logger.info(
+            "OCR 定位「%s」模式卡 conf=%.2f client=%s",
+            card_text,
+            best.confidence,
+            best.position,
+        )
+        return (
+            Action(
+                kind="click",
+                target=best.position,
+                duration=0.08,
+                verification="immediate",
+                tag="mode_card_selected",
+                reason=f"领地入口：点击「{card_text}」模式卡",
+            ),
+            State.FIND_COOP,
+        )
+
+    def _action_confirm_challenge_page(
+        self,
+        observation: Observation,
+    ) -> tuple[Action, State] | None:
+        """正向确认已到达本模式挑战页：按钮区域 OCR 读到挑战文字。
+
+        合作挑战页读「开始挑战」、保卫宠物挑战页读「挑战」（模式档案
+        challenge_text）。超过入口等待上限仍未读到说明选卡未生效或页面
+        异常，保守停止。
+        """
+        challenge_text = self._mode.entry.challenge_text if self._mode else None
+        text = str(observation.raw_data.get("challenge_text") or "")
+        if challenge_text and challenge_text in text:
+            logger.info(
+                "frame=%d 已到达挑战页（读到「%s」）", observation.frame_id, challenge_text
+            )
+            self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="challenge_page_confirmed",
+                    reason=f"挑战页已确认打开（读到「{challenge_text}」）",
+                ),
+                State.FIND_COOP,
+            )
+        if self._entry_deadline_exceeded(
+            observation, f"点击模式卡后未读到「{challenge_text or '挑战文字'}」"
+        ):
+            return None
+        return self._entry_wait_action(
+            "challenge_page_pending",
+            "等待挑战页打开（按钮文字未命中）",
+        )
+
     def _action_recruit_entry(
         self,
         observation: Observation,
@@ -399,11 +726,13 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         """按代码中确认的首次/下一局入口步骤生成一个安全动作。"""
         if self._recruit_step == _RecruitStep.DETECT_ENTRY_PAGE:
-            # 退队后的落点未实机确认（可能首页、可能合作页面）：先识别首页标志
-            # 再选入口，两条路径都不重复勾选难度（本会话已选中）
+            # 退队后的落点未实机确认（可能首页、可能合作页面）：先识别首页
+            # 标志再选入口，两条路径都不重复勾选难度（本会话已选中）。
+            # 首页也改走领地入口（2026-09-09：不再从首页点聊天进招募）
             if observation.flag("home_page_visible"):
-                logger.info("退队后识别到游戏首页，从首页进入招募")
-                self._recruit_step = _RecruitStep.VERIFY_HOME_PAGE
+                logger.info("退队后识别到游戏首页，从领地入口进入招募")
+                self._recruit_step = _RecruitStep.OPEN_TERRITORY
+                self._start_entry_wait()
             else:
                 logger.info("退队后未识别到首页标志，按合作页面处理")
                 self._recruit_step = _RecruitStep.OPEN_COOP_CHAT
@@ -417,41 +746,49 @@ class CoopTask(Task):
                 ),
                 State.FIND_COOP,
             )
-        if self._recruit_step == _RecruitStep.VERIFY_HOME_PAGE:
-            if not observation.flag("home_page_visible"):
-                logger.error(
-                    "frame=%d 合作任务启动失败：当前界面未识别为游戏首页",
-                    observation.frame_id,
-                )
-                raise RuntimeError("当前界面不是游戏首页，请返回游戏首页后重新运行合作任务")
+        if self._recruit_step == _RecruitStep.OPEN_TERRITORY:
+            return self._action_open_territory(observation, window_ctx)
+        if self._recruit_step == _RecruitStep.CONFIRM_TERRITORY_OPEN:
+            return self._action_confirm_territory_open(observation)
+        if self._recruit_step == _RecruitStep.OPEN_MODE_SELECT:
             return self._hotspot_click(
-                "home_chat",
-                "open_home_chat",
-                "已确认游戏首页，点击首页聊天",
+                "open_mode_select",
+                "open_mode_select",
+                "领地入口：点击「合作模式」进入按钮",
                 State.FIND_COOP,
                 window_ctx,
             )
-        if self._recruit_step == _RecruitStep.OPEN_RECRUIT:
+        if self._recruit_step == _RecruitStep.CONFIRM_MODE_SELECT_OPEN:
+            return self._action_confirm_mode_select_open(observation)
+        if self._recruit_step == _RecruitStep.SELECT_MODE_CARD:
+            return self._action_select_mode_card(observation)
+        if self._recruit_step == _RecruitStep.CONFIRM_CHALLENGE_PAGE:
+            return self._action_confirm_challenge_page(observation)
+        if self._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT:
+            chat_hotspot = self._mode.mode_chat_hotspot if self._mode else "coop_chat"
             return self._hotspot_click(
-                "open_recruit",
-                "open_recruit",
-                "首次进入招募：点击招募",
+                chat_hotspot,
+                "open_challenge_chat",
+                "挑战页进入招募：点击模式页面聊天",
                 State.FIND_COOP,
                 window_ctx,
             )
         if self._recruit_step == _RecruitStep.SELECT_MODE_TAB:
-            tab_name = self._mode.entry.mode_tab_hotspot if self._mode else None
-            if not tab_name:
-                # 未配置页签：直接进入页签后的目标步骤（旧行为）
-                self._recruit_step = self._after_tab_step
-                return self._action_recruit_entry(observation, window_ctx)
-            return self._hotspot_click(
-                tab_name,
-                "open_mode_tab",
-                "进入招募：点击模式页签",
-                State.FIND_COOP,
-                window_ctx,
-            )
+            tab_text = self._mode.entry.mode_tab_text if self._mode else None
+            if not tab_text:
+                tab_name = self._mode.entry.mode_tab_hotspot if self._mode else None
+                if not tab_name:
+                    # 未配置页签：直接进入页签后的目标步骤（旧行为）
+                    self._recruit_step = self._after_tab_step
+                    return self._action_recruit_entry(observation, window_ctx)
+                return self._hotspot_click(
+                    tab_name,
+                    "open_mode_tab",
+                    "进入招募：点击模式页签",
+                    State.FIND_COOP,
+                    window_ctx,
+                )
+            return self._action_select_mode_tab_ocr(observation, tab_text)
         if self._recruit_step == _RecruitStep.OPEN_DIFFICULTY_DIALOG:
             return self._hotspot_click(
                 "open_difficulty_dialog",
@@ -1833,9 +2170,21 @@ class CoopTask(Task):
 
     def on_action_verified(self, action: Action, to_state: State) -> None:
         tag = action.tag
-        if tag == "open_home_chat":
-            self._recruit_step = _RecruitStep.OPEN_RECRUIT
-        elif tag == "open_recruit":
+        if tag == "open_territory":
+            # 领地点击已发送：进入打开确认（轮询导航文字变「返回」），
+            # deadline 从点击时刻重新起算
+            self._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+            self._start_entry_wait()
+        elif tag == "open_mode_select":
+            # 进入按钮点击已发送：确认弹窗打开后再选卡
+            self._recruit_step = _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+            self._start_entry_wait()
+        elif tag == "mode_card_selected":
+            # 选卡点击已发送（开环）：确认到达挑战页后再点聊天
+            self._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
+            self._start_entry_wait()
+        elif tag == "open_challenge_chat":
+            # 首局经挑战页聊天进入招募：页签后进难度弹窗（区别于次局刷新）
             self._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
             self._recruit_step = _RecruitStep.SELECT_MODE_TAB
         elif tag == "open_mode_tab":
@@ -2054,10 +2403,11 @@ class CoopTask(Task):
     def _reset_for_home_reentry(self) -> None:
         """本局未开始即被取消（被踢回首页/等待超时）：清空对局内进度。
 
-        与结算后重置不同，此时画面在游戏首页，招募入口从首页确认重新开始；
+        与结算后重置不同，此时画面在游戏首页，招募入口从领地入口重新开始；
         难度勾选不重复（_difficulty_done_session 保持已置位）。
         """
-        self._recruit_step = _RecruitStep.VERIFY_HOME_PAGE
+        self._recruit_step = _RecruitStep.OPEN_TERRITORY
+        self._start_entry_wait()
         self._summon_count = 0
         self._empty_board_count = 0
         self._no_progress_count = 0

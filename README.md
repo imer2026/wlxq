@@ -212,7 +212,7 @@ wlxq-bot recognize -t 0.7 --show
 wlxq-bot recognize screenshots/raw/shot.png
 
 # 执行合作任务（ONNX 格子模型或技能素材未配置时会在启动检查中阻止正常流程）
-# 运行前需停留在游戏首页；程序正向识别首页后才会点击首页聊天
+# 运行前需停留在游戏首页；程序从领地入口进入招募（点领地 → 等返回 → 模式选择）
 # 棋盘模型路径由 configs/default.yaml 的 main_c_profiles.<主C>.hero_classifier_model 指定；
 # 模型旁必须保留训练导出的同名 JSON metadata
 wlxq-bot run coop --main-c assault
@@ -291,6 +291,14 @@ safety:
   stop_hotkey: "esc"
   max_failures: 5
 
+logging:
+  # 文件日志（详见 docs/logging.md「文件日志」）：每次命令调用在 logs/ 下写一个
+  # 完整日志文件（固定 DEBUG 级别，与 --debug 无关），保留 7 天
+  enabled: true
+  dir: "logs"
+  file_level: "DEBUG"
+  retention_days: 7
+
 run:
   # 组队对局模式：coop（合作模式）| pet（保卫宠物）；CLI --mode 覆盖本次运行
   mode: coop
@@ -308,6 +316,8 @@ run:
   # run 启动时清理超过该天数的按天截图目录（保留最近 N 天，含今天）
   settlement_screenshot_retention_days: 7
 ```
+
+每次命令调用都会在 `logs/` 下生成一个完整日志文件（默认 DEBUG 级别，保留 7 天），控制台日志关掉后仍可回溯定位问题；可用 `logging.enabled: false` 关闭。
 
 使用 `wlxq-bot --debug run coop --main-c assault` 可查看每批棋盘识别的总耗时，以及单帧截图、ONNX 批量推理的平均/最小/最大耗时，再据此调整 `board_recognition_frames`。
 
