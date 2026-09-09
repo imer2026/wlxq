@@ -5,8 +5,28 @@
 ## 技术栈与入口
 
 - 使用 Python 标准 `logging` + `rich.logging.RichHandler`，统一在 `wlxq_bot` 命名空间下。
-- 入口配置在 `src/wlxq_bot/utils/log.py`：`setup_logging(level)` 初始化根日志器，`get_logger(name)` 获取子日志器。
+- 入口配置在 `src/wlxq_bot/utils/log.py`：`setup_logging(...)` 初始化根日志器（控制台 + 可选文件日志），`get_logger(name)` 获取子日志器。
 - CLI 通过 `@app.callback` 在命令开始时调用一次 `setup_logging`。
+
+## 文件日志
+
+文件日志默认开启（`configs/default.yaml` 的 `logging` 段），目的是控制台关掉后仍能完整回溯每次运行，方便事后定位问题：
+
+- 每次命令调用在 `logs/` 下写一个 `wlxq-bot_YYYYMMDD_HHMMSS.log`（按启动时刻命名），文件首行附近的「文件日志已开启」INFO 记录完整命令行，翻历史日志时能直接确认这次跑的是什么命令和参数。
+- 文件固定 `file_level`（默认 `DEBUG`）级别，与控制台级别和 `--debug` 无关：平时不带 `--debug` 只看 INFO，出问题时打开对应文件就有全量 DEBUG 诊断（窗口句柄、坐标换算、置信度、frame_id 等）。
+- 控制台行为不受影响；文件格式为 `日期时间 [级别] logger名 (模块:行号) 消息`，带完整日期（文件会跨天留存）。
+- 启动时按文件修改时间清理超过 `retention_days`（默认 7）天的旧 `.log` 文件，实际删除时输出一条带数量的 INFO；目录创建或写文件失败只输出 WARNING，命令退回纯控制台模式继续运行，绝不因日志问题中断任务。
+- `logging.enabled: false` 可整体关闭文件日志。
+
+```yaml
+logging:
+  enabled: true
+  dir: 'logs'
+  file_level: 'DEBUG'
+  retention_days: 7
+```
+
+`logs/` 已加入 `.gitignore`，不提交仓库。
 
 ## 日志级别
 
@@ -15,7 +35,7 @@
 | `ERROR` | 动作执行失败、识别失败导致任务暂停、安全触发、窗口句柄失效等不可继续的情况 | 始终 |
 | `WARNING` | 接近阈值、重试、窗口变化可恢复、配置缺失用默认值、坐标被夹紧到客户区边界 | 始终 |
 | `INFO` | 正常流程关键节点：命令开始/结束、任务启动、状态迁移、动作完成、截图保存路径 | 始终 |
-| `DEBUG` | 详细诊断：窗口句柄值、客户区像素、坐标换算过程、置信度数值、ROI 像素、延迟值、模板路径、`frame_id` 变化 | 仅 `--debug` |
+| `DEBUG` | 详细诊断：窗口句柄值、客户区像素、坐标换算过程、置信度数值、ROI 像素、延迟值、模板路径、`frame_id` 变化 | 控制台仅 `--debug`；文件日志始终记录 |
 
 ## 命令行开关
 
@@ -45,7 +65,7 @@ wlxq-bot --debug run coop --main-c assault
 
 任务**非正常退出**（保守停止、失败/步数上限、异常崩溃）时，主循环最近 `vision.exit_frame_buffer_size`（默认 20）张截图会批量保存到 `screenshots/debug/exit_<状态>_<时间戳>/`，并输出一条带完整路径的 WARNING（`任务非正常退出，已保存退出前 N 帧截图到 ...`）；正常完成（COMPLETED）和用户主动停止（Esc 热键、Ctrl+C）不保存。文件夹内 `NN_frame_<id>.png` 按时间升序编号，`frames.txt` 记录每帧的 `frame_id`、拍摄时刻和相邻帧间隔，用于定位退出前卡在哪一步。缓冲常驻内存约 N × 4.8MB（927x1727 客户区，20 张约 96MB，只存引用无复制开销）；按主循环和抢合作检查线程的节奏采样（只保留前台有效帧，挂起/最小化期间的黑帧不冲掉历史），培养阶段多帧棋盘识别的内部截图不进缓冲；`vision.debug: false` 时整体关闭。
 
-它通过 `@app.callback` 调用 `setup_logging("DEBUG")`；不带 `--debug` 时为 `INFO`。DEBUG 模式下第三方库（pyautogui、PIL、urllib3 等）仍压在 `WARNING`，避免刷屏。
+它通过 `@app.callback` 调用 `setup_logging("DEBUG")`；不带 `--debug` 时控制台为 `INFO`。无论是否带 `--debug`，文件日志都按 `file_level`（默认 `DEBUG`）完整记录（见「文件日志」）。DEBUG 模式下第三方库（pyautogui、PIL、urllib3 等）仍压在 `WARNING`，避免刷屏。
 
 ## 命名空间与获取
 

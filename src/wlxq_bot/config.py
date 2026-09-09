@@ -73,6 +73,19 @@ class SafetyConfig(BaseModel):
     no_progress_timeout: int = 30
 
 
+class LoggingConfig(BaseModel):
+    """文件日志配置（configs/default.yaml ``logging`` 段）。
+
+    文件日志比控制台详细：每次命令调用在 ``dir`` 下写一个完整日志文件，
+    固定 ``file_level`` 级别（默认 DEBUG），与控制台级别和 ``--debug`` 无关。
+    """
+
+    enabled: bool = True
+    dir: str = "logs"
+    file_level: str = "DEBUG"
+    retention_days: int = Field(default=7, ge=1)
+
+
 class MainCProfile(BaseModel):
     display_name: str
     hero_template_dir: str
@@ -111,8 +124,19 @@ class DifficultyProfile(BaseModel):
 class EntryProfile(BaseModel):
     """招募入口差异（模式档案）。"""
 
-    # 进招募后先点的模式页签 hotspot 名（configs/tasks.yaml）；None = 不点
+    # 进招募后先点的模式页签 hotspot 名（configs/tasks.yaml）；None = 不点。
+    # 配置了 mode_tab_text 后流程改走 OCR 定位，本值保留作手动 click 与标定记录
     mode_tab_hotspot: str | None = None
+    # 页签 OCR 定位文字（如「合作模式」，为三个页签共用识别区的子串匹配目标）；
+    # None = 按固定 hotspot 坐标点击（旧行为）
+    mode_tab_text: str | None = None
+    # 领地入口（2026-09-09 新流程）：模式选择弹窗内本模式卡片与对应挑战页
+    # 按钮的识别配置；ROI 名指向 configs/tasks.yaml rois，文字为 OCR 子串
+    # 匹配目标。领地入口的启动检查要求四项全部配置
+    mode_card_roi: str | None = None
+    mode_card_text: str | None = None
+    challenge_roi: str | None = None
+    challenge_text: str | None = None
     difficulty: DifficultyProfile = Field(default_factory=DifficultyProfile)
 
 
@@ -254,9 +278,9 @@ class RunConfig(BaseModel):
     # 局内等待主C技能图标时，连续这么多帧【选技能】页面不在才认定页面已关闭
     # （页面可能被击杀奖励弹窗打断关闭），回到定时点选技能的节奏，避免盲点技能卡
     main_skill_page_closed_frames: int = Field(default=3, ge=1, le=10)
-    # 选技能/召唤的金币检查间隔（秒）：每 2 秒读一次金币，够就操作，不够就等。
+    # 选技能/召唤的金币检查间隔（秒）：每 0.5 秒读一次金币，够就操作，不够就等。
     # 节奏跟着金币走（2026-09-05 定案，取代旧的随机间隔）
-    gold_check_interval_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
+    gold_check_interval_seconds: float = Field(default=0.5, gt=0.0, le=60.0)
     # 其他队友英雄的技能卡图标（本局阵容 lineup_others 对应）：技能页已打开但
     # 未识别到主C图标时，识别到任一队友图标即确认页面稳定且本组无主C技能卡，
     # 立即随机选一张，不再等满 skill_recognition_frames 帧
@@ -375,6 +399,7 @@ class DefaultConfig(BaseModel):
     vision: VisionConfig = Field(default_factory=VisionConfig)
     input: InputConfig = Field(default_factory=InputConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     main_c_profiles: dict[str, MainCProfile] = Field(default_factory=dict)
     mode_profiles: dict[str, ModeProfile] = Field(default_factory=dict)
@@ -507,6 +532,11 @@ class TasksConfig(BaseModel):
     difficulty_recognition: dict[str, Any] = Field(default_factory=dict)
     # 保卫宠物难度弹窗 OCR 识别配置（candidate_roi + min_confidence）
     pet_difficulty_recognition: dict[str, Any] = Field(default_factory=dict)
+    # 招募页模式页签行 OCR 识别配置（candidate_roi + min_confidence + miss_limit）
+    mode_tab_recognition: dict[str, Any] = Field(default_factory=dict)
+    # 「模式选择」弹窗 OCR 识别配置（title_roi/title_text + min_confidence +
+    # entry_wait_timeout_seconds），领地入口共用
+    mode_select_recognition: dict[str, Any] = Field(default_factory=dict)
     # 技能卡采集（统计阶段）的几何参数：比例相对 rois.skill_candidates 裁剪结果
     skill_collection: dict[str, Any] = Field(default_factory=dict)
     # 金币感知（回补召唤/付费选技能门控）配置
@@ -527,6 +557,8 @@ class TasksConfig(BaseModel):
                 "skills",
                 "difficulty_recognition",
                 "pet_difficulty_recognition",
+                "mode_tab_recognition",
+                "mode_select_recognition",
                 "skill_collection",
                 "gold_recognition",
                 "heroes",
@@ -548,6 +580,27 @@ def load_yaml(path: Path) -> dict[str, Any]:
 def load_default_config(path: Path) -> DefaultConfig:
     """加载并校验 configs/default.yaml。"""
     return DefaultConfig(**load_yaml(path))
+
+
+def load_logging_config(path: Path) -> LoggingConfig:
+    """读取 default.yaml 的 ``logging`` 段；文件或段落缺失时返回默认值。
+
+    只读该段而不加载完整 DefaultConfig，保证 CLI 启动时日志系统先于
+    业务配置校验就绪；段落存在但字段非法时按配置错误抛出 ValidationError，
+    不静默吞掉。
+    """
+    try:
+        data = load_yaml(path)
+    except (OSError, ValueError):
+        return LoggingConfig()
+    section = data.get("logging")
+    if section is None:
+        return LoggingConfig()
+    if not isinstance(section, dict):
+        raise ValueError(
+            f"配置文件 {path} 的 logging 段必须是字典，实际为 {type(section).__name__}"
+        )
+    return LoggingConfig(**section)
 
 
 def load_tasks_config(path: Path) -> TasksConfig:

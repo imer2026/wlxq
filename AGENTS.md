@@ -59,7 +59,8 @@
 详细级别定义、`--debug` 用法、命名空间规范和必须打日志的位置见 [docs/logging.md](docs/logging.md)。核心规则：
 
 - 所有日志器通过 `get_logger(__name__)` 获取，统一挂在 `wlxq_bot` 命名空间下；禁止裸 `logging.getLogger`。
-- 日志分 `ERROR`/`WARNING`/`INFO`/`DEBUG` 四级；`--debug` 切到 DEBUG，默认 INFO。
+- 日志分 `ERROR`/`WARNING`/`INFO`/`DEBUG` 四级；控制台 `--debug` 切到 DEBUG，默认 INFO。
+- 文件日志默认开启（`configs/default.yaml` 的 `logging` 段）：每次命令调用写 `logs/wlxq-bot_时间戳.log`，文件固定 DEBUG 级别、与 `--debug` 无关，保留天数默认 7；不得因日志文件问题中断任务。
 - 每个执行类命令（`screenshot`/`run`/`click`/`spam-click`/`move` 等）的关键节点都要打日志：开始/结束用 INFO，窗口句柄/坐标换算/`frame_id` 等诊断数据用 DEBUG，失败用 ERROR/WARNING；高频循环不在循环内打。
 - `logger` 记录过程诊断，`rprint` 输出用户面向结果，职责不互相替代。
 

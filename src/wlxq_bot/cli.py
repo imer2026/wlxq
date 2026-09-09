@@ -21,6 +21,7 @@ from wlxq_bot.config import (
     LocalConfig,
     WindowSpec,
     load_local_config,
+    load_logging_config,
     load_tasks_config,
     save_local_config,
 )
@@ -39,6 +40,7 @@ from wlxq_bot.utils.log import get_logger, setup_logging
 
 # configs/local.yaml 路径
 LOCAL_CONFIG_PATH = Path("configs/local.yaml")
+DEFAULT_CONFIG_PATH = Path("configs/default.yaml")
 TASKS_CONFIG_PATH = Path("configs/tasks.yaml")
 
 logger = get_logger(__name__)
@@ -91,15 +93,26 @@ def main_callback(
 ) -> None:
     """wlxq-bot 命令行工具。
 
-    全局选项 ``--debug`` 把日志级别调到 DEBUG，输出每个关键步骤的详细数据，
+    全局选项 ``--debug`` 把控制台日志级别调到 DEBUG，输出每个关键步骤的详细数据，
     用于排查识别失败、坐标偏移、窗口变化等问题。默认只输出 INFO 及以上。
+    文件日志不受 ``--debug`` 影响：默认始终以 DEBUG 记录到 ``logs/`` 下
+    （``configs/default.yaml`` 的 ``logging`` 段可关闭或调整）。
 
     示例::
 
         wlxq-bot --debug screenshot
         wlxq-bot --debug run coop --main-c assault
     """
-    setup_logging("DEBUG" if debug else "INFO")
+    logging_config = load_logging_config(DEFAULT_CONFIG_PATH)
+    if logging_config.enabled:
+        setup_logging(
+            "DEBUG" if debug else "INFO",
+            log_dir=logging_config.dir,
+            file_level=logging_config.file_level,
+            retention_days=logging_config.retention_days,
+        )
+    else:
+        setup_logging("DEBUG" if debug else "INFO")
     logger.debug("日志级别=%s", "DEBUG" if debug else "INFO")
 
 
