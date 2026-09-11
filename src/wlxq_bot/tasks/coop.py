@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from enum import Enum
 from typing import Literal
 
@@ -15,6 +16,7 @@ from wlxq_bot.models import (
     BoardSnapshot,
     CoopRole,
     MatchResult,
+    MergeCandidate,
     Observation,
     SkillCandidate,
     State,
@@ -33,6 +35,28 @@ logger = get_logger(__name__)
 def _hero_location(hero: BoardHero) -> str:
     """日志用英雄位置描述：有格名用格名（如 1A），否则退回像素坐标。"""
     return hero.cell_name or str(tuple(hero.position))
+
+
+def _comparable_skill_options(
+    options: list[dict[str, object]] | None,
+) -> list[tuple[int, str, int, bool]] | None:
+    """提取用于开局卡面比对的稳定字段，剔除随帧变化的噪声字段。
+
+    ``skill_card_options`` 每帧由 OCR 重新产出：``frame_id`` 必然不同，
+    ``position``/``page`` 由固定几何与页面推出、帧间恒定。比对只保留
+    （列号, 技能名, 档位, 是否已知）；缺失或为空视为 None（交给重试）。
+    """
+    if not options:
+        return None
+    return [
+        (
+            option.get("column", index),
+            option["name"],
+            option["tier"],
+            option.get("known", False),
+        )
+        for index, option in enumerate(options)
+    ]
 
 
 _MATCH_STATES: frozenset[State] = frozenset(
@@ -172,6 +196,17 @@ class CoopTask(Task):
         # 已拖动失败（重试耗尽）的合成对位置签名：本轮内跳过，不再反复拖
         # 同一落空的对；召唤新英雄或合成成功后棋盘演化出新的对再尝试
         self._failed_merge_pairs: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        # 批次化快速阶段（2026-09-10 用户策略）：识别一次后把动作攒成批，
+        # 批内单帧快识别（界面标志 + 金币红/白），批次发完恢复多帧识别统一验证
+        # 剩余批次召唤次数：批内每次点击前做金币门控，不足则等待、不消耗批次
+        self._batch_summon_remaining = 0
+        # 待发送批次合成队列：[(起点英雄, 终点英雄)]，互不相交的非主C低星对
+        self._batch_merge_queue: list[tuple[BoardHero, BoardHero]] = []
+        # 上一批次合成的位置签名：批末识别时仍原样存在的对 = 拖动未生效，
+        # 记入失败记忆（批次拖动发送即提交，不做逐动作棋盘验证）
+        self._pending_merge_batch_signatures: list[
+            tuple[tuple[int, int], tuple[int, int]]
+        ] = []
 
         self._opening_loaded = False
         self._opening_empty_checks = 0
@@ -364,10 +399,14 @@ class CoopTask(Task):
 
     def wants_board_watch(self) -> bool:
         # 强制召唤阶段（技能解锁前）不以棋盘识别为门禁：点击发送即计数，
-        # 跳过多帧棋盘识别，按固定间隔快速连点；第 5 次后恢复正常识别。
+        # 跳过多帧棋盘识别，按固定间隔快速连点；召唤满配置次数后恢复正常识别。
+        # 批次召唤/批次合成进行中同理：批内单帧快识别（界面标志 + 金币红/白），
+        # 批次发完后恢复多帧识别统一验证。
         # 等待4星赠送技能页期间页面遮住棋盘、识别必然为空，同样退回单帧
         # 快识别（BUILD 状态标志集含标题图与击杀弹窗，弹窗优先不受影响）
         if self._awaiting_merge_gift:
+            return False
+        if self._batch_summon_remaining > 0 or self._batch_merge_queue:
             return False
         return self._summon_count >= self._run_config.minimum_summon_count_before_skills
 
@@ -1606,42 +1645,60 @@ class CoopTask(Task):
                 State.SELECT_MAIN_C_SKILLS,
             )
 
-        # 付费选技能金币门控：金币不足时不点（游戏会忽略该点击），短等后重查。
-        # 金币信息缺失（未读取/OCR 失败）时放行，保持原有行为。
+        # 付费选技能金币门控：费用红色（游戏自身判买不起）或数值不足时不点
+        # （游戏会忽略该点击），短等后重查。金币信息缺失（未读取/读取失败）
+        # 时放行，保持原有行为。
         gold = observation.raw_data.get("gold")
         if gold is not None:
             affordable = self._can_afford(gold, "skill")
-            logger.info(
-                "选技能金币检查：现有 %s，需要 %s → %s",
-                gold.get("current"),
-                gold.get("skill_cost"),
-                "可以点" if affordable else "买不起，等待恢复",
-            )
+            if gold.get("skill_red"):
+                logger.info("选技能金币检查：费用红色（游戏判买不起）→ 等待恢复")
+            elif gold.get("current") is None or gold.get("skill_cost") is None:
+                logger.info("选技能金币检查：只认色模式，费用白色（买得起）→ 可以点")
+            else:
+                logger.info(
+                    "选技能金币检查：现有 %s，需要 %s → %s",
+                    gold.get("current"),
+                    gold.get("skill_cost"),
+                    "可以点" if affordable else "买不起，等待恢复",
+                )
         if gold is not None and not self._can_afford(gold, "skill"):
-            # 付不起：等待金币恢复（击杀回金），等待时长即检查间隔
-            wait_for = self._run_config.gold_check_interval_seconds
+            # 付不起：等待金币恢复（击杀回金），红色等 gold_red_wait_seconds
+            # 后重新识别再判
+            wait_for = self._run_config.gold_red_wait_seconds
             self._next_skill_at = self._clock() + wait_for
+            if gold.get("skill_red"):
+                detail = "选技能费用红色（游戏判买不起）"
+            else:
+                detail = f"现有 {gold.get('current')} < 选技能 {gold.get('skill_cost')}"
             return (
                 Action(
                     kind="wait",
                     duration=wait_for,
                     verification="immediate",
                     tag="skill_gold_wait",
-                    reason=(
-                        f"金币不足等待恢复：现有 {gold.get('current')} "
-                        f"< 选技能 {gold.get('skill_cost')}"
-                    ),
+                    reason=f"金币不足等待恢复：{detail}",
                 ),
                 State.SELECT_MAIN_C_SKILLS,
             )
 
-        return self._hotspot_click(
+        decision = self._hotspot_click(
             "select_skill",
             "open_main_skills",
             "定时点击选技能按钮",
             State.SELECT_MAIN_C_SKILLS,
             window_ctx,
         )
+        if decision is None:
+            return None
+        action, to_state = decision
+        # 点击后把指针停靠到无关位置：悬停在【选技能】上会触发游戏高亮，
+        # 稀释下一帧费用红/白判定的红色占比（2026-09-10 实机：连续多次
+        # 红色被误判为白色导致盲点）
+        park = self._hotspot_point("mouse_park", window_ctx)
+        if park is not None:
+            action = replace(action, hover_park=park)
+        return action, to_state
 
     def _choose_skill_action(
         self,
@@ -1664,14 +1721,18 @@ class CoopTask(Task):
         )
 
     def wants_gold_read(self) -> bool:
-        """需要金币感知的状态：选技能阶段、以及开局 5 连召之后的培养/回补召唤。
+        """需要金币感知的状态：选技能阶段、批次召唤期间、以及开局强制召唤之后的培养/回补召唤。
 
-        开局 5 连召不读金币（无门控、直接点）。
+        开局强制召唤阶段（前 minimum_summon_count_before_skills 次）不读金币（无门控、直接点）。
+        批次召唤的每次点击前都读（召唤费用红/白为毫秒级色判，2026-09-10 用户策略）。
         """
         if self.ctx.current_state == State.SELECT_MAIN_C_SKILLS:
             return True
         if self.ctx.current_state == State.BUILD_MAIN_C:
-            # 开局 5 连召阶段无门控,不读;解锁技能系统后的召唤才有金币门控
+            # 批次召唤进行中：每次点击前都要金币门控
+            if self._batch_summon_remaining > 0:
+                return True
+            # 开局强制召唤阶段无门控,不读;解锁技能系统后的召唤才有金币门控
             return self._summon_count >= self._run_config.minimum_summon_count_before_skills
         return False
 
@@ -1865,6 +1926,15 @@ class CoopTask(Task):
                 reason="合成4星赠送技能页，随机选一个技能",
             )
 
+        # ---- 批次进行中：继续发送批次动作（2026-09-10 用户策略）----
+        # 批内单帧观察（无棋盘快照）：召唤每次点击前做金币门控，不足则等待、
+        # 不消耗批次；合成按队列继续拖。全部发完后恢复多帧识别统一验证，
+        # 由批末规划逻辑归因未生效的合成对
+        if self._batch_summon_remaining > 0:
+            return self._batch_summon_action(observation, window_ctx)
+        if self._batch_merge_queue:
+            return self._batch_merge_action()
+
         board = observation.board
         minimum_summons = self._run_config.minimum_summon_count_before_skills
         if self._summon_count < minimum_summons:
@@ -1889,7 +1959,8 @@ class CoopTask(Task):
                     post_delay=post_delay,
                     verification="immediate",
                     tag="required_summon",
-                    reason=f"技能解锁前逐次召唤 {next_summon}/{minimum_summons}",
+                    hover_park=self._hotspot_point("mouse_park", window_ctx),
+                    reason=f"开局强制召唤 {next_summon}/{minimum_summons}",
                 ),
                 State.BUILD_MAIN_C,
             )
@@ -1917,7 +1988,7 @@ class CoopTask(Task):
             )
         self._empty_board_count = 0
 
-        # 召唤金币门控（开局 5 连召之外的所有召唤）：费用不足时原地等待金币
+        # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足时原地等待金币
         # 恢复（击杀回金），一直等到够或对局自然结束——不设上限、不放弃回补
         # （2026-09-05 定案）。放在无进展检查之前：等待本身不算停滞，重置
         # 无进展计数，避免等待期间误触保守停止。
@@ -1926,15 +1997,18 @@ class CoopTask(Task):
         if gold is not None and not self._can_afford(gold, "summon"):
             self._no_progress_count = 0
             self._last_board_signature = None
+            if gold.get("summon_red"):
+                detail = "召唤费用红色（游戏判买不起）"
+            else:
+                detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
             return (
                 Action(
                     kind="wait",
-                    duration=self._run_config.gold_check_interval_seconds,
+                    duration=self._run_config.gold_red_wait_seconds,
                     verification="immediate",
                     tag="summon_gold_wait",
                     reason=(
-                        f"召唤金币不足，等待恢复：现有 {gold.get('current')} "
-                        f"< 召唤 {gold.get('summon_cost')}"
+                        f"召唤金币不足，等待恢复：{detail}"
                         + ("（回补阶段，等待后继续回补）" if self._topup_active else "")
                     ),
                 ),
@@ -1978,12 +2052,34 @@ class CoopTask(Task):
                 State.SELECT_MAIN_C_SKILLS,
             )
 
+        # ---- 批次规划（2026-09-10 用户策略）：识别一次、动作攒批、批后统一识别 ----
+        # 先把空格一批召唤填满（每次点击前金币门控），填满后再把互不相交的
+        # 非主C 1/2星对一批拖完；两档都可以按配置关闭，走原有逐动作识别验证
+        if self._run_config.batch_summon_enabled and board.capacity.available > 0:
+            available = board.capacity.available
+            self._batch_summon_remaining = available
+            logger.info(
+                "规划批次召唤 %d 次（空格 %d/%d，frame=%d）",
+                available,
+                available,
+                board.capacity.total_slots,
+                observation.frame_id,
+            )
+            return self._batch_summon_action(observation, window_ctx)
+        candidates = board.find_merge_candidates(self.ctx.main_c)
         # 回补阶段（2026-09-07 用户策略）：棋盘有空位时直接召唤不合成——
         # 合成要拖动加验证耗时，先召唤占满空位更快；棋盘占满且数量未达标
-        # 才合成腾格子
+        # 才合成腾格子。批次合成遵循同一优先级
+        topup_fill_first = self._topup_active and board.capacity.available > 0
+        if self._run_config.batch_merge_enabled and not topup_fill_first:
+            # 批末归因：上一批中仍原样存在的对记入失败记忆（拖动未生效）
+            self._attribute_merge_batch(candidates)
+            batch = self._strategy.select_merge_batch(candidates, self._failed_merge_pairs)
+            if batch:
+                return self._plan_merge_batch(batch, observation.frame_id)
+        # 批次关闭或无可批对：走原有单动作策略
         pair = None
-        if not (self._topup_active and board.capacity.available > 0):
-            candidates = board.find_merge_candidates(self.ctx.main_c)
+        if not topup_fill_first:
             # 合成/避让/失败对跳过等策略决策由 CultivationStrategy 负责；
             # 返回 None 表示本次不合并，落入下方召唤分支
             pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
@@ -2044,10 +2140,133 @@ class CoopTask(Task):
                 ),
                 verification="next_frame",
                 tag="summon_hero",
+                hover_park=self._hotspot_point("mouse_park", window_ctx),
                 reason=reason,
             ),
             State.BUILD_MAIN_C,
         )
+
+    def _batch_summon_action(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """批次召唤的单次点击：每次点击前做召唤费用金币门控（2026-09-10 用户策略）。
+
+        金币不足时原地等待（不消耗批次，金币随击杀恢复，与培养阶段召唤的
+        等待策略一致）；点击发送即计数，间隔 forced_summon_interval_seconds，
+        最后一次保留稳定等待供批后识别。
+        """
+        gold = observation.raw_data.get("gold")
+        if gold is not None and not self._can_afford(gold, "summon"):
+            if gold.get("summon_red"):
+                detail = "召唤费用红色（游戏判买不起）"
+            else:
+                detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
+            return (
+                Action(
+                    kind="wait",
+                    duration=self._run_config.gold_red_wait_seconds,
+                    verification="immediate",
+                    tag="summon_gold_wait",
+                    reason=(
+                        f"批次召唤金币不足，等待恢复：{detail}"
+                        f"（本批剩余 {self._batch_summon_remaining} 次）"
+                    ),
+                ),
+                State.BUILD_MAIN_C,
+            )
+        point = self._hotspot_point("add_hero", window_ctx)
+        if point is None:
+            return None
+        remaining = self._batch_summon_remaining
+        if remaining <= 1:
+            # 批次最后一次：保留正常稳定等待，英雄落位后批后识别
+            post_delay = self._rng.uniform(
+                self._run_config.summon_recognition_delay_min,
+                self._run_config.summon_recognition_delay_max,
+            )
+        else:
+            post_delay = self._run_config.forced_summon_interval_seconds
+        return (
+            Action(
+                kind="click",
+                target=point,
+                duration=0.08,
+                post_delay=post_delay,
+                verification="immediate",
+                tag="batch_summon",
+                hover_park=self._hotspot_point("mouse_park", window_ctx),
+                reason=f"批次召唤填满空格（本批剩余 {remaining} 次）",
+            ),
+            State.BUILD_MAIN_C,
+        )
+
+    def _batch_merge_action(self) -> tuple[Action, State]:
+        """批次合成的单次拖动：取队列首对，拖完由批后识别统一验证。"""
+        source, dest = self._batch_merge_queue[0]
+        return (
+            Action(
+                kind="drag",
+                target=source.position,
+                end=dest.position,
+                duration=self._run_config.merge_drag_duration,
+                post_delay=self._rng.uniform(
+                    self._run_config.summon_recognition_delay_min,
+                    self._run_config.summon_recognition_delay_max,
+                ),
+                verification="immediate",
+                tag="batch_merge",
+                reason=(
+                    f"批次合成 {source.hero_type}{source.star_level}星 -> "
+                    f"{dest.hero_type}{dest.star_level}星"
+                    f"（队列剩余 {len(self._batch_merge_queue)} 对）"
+                ),
+            ),
+            State.BUILD_MAIN_C,
+        )
+
+    def _plan_merge_batch(
+        self,
+        batch: list[MergeCandidate],
+        frame_id: int,
+    ) -> tuple[Action, State]:
+        """把策略选出的批次对排队并发出第一拖；批末由 _attribute_merge_batch 归因。"""
+        self._batch_merge_queue = [CultivationStrategy.drag_direction(p) for p in batch]
+        self._pending_merge_batch_signatures = [
+            (source.position, dest.position) for source, dest in self._batch_merge_queue
+        ]
+        logger.info(
+            "规划批次合成 %d 对（frame=%d）: %s",
+            len(batch),
+            frame_id,
+            ", ".join(
+                f"{source.hero_type}{source.star_level}星@{_hero_location(source)}"
+                f"->{dest.hero_type}{dest.star_level}星@{_hero_location(dest)}"
+                for source, dest in self._batch_merge_queue
+            ),
+        )
+        return self._batch_merge_action()
+
+    def _attribute_merge_batch(self, candidates: list[MergeCandidate]) -> None:
+        """批末归因：上一批中棋盘上仍原样存在的对 = 拖动未生效，记入失败记忆。
+
+        批内拖动不做逐动作棋盘验证（发送即提交），统一在批后识别时按位置
+        签名比对：对子原样还在 = 拖动落空；不再存在的对视为已生效（批次
+        只排1/2星对，合成不会弹出4星赠送页，批内棋盘只会因本批拖动而变化）。
+        """
+        if not self._pending_merge_batch_signatures:
+            return
+        current = {CultivationStrategy.pair_signature(c) for c in candidates}
+        failed = [sig for sig in self._pending_merge_batch_signatures if sig in current]
+        if failed:
+            self._failed_merge_pairs.update(failed)
+            logger.warning(
+                "批次合成 %d 对拖动未生效（棋盘原样），本轮内跳过: %s",
+                len(failed),
+                failed,
+            )
+        self._pending_merge_batch_signatures = []
 
     # ------------------------------------------------------------------
     # 结算和动作后验证
@@ -2126,23 +2345,27 @@ class CoopTask(Task):
                 >= self._run_config.opening_skill_max_selections
             ):
                 return True
-            # 同页换组:选完一张后下一组技能页立即弹出,页面未关但卡面(技能
-            # 名)已变,选卡同样生效。卡面未变=点击未生效,交给重试
-            if page_closed := (
-                before.flag("select_skill_button_visible")
-                or before.flag("merge_gift_skill_page_visible")
-            ) and not (
-                after.flag("select_skill_button_visible")
-                or after.flag("merge_gift_skill_page_visible")
-            ):
+            # 页面收起即生效:局内选技能与合成赠送页一组一选,选完页面关闭,
+            # 下一组需要再点【选技能】(页面打开期间按钮不可点)。页面未收起
+            # =点击未生效(如卡未渲染完时点击落空),交给重试。这类 tag 的验证
+            # 帧走轻量识别(无 skill_card_options),只看页面标志,不比对卡面
+            before_visible = before.flag(
+                "select_skill_button_visible"
+            ) or before.flag("merge_gift_skill_page_visible")
+            after_visible = after.flag(
+                "select_skill_button_visible"
+            ) or after.flag("merge_gift_skill_page_visible")
+            if before_visible and not after_visible:
                 return True
-            before_options = before.raw_data.get("skill_card_options")
-            after_options = after.raw_data.get("skill_card_options")
-            return (
-                before_options is not None
-                and after_options is not None
-                and before_options != after_options
-            )
+            if action.tag != "opening_skill_priority":
+                return False
+            # 开局技能页例外:选完一张先收起、下一组自动弹出(实机 2026-08-15),
+            # 页面未收起时可能已是新组,"页面还在"分不清新组还是未点中,必须
+            # 比对卡面。比对剔除 frame_id 等帧相关字段——每帧重读的 frame_id
+            # 必然不同,混进来会让比对恒为"已变化",点没点中都判生效
+            before_cmp = _comparable_skill_options(before.raw_data.get("skill_card_options"))
+            after_cmp = _comparable_skill_options(after.raw_data.get("skill_card_options"))
+            return before_cmp is not None and after_cmp is not None and before_cmp != after_cmp
         if action.tag in {
             "opening_skill_candidate",
             "opening_skill_fallback",
@@ -2306,15 +2529,27 @@ class CoopTask(Task):
             # 主动退队：清空对局内进度，先探测落点页面再选招募入口
             self._reset_for_home_reentry()
             self._recruit_step = _RecruitStep.DETECT_ENTRY_PAGE
-        elif tag in {"required_summon", "summon_hero"}:
+        elif tag in {"required_summon", "summon_hero", "batch_summon"}:
             self._summon_count += 1
+            if tag == "batch_summon":
+                # 批次召唤点击已发送：消耗批次；归零后下一轮恢复多帧识别
+                self._batch_summon_remaining -= 1
         elif tag == "merge_heroes":
             # 合成成功 = 拖动机制正常；清空失败记忆，让之前的失败对可重试
             self._failed_merge_pairs.clear()
+        elif tag == "batch_merge":
+            # 批次合成单拖已发送：弹出队首；拖动生效同样证明机制正常，
+            # 清空失败记忆（与单动作合成语义一致）
+            self._batch_merge_queue.pop(0)
+            self._failed_merge_pairs.clear()
         elif tag == "main_c_ready":
-            # 数量已达标：清空技能选择计数，开始新一轮「选 N 次 → 检查数量」
+            # 数量已达标：清空技能选择计数，开始新一轮「选 N 次 → 检查数量」；
+            # 同时丢弃可能残留的批次状态（培养已结束，批次不再有意义）
             self._main_skill_selections = 0
             self._topup_active = False
+            self._batch_summon_remaining = 0
+            self._batch_merge_queue = []
+            self._pending_merge_batch_signatures = []
             self._schedule_next_skill(self._clock())
         elif tag == "main_c_topup":
             # 进入数量回补阶段：培养门禁从「只看星级」收紧为「星级 + 数量」
@@ -2409,6 +2644,9 @@ class CoopTask(Task):
         self._recruit_step = _RecruitStep.OPEN_TERRITORY
         self._start_entry_wait()
         self._summon_count = 0
+        self._batch_summon_remaining = 0
+        self._batch_merge_queue = []
+        self._pending_merge_batch_signatures = []
         self._empty_board_count = 0
         self._no_progress_count = 0
         self._last_board_signature = None

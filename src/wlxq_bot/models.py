@@ -547,6 +547,10 @@ class Action:
         reason: 触发该动作的原因，用于调试记录
         save_frame_before: 置 True 时调度层在执行该动作前把当前帧存为结算
             截图（一局结束、点击返回前的画面存档）；只影响记录，不影响决策
+        hover_park: 仅 click：点击后把鼠标移动到该客户区坐标停靠。金币门控
+            按钮（选技能/召唤）点击后指针悬停在按钮上会触发游戏高亮效果，
+            稀释下一帧费用区域的红/白颜色判定（2026-09-10 实机：连续多次
+            红色被误判为白色）
     """
 
     kind: str
@@ -559,6 +563,7 @@ class Action:
     tag: str = ""
     reason: str = ""
     save_frame_before: bool = False
+    hover_park: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)

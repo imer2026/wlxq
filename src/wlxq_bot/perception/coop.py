@@ -148,6 +148,7 @@ class CoopPerception:
         new_skill_dir: Path | None = None,
         gold_reader: Any | None = None,
         gold_read_interval: float = 1.0,
+        gold_color_only: bool = False,
         difficulty_kind: str = "template",
         locator_aliases: dict[str, str] | None = None,
         difficulty_reader: Any | None = None,
@@ -201,6 +202,9 @@ class CoopPerception:
         # 门控），最小间隔内复用上次结果；其他状态零开销
         self._gold_reader = gold_reader
         self._gold_read_interval = max(0.0, gold_read_interval)
+        # 只认色模式：金币门控只判定费用文字红/白（毫秒级），跳过数字 OCR；
+        # 判定足够廉价，每帧新鲜计算，不走进度间隔缓存
+        self._gold_color_only = gold_color_only
         self._last_gold_read = float("-inf")
         self._last_gold_info: dict[str, Any] | None = None
         # 难度识别方式（模式档案）：template=合作文字模板；ocr=保卫宠物行 OCR。
@@ -285,18 +289,28 @@ class CoopPerception:
                 "tian_shi_kai_ju_visible",
             )
         )
-        if self._gold_reader is not None and read_gold and not page_open and not light:
-            now_monotonic = perf_counter()
-            if now_monotonic - self._last_gold_read >= self._gold_read_interval:
-                self._last_gold_read = now_monotonic
+        if self._gold_reader is not None and read_gold and not page_open and (
+            not light or self._gold_color_only
+        ):
+            if self._gold_color_only:
+                # 只认色：红/白判定毫秒级，每帧新鲜计算（含轻量验证帧），
+                # 无需读取间隔缓存。轻量帧也必须算——关弹窗验证通过后任务层
+                # 直接拿该帧决策，缺金币信息会盲点【选技能】（2026-09-10 实机）
                 gold = self._read_gold(ctx, frame)
                 if gold is not None:
-                    self._last_gold_info = gold
-            if (
-                self._last_gold_info is not None
-                and now_monotonic - self._last_gold_read < self._gold_read_interval * 5
-            ):
-                raw_data["gold"] = self._last_gold_info
+                    raw_data["gold"] = gold
+            else:
+                now_monotonic = perf_counter()
+                if now_monotonic - self._last_gold_read >= self._gold_read_interval:
+                    self._last_gold_read = now_monotonic
+                    gold = self._read_gold(ctx, frame)
+                    if gold is not None:
+                        self._last_gold_info = gold
+                if (
+                    self._last_gold_info is not None
+                    and now_monotonic - self._last_gold_read < self._gold_read_interval * 5
+                ):
+                    raw_data["gold"] = self._last_gold_info
         difficulty_candidates = []
         if observation_mode == "coop_difficulty":
             if self._difficulty_kind == "ocr":
@@ -979,10 +993,36 @@ class CoopPerception:
         return 11, False, description
 
     def _read_gold(self, ctx: WindowContext, frame: Any) -> dict[str, Any] | None:
-        """读取三个金币数字区域；ROI 未标定时永久停用金币读取。"""
+        """读取金币门控信息；只认色模式仅判定两个费用区域红/白。
+
+        ROI 未标定时永久停用金币读取。
+        """
         current = self._resolve_named_roi("gold_current_area", ctx)
         skill = self._resolve_named_roi("skill_cost_area", ctx)
         summon = self._resolve_named_roi("summon_cost_area", ctx)
+        if self._gold_color_only:
+            if skill is None or summon is None:
+                logger.debug("只认色模式缺费用 ROI，停用金币读取")
+                self._gold_reader = None
+                return None
+            info = self._gold_reader.read_affordability(frame, skill, summon)
+            logger.debug(
+                "frame=%d 金币只认色 skill红=%s(%.3f) summon红=%s(%.3f)",
+                ctx.frame_id,
+                info.skill_red,
+                info.skill_red_ratio,
+                info.summon_red,
+                info.summon_red_ratio,
+            )
+            return {
+                "current": None,
+                "skill_cost": None,
+                "summon_cost": None,
+                "skill_red": info.skill_red,
+                "summon_red": info.summon_red,
+                "skill_red_ratio": info.skill_red_ratio,
+                "summon_red_ratio": info.summon_red_ratio,
+            }
         if current is None or skill is None or summon is None:
             logger.debug("金币感知 ROI 未标定，停用金币读取")
             self._gold_reader = None

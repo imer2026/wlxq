@@ -1530,7 +1530,11 @@ def _merge_task() -> CoopTask:
     ctx.current_state = State.BUILD_MAIN_C
     task = CoopTask(
         ctx,
-        RunConfig(minimum_summon_count_before_skills=1),
+        RunConfig(
+            minimum_summon_count_before_skills=1,
+            batch_summon_enabled=False,
+            batch_merge_enabled=False,
+        ),
         CoopRole.HELPER,
         {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)},
     )
@@ -1729,6 +1733,78 @@ class TestSkillClickFailureRecovers:
         assert any(a.tag == "opening_skill_blocked_wait" for a in executor.actions)
         assert task._opening_clicks_blocked is True
         assert final == State.SELECT_OPENING_SKILLS
+
+
+class _MainSkillPagePerception:
+    """始终返回局内技能页（带标题 OCR 选项）的假识别管线，记录轻量帧标记。"""
+
+    def __init__(self) -> None:
+        self.observe_count = 0
+        self.light_flags: list[bool] = []
+
+    def observe(self, c, f, hint, observation_mode=None, read_gold=False, light=False, **kwargs):
+        self.observe_count += 1
+        self.light_flags.append(light)
+        return Observation(
+            frame_id=c.frame_id,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": [
+                    {
+                        "column": 0,
+                        "name": "天穹支援",
+                        "tier": 1,
+                        "known": True,
+                        "page": "SELECT_MAIN_C_SKILLS",
+                        "frame_id": c.frame_id,
+                        "position": (100, 200),
+                    }
+                ],
+            },
+        )
+
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+        return ctx, self.observe(ctx, None, None)
+
+
+class TestSkillVerifyUsesLightFrames:
+    def test_main_skill_priority_verify_frames_are_light(self):
+        """局内选技能：决策帧完整识别，动作后验证帧轻量识别（跳过标题 OCR）。"""
+        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.models import CoopRole
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import CoopTask
+
+        runner = Runner(
+            default_config=DefaultConfig(
+                run=RunConfig(action_verify_frames=2, skill_click_max_retries=1)
+            ),
+            tasks_config=TasksConfig(),
+        )
+        ctx = TaskContext(main_c="assault", max_rounds=10)
+        ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task = CoopTask(
+            ctx,
+            RunConfig(),
+            CoopRole.HELPER,
+            {"select_skill": Hotspot(x_ratio=0.2, y_ratio=0.9)},
+        )
+        # 跳过金币检查定时等待，直接进入选技能节奏
+        task._next_skill_at = 0.0
+        perception = _MainSkillPagePerception()
+
+        runner._run_loop(
+            FakeScreen(make_window_ctx()),
+            perception,
+            FakeExecutor(verified=False),
+            task,
+            SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+            1,
+            max_steps=8,
+        )
+
+        # 迭代序：开页(全) → 选卡(全) → 验证×2(轻) → 重试选卡(全) → 验证×2(轻)
+        assert perception.light_flags[:5] == [False, False, True, True, False]
 
 
 # ---------------------------------------------------------------------------

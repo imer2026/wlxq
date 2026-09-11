@@ -103,6 +103,11 @@ class ActionExecutor:
         if action.kind == "click" and action.target is not None:
             sx, sy = ctx.client_to_screen(*action.target)
             self._input.click(sx, sy, action.duration or 0.08)
+            if action.hover_park is not None:
+                # 点击后把指针停靠到无关位置：悬停在金币门控按钮上会触发
+                # 游戏高亮，污染下一帧费用区域的红/白颜色判定
+                park_x, park_y = ctx.client_to_screen(*action.hover_park)
+                self._input.move(park_x, park_y)
 
         elif action.kind == "drag" and action.target is not None and action.end is not None:
             start_screen = ctx.client_to_screen(*action.target)

@@ -157,6 +157,37 @@ class CultivationStrategy:
             )
         return pair
 
+    def select_merge_batch(
+        self,
+        candidates: list[MergeCandidate],
+        failed_pairs: FailedMergePairs,
+    ) -> list[MergeCandidate]:
+        """批次合成规划（2026-09-10 用户策略）：把当前快照上能合的对一次排完。
+
+        与单次 select_merge 的取舍不同，批次只做无争议的合并：
+        1. 绝不动主C（主C强袭保留，数量保护；主C对仍由单动作策略在棋盘
+           占满等最后手段场景处理）；
+        2. 只排 1/2 星对（3星对合成4星会弹赠送技能页，可能中途遮挡棋盘）；
+        3. 跳过失败记忆中的对（本局内已确认拖不动的对不反复排）；
+        4. 对与对之间格子互不相交（find_merge_candidates 已按英雄去重配对，
+           此处按位置再防御性过滤），合并互不冲突，可连续拖完再统一识别。
+        """
+        selected: list[MergeCandidate] = []
+        used: set[tuple[int, int]] = set()
+        for candidate in candidates:
+            if candidate.is_main_c:
+                continue
+            if max(candidate.hero_a.star_level, candidate.hero_b.star_level) >= 3:
+                continue
+            if self.pair_signature(candidate) in failed_pairs:
+                continue
+            positions = {candidate.hero_a.position, candidate.hero_b.position}
+            if positions & used:
+                continue
+            used |= positions
+            selected.append(candidate)
+        return selected
+
     def _board_full(self, board: BoardSnapshot) -> bool:
         return board.capacity.occupied >= board.capacity.total_slots
 

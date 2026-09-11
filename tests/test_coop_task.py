@@ -51,6 +51,7 @@ def make_task(
     max_rounds: int = 10,
     target_star: int = 2,
     minimum_summons: int = 3,
+    batch_enabled: bool = False,
     hotspots: dict[str, Hotspot] | None = None,
     coop_difficulties: list[int] | None = None,
     difficulty_selection_only: bool = False,
@@ -66,6 +67,8 @@ def make_task(
         minimum_summon_count_before_skills=minimum_summons,
         initial_board_capacity=max(7, minimum_summons),
         target_star_level=target_star,
+        batch_summon_enabled=batch_enabled,
+        batch_merge_enabled=batch_enabled,
     )
     spots = (
         hotspots
@@ -81,6 +84,7 @@ def make_task(
             "add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96),
             "join_coop": Hotspot(x_ratio=0.6, y_ratio=0.75),
             "select_skill": Hotspot(x_ratio=0.2, y_ratio=0.9),
+            "mouse_park": Hotspot(x_ratio=0.5, y_ratio=0.06),
             "like": Hotspot(x_ratio=0.3, y_ratio=0.8),
             "claim_chest": Hotspot(x_ratio=0.5, y_ratio=0.8),
         }
@@ -2180,6 +2184,146 @@ class TestOtherStates:
 
         assert task.verify_action(action, before, after)
 
+    def test_main_skill_priority_verifies_page_closed(self):
+        # 局内选技能一组一选：选完页面收起即生效；未收起=点击未生效（如卡未
+        # 渲染完时点击落空），交给重试。回归：此前比对 skill_card_options 混入
+        # frame_id，前后帧必然不同，点击被吞（同组卡原样不动）也误判生效
+        task = make_task()
+        action = Action(kind="click", tag="main_skill_priority", target=(1, 1))
+
+        def card_options(frame_id: int) -> list[dict]:
+            return [
+                {
+                    "column": 0,
+                    "name": "天穹支援",
+                    "tier": 1,
+                    "known": True,
+                    "page": "SELECT_MAIN_C_SKILLS",
+                    "frame_id": frame_id,
+                    "position": (100, 200),
+                }
+            ]
+
+        before = Observation(
+            frame_id=1,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": card_options(1),
+            },
+        )
+        swallowed = Observation(
+            frame_id=2,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": card_options(2),
+            },
+        )
+        light_still_open = Observation(
+            frame_id=3, raw_data={"select_skill_button_visible": True}
+        )
+        closed = Observation(frame_id=4)
+
+        assert not task.verify_action(action, before, swallowed)
+        assert not task.verify_action(action, before, light_still_open)
+        assert task.verify_action(action, before, closed)
+
+    def test_merge_gift_skill_priority_verifies_banner_gone(self):
+        # 赠送技能页一组一选：提示条消失即生效；未消失=未生效
+        task = make_task()
+        action = Action(kind="click", tag="merge_gift_skill_priority", target=(1, 1))
+        before = Observation(frame_id=1, raw_data={"merge_gift_skill_page_visible": True})
+        still_open = Observation(frame_id=2, raw_data={"merge_gift_skill_page_visible": True})
+        closed = Observation(frame_id=3)
+
+        assert not task.verify_action(action, before, still_open)
+        assert task.verify_action(action, before, closed)
+
+    def test_opening_skill_priority_compares_cards_without_frame_fields(self):
+        # 开局选完一张会自动弹下一组：页面未收起时必须比对卡面区分新组与未
+        # 点中。回归：比对剔除 frame_id 等帧相关字段——同一组卡重读（仅
+        # frame_id 不同）不得判成"已变化"
+        task = make_task()
+        action = Action(kind="click", tag="opening_skill_priority", target=(1, 1))
+
+        def card_option(frame_id: int, name: str, tier: int) -> dict:
+            return {
+                "column": 0,
+                "name": name,
+                "tier": tier,
+                "known": True,
+                "page": "SELECT_OPENING_SKILLS",
+                "frame_id": frame_id,
+                "position": (100, 200),
+            }
+
+        before = Observation(
+            frame_id=1,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": [card_option(1, "天穹支援", 1)],
+            },
+        )
+        same_group = Observation(
+            frame_id=2,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": [card_option(2, "天穹支援", 1)],
+            },
+        )
+        next_group = Observation(
+            frame_id=3,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": [card_option(3, "星辰护盾", 2)],
+            },
+        )
+
+        assert not task.verify_action(action, before, same_group)
+        assert task.verify_action(action, before, next_group)
+
+    def test_skill_gold_wait_on_red_cost(self):
+        # 只认色金币门控：费用红色（游戏自身判买不起）→ 等
+        # gold_red_wait_seconds（默认 1 秒）后重新识别再判
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._next_skill_at = 0.0
+        obs = Observation(frame_id=1, raw_data={"gold": {"skill_red": True}})
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "skill_gold_wait"
+        assert action.duration == 1.0
+        assert to_state == State.SELECT_MAIN_C_SKILLS
+
+    def test_white_cost_proceeds_to_select_skill_click(self):
+        # 只认色金币门控：费用白色（红标志 False、无数值）→ 视为付得起，
+        # 直接进入定时点选技能
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._next_skill_at = 0.0
+        obs = Observation(frame_id=1, raw_data={"gold": {"skill_red": False}})
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        # 点击后指针停靠到 mouse_park，避免悬停高亮污染下一帧费用色判
+        assert decision[0].tag == "open_main_skills"
+        assert decision[0].hover_park is not None
+
+    def test_summon_gold_wait_on_red_cost(self):
+        # 召唤金币门控（只认色）：召唤费用红色 → 等 gold_red_wait_seconds
+        task = make_task()
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        board = make_board([make_hero("snow", star=1, pos=(100, 100))])
+        obs = Observation(
+            frame_id=1, board=board, raw_data={"gold": {"summon_red": True}}
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "summon_gold_wait"
+        assert action.duration == 1.0
+        assert to_state == State.BUILD_MAIN_C
+
     def test_summon_button_enters_summon_phase(self):
         # 【选技能】连续多帧消失、【召唤】可见 → 开局阶段结束，进入召唤
         task = make_task()
@@ -2619,6 +2763,7 @@ class TestModeProfileDispatch:
             "add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96),
             "join_coop": Hotspot(x_ratio=0.6, y_ratio=0.75),
             "select_skill": Hotspot(x_ratio=0.2, y_ratio=0.9),
+            "mouse_park": Hotspot(x_ratio=0.5, y_ratio=0.06),
             "like": Hotspot(x_ratio=0.3, y_ratio=0.8),
             "claim_chest": Hotspot(x_ratio=0.5, y_ratio=0.8),
         }
@@ -3117,3 +3262,267 @@ class TestTerritoryEntry:
         task.ctx.current_state = State.FIND_COOP
         task._recruit_step = _RecruitStep.SELECT_MODE_CARD
         assert task.decide_action(Observation(frame_id=1), make_window_ctx()) is None
+
+
+# ---------------------------------------------------------------------------
+# 批次召唤 / 批次合成（2026-09-10 用户策略）
+# ---------------------------------------------------------------------------
+
+
+def make_full_board(heroes: list[BoardHero]) -> BoardSnapshot:
+    """棋盘占满的快照：total_slots = 占用数，available = 0。"""
+    return BoardSnapshot(
+        frame_id=1,
+        heroes=heroes,
+        capacity=BoardCapacity(total_slots=len(heroes), occupied=len(heroes)),
+    )
+
+
+class TestBatchSummon:
+    def _task_after_forced_phase(self, minimum_summons: int = 2) -> CoopTask:
+        task = make_task(minimum_summons=minimum_summons, batch_enabled=True)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = minimum_summons
+        return task
+
+    def test_batch_summon_fills_empties_before_merging(self):
+        """新默认优先级（2026-09-10）：棋盘有空位时先批次召唤填满，再合并。"""
+        task = self._task_after_forced_phase()
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        obs = Observation(frame_id=1, board=board)
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        # 有空位也有合法对：先批次召唤填满（批后再识别、再合并）
+        assert decision[0].tag == "batch_summon"
+
+    def test_batch_summon_planned_by_empty_cells(self):
+        """培养阶段识别后按空格数规划批次召唤，点击发送即消耗批次。"""
+        task = self._task_after_forced_phase()
+        board = make_board([make_hero("snow", star=1, pos=(100, 100))])
+        obs = Observation(frame_id=1, board=board)
+
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "batch_summon"
+        assert action.verification == "immediate"
+        assert task._batch_summon_remaining == 11  # 12 格 - 1 占用
+
+        task.on_action_verified(*decision)
+        assert task._batch_summon_remaining == 10
+        assert task._summon_count == 3
+        # 批次进行中不做多帧棋盘识别
+        assert task.wants_board_watch() is False
+
+    def test_batch_summon_non_last_clicks_use_fast_interval(self):
+        task = self._task_after_forced_phase()
+        board = make_board([make_hero("snow", star=1, pos=(100, 100))])
+        obs = Observation(frame_id=1, board=board)
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].post_delay == task._run_config.forced_summon_interval_seconds
+
+    def test_batch_summon_last_click_keeps_stable_delay(self):
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 1
+        obs = Observation(frame_id=1, board=make_board([]))
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert 1.0 <= decision[0].post_delay <= 2.0
+
+    def test_batch_summon_waits_when_gold_insufficient(self):
+        """批内每次点击前金币门控：不足时等待且不消耗批次。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 3
+        obs = Observation(
+            frame_id=1,
+            board=make_board([]),
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "summon_gold_wait"
+        assert task._batch_summon_remaining == 3
+
+    def test_board_watch_resumes_after_batch_finishes(self):
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 1
+        obs = Observation(frame_id=1, board=make_board([]))
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        task.on_action_verified(*decision)
+        assert task._batch_summon_remaining == 0
+        assert task.wants_board_watch() is True
+
+    def test_batch_summon_disabled_falls_back_to_single_summon(self):
+        task = self._task_after_forced_phase()
+        task._run_config.batch_summon_enabled = False
+        board = make_board([make_hero("snow", star=1, pos=(100, 100))])
+        obs = Observation(frame_id=1, board=board)
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "summon_hero"
+        assert action.verification == "next_frame"
+        assert task._batch_summon_remaining == 0
+
+
+class TestBatchMerge:
+    def _task_ready_for_merge(self, main_c: str = "assault") -> CoopTask:
+        task = make_task(main_c=main_c, batch_enabled=True)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        return task
+
+    def test_batch_merge_plans_disjoint_pairs(self):
+        """4 个 1 星雪姬：两对互不交叉，一次排队，逐拖消费。"""
+        task = self._task_ready_for_merge()
+        heroes = [
+            make_hero("snow", star=1, pos=(10, 10)),
+            make_hero("snow", star=1, pos=(20, 20)),
+            make_hero("snow", star=1, pos=(30, 10)),
+            make_hero("snow", star=1, pos=(40, 40)),
+            make_hero("death_knight", star=1, pos=(50, 50)),
+        ]
+        obs = Observation(frame_id=1, board=make_full_board(heroes))
+
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "batch_merge"
+        assert action.verification == "immediate"
+        # 4 个雪姬两两配对，死亡骑士无对
+        assert len(task._batch_merge_queue) == 2
+        # 队列内所有格子互不相交
+        used = [
+            pos
+            for source, dest in task._batch_merge_queue
+            for pos in (source.position, dest.position)
+        ]
+        assert len(set(used)) == len(used)
+        # 批次进行中不做多帧棋盘识别
+        assert task.wants_board_watch() is False
+
+        # 逐拖消费队列
+        task.on_action_verified(*decision)
+        assert len(task._batch_merge_queue) == 1
+        second = task.decide_action(obs, make_window_ctx())
+        assert second is not None
+        assert second[0].tag == "batch_merge"
+        task.on_action_verified(*second)
+        assert task._batch_merge_queue == []
+        assert task.wants_board_watch() is True
+
+    def test_batch_merge_excludes_main_c_and_three_star(self):
+        """批次绝不动主C强袭，也不排 3 星对（合成 4 星会弹赠送技能页）。"""
+        task = self._task_ready_for_merge(main_c="assault")
+        heroes = [
+            make_hero("assault", star=1, pos=(10, 10)),
+            make_hero("assault", star=1, pos=(20, 20)),
+            make_hero("angel", star=3, pos=(30, 30)),
+            make_hero("angel", star=3, pos=(40, 40)),
+            make_hero("snow", star=1, pos=(50, 50)),
+            make_hero("snow", star=1, pos=(60, 60)),
+        ]
+        obs = Observation(frame_id=1, board=make_full_board(heroes))
+
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_merge"
+        # 批次里只有雪姬对
+        assert len(task._batch_merge_queue) == 1
+        source, dest = task._batch_merge_queue[0]
+        assert {source.hero_type, dest.hero_type} == {"snow"}
+        # 主C对和3星对保留在候选中，由单动作策略兜底
+        candidates = obs.board.find_merge_candidates("assault")  # type: ignore[union-attr]
+        assert len(candidates) == 3
+
+    def test_batch_merge_excludes_failed_pairs(self):
+        """失败记忆中的对不进批次；批次空时落回单动作策略。"""
+        task = self._task_ready_for_merge()
+        heroes = [
+            make_hero("snow", star=1, pos=(10, 10)),
+            make_hero("snow", star=1, pos=(20, 20)),
+        ]
+        # 预先把该对标记为失败（下->上的拖动方向签名）
+        task._failed_merge_pairs.add(((20, 20), (10, 10)))
+        obs = Observation(frame_id=1, board=make_full_board(heroes))
+
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "batch_merge"
+        assert task._batch_merge_queue == []
+
+    def test_batch_merge_disabled_keeps_single_action(self):
+        task = self._task_ready_for_merge()
+        task._run_config.batch_merge_enabled = False
+        heroes = [
+            make_hero("snow", star=1, pos=(10, 10)),
+            make_hero("snow", star=1, pos=(20, 20)),
+        ]
+        obs = Observation(frame_id=1, board=make_full_board(heroes))
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        # 走原有单动作合成（next_frame 逐拖验证）
+        assert decision[0].tag == "merge_heroes"
+        assert decision[0].verification == "next_frame"
+        assert task._batch_merge_queue == []
+
+    def test_batch_merge_attribution_marks_stale_pairs_failed(self):
+        """批末归因：棋盘上仍原样存在的对 = 拖动未生效，记入失败记忆。"""
+        task = self._task_ready_for_merge()
+        sig_done = ((20, 20), (10, 10))
+        sig_failed = ((40, 40), (30, 30))
+        task._pending_merge_batch_signatures = [sig_done, sig_failed]
+        # 批后棋盘：sig_done 的对已合并消失，sig_failed 的对原样还在
+        heroes = [
+            make_hero("snow", star=2, pos=(10, 10)),
+            make_hero("snow", star=1, pos=(30, 30)),
+            make_hero("snow", star=1, pos=(40, 40)),
+        ]
+        board = make_full_board(heroes)
+        task._attribute_merge_batch(board.find_merge_candidates("assault"))
+        assert sig_failed in task._failed_merge_pairs
+        assert sig_done not in task._failed_merge_pairs
+        assert task._pending_merge_batch_signatures == []
+
+
+class TestBatchStateReset:
+    def test_reset_for_home_reentry_clears_batch_state(self):
+        task = make_task()
+        task._batch_summon_remaining = 2
+        task._batch_merge_queue = [
+            (
+                make_hero("snow", star=1, pos=(10, 10)),
+                make_hero("snow", star=1, pos=(20, 20)),
+            )
+        ]
+        task._pending_merge_batch_signatures = [((20, 20), (10, 10))]
+        task._reset_for_home_reentry()
+        assert task._batch_summon_remaining == 0
+        assert task._batch_merge_queue == []
+        assert task._pending_merge_batch_signatures == []
+
+    def test_main_c_ready_clears_batch_state(self):
+        task = make_task()
+        task._batch_summon_remaining = 2
+        task._batch_merge_queue = [
+            (
+                make_hero("snow", star=1, pos=(10, 10)),
+                make_hero("snow", star=1, pos=(20, 20)),
+            )
+        ]
+        task._pending_merge_batch_signatures = [((20, 20), (10, 10))]
+        task.on_action_verified(
+            Action(kind="wait", tag="main_c_ready", verification="immediate"),
+            State.SELECT_MAIN_C_SKILLS,
+        )
+        assert task._batch_summon_remaining == 0
+        assert task._batch_merge_queue == []
+        assert task._pending_merge_batch_signatures == []

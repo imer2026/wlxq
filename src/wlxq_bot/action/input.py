@@ -67,6 +67,10 @@ class InputController:
         if pause > 0:
             pyautogui.sleep(pause)
 
+    def move(self, x: int, y: int) -> None:
+        """移动鼠标到屏幕坐标 (x, y)，不点击。"""
+        pyautogui.moveTo(x, y)
+
     def press_key(self, key: str) -> None:
         """按键。"""
         pyautogui.press(key)
@@ -83,6 +87,9 @@ class FakeInput:
 
     def click(self, x: int, y: int, duration: float = 0.08) -> None:
         self.calls.append(("click", str(x), str(y), str(duration)))
+
+    def move(self, x: int, y: int) -> None:
+        self.calls.append(("move", str(x), str(y)))
 
     def drag(
         self,

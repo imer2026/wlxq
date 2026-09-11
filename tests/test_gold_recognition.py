@@ -70,6 +70,33 @@ class TestGoldReader:
         assert info.current == 441
 
 
+class TestReadAffordability:
+    """只认色模式：红/白判定不触碰 OCR 引擎，数值字段全为 None。"""
+
+    def _image(self, color: tuple[int, int, int]) -> np.ndarray:
+        img = np.full((26, 125, 3), (90, 60, 40), dtype=np.uint8)
+        cv2.putText(img, "600", (25, 22), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 5)
+        return img
+
+    def test_red_cost_unaffordable_without_engine(self) -> None:
+        # 不注入引擎：只认色路径一旦触碰 OCR 即失败，证明零 OCR 依赖
+        reader = GoldReader()
+        info = reader.read_affordability(self._image((0, 0, 255)), (0, 0, 125, 26), (0, 0, 125, 26))
+        assert info.skill_red is True
+        assert info.current is None
+        assert info.skill_cost is None
+        assert info.summon_cost is None
+
+    def test_white_cost_affordable(self) -> None:
+        reader = GoldReader()
+        info = reader.read_affordability(
+            self._image((255, 255, 255)), (0, 0, 125, 26), (0, 0, 125, 26)
+        )
+        assert info.skill_red is False
+        assert info.summon_red is False
+        assert info.current is None
+
+
 class TestCanAfford:
     def test_red_means_unaffordable(self) -> None:
         gold = {"current": 9999, "skill_cost": 100, "skill_red": True}
@@ -110,3 +137,50 @@ def test_real_screenshots(filename: str, expected: tuple) -> None:
     assert info.summon_cost == exp_summon, filename
     assert info.skill_red == exp_skill_red, filename
     assert info.summon_red == exp_summon_red, filename
+
+
+# 只认色实机回归（2026-09-10 宠物模式实机截图）：红色费用 4 张、白色费用
+# 2 张，含边界样本（金币 2.4K vs 费用 2.5K 判红、2.6K vs 2.5K 判白）。
+# 文件不入库，缺失时跳过
+COLOR_ONLY_CASES = {
+    "screenshot_20260910_015954.png": (False, False),
+    "screenshot_20260910_020000.png": (True, False),
+    "screenshot_20260910_020005.png": (True, False),
+    "screenshot_20260910_020009.png": (True, False),
+    "screenshot_20260910_020014.png": (True, False),
+    "screenshot_20260910_020020.png": (False, False),
+    # 短文本红字回归（2026-09-11 实机）：费用涨到 "3K" 后红字像素变少，
+    # 旧阈值 0.15 把红色误判为白色（实测占比 0.136）
+    "Snipaste_2026-09-11_21-43-16.png": (True, False),
+}
+
+# 费用区域客户区比例，与 configs/tasks.yaml 的 skill/summon_cost_area 标定一致
+_SKILL_COST_RATIOS = (0.2621, 0.9757, 0.1381, 0.0208)
+_SUMMON_COST_RATIOS = (0.5858, 0.9757, 0.1273, 0.0208)
+
+
+def _ratio_roi(img: np.ndarray, ratios: tuple[float, float, float, float]) -> tuple:
+    h, w = img.shape[:2]
+    xr, yr, wr, hr = ratios
+    return (int(xr * w), int(yr * h), int(wr * w), int(hr * h))
+
+
+@pytest.mark.parametrize("filename,expected", sorted(COLOR_ONLY_CASES.items()))
+def test_color_only_real_screenshots(filename: str, expected: tuple) -> None:
+    path = Path("screenshots/raw") / filename
+    if not path.is_file():
+        pytest.skip(f"真实截图不存在: {filename}")
+    img = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert img is not None
+    info = GoldReader().read_affordability(
+        img,
+        _ratio_roi(img, _SKILL_COST_RATIOS),
+        _ratio_roi(img, _SUMMON_COST_RATIOS),
+    )
+    exp_skill_red, exp_summon_red = expected
+    assert info.skill_red == exp_skill_red, (
+        f"{filename}: skill_red_ratio={info.skill_red_ratio:.3f}"
+    )
+    assert info.summon_red == exp_summon_red, (
+        f"{filename}: summon_red_ratio={info.summon_red_ratio:.3f}"
+    )

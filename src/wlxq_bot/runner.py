@@ -63,6 +63,14 @@ _POPUP_CLOSE_TAGS = frozenset(
     {"close_popup", "close_double_reward", "close_bonus_popup"}
 )
 
+# 局内付费选技能与合成赠送页的选卡标签：一组一选，选完页面收起、下一组
+# 要再点【选技能】（页面打开期间按钮不可点），验证只需要页面标志是否收起，
+# 轻量识别即可——完整帧的三列标题 OCR 单次数秒（慢速机实测约 5 秒），
+# 会让每次选卡都白等。开局技能页（opening_skill_priority）不在此列：它
+# 选完一张会自动弹出下一组，"页面还在"分不清新组还是未点中，验证帧必须
+# 保留标题 OCR 比对卡面
+_SKILL_PAGE_CLOSE_TAGS = frozenset({"main_skill_priority", "merge_gift_skill_priority"})
+
 _FG_CHECK_INTERVAL_SECONDS = 0.5
 _FG_LOG_EVERY_CHECKS = 20  # 20 × 0.5s = 每 10 秒一条
 # 自动切回前台失败后的重试间隔（秒），避免高频反复激活
@@ -274,7 +282,7 @@ class Runner:
         hero_cell_classifier = self._load_hero_cell_classifier(mc)
         skill_collector = self._build_skill_collector(run_config)
         title_reader, skill_tiers, new_skill_dir = self._build_skill_priority(mc)
-        gold_reader, gold_read_interval = self._build_gold_reader()
+        gold_reader, gold_read_interval, gold_color_only = self._build_gold_reader()
         perception = CoopPerception(
             vision,
             pack,
@@ -292,6 +300,7 @@ class Runner:
             new_skill_dir=new_skill_dir,
             gold_reader=gold_reader,
             gold_read_interval=gold_read_interval,
+            gold_color_only=gold_color_only,
             difficulty_kind=mode_profile.entry.difficulty.kind,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
@@ -749,7 +758,10 @@ class Runner:
             # 关弹窗验证同样只需要弹窗标志：多帧棋盘投票单次十几秒，
             # 会让每次关弹窗（连杀 Boss 时连续多次）都白等（2026-09-06 实机）
             observe_started = time.perf_counter()
-            light_verify = pending is not None and pending.action.tag in _POPUP_CLOSE_TAGS
+            light_verify = pending is not None and (
+                pending.action.tag in _POPUP_CLOSE_TAGS
+                or pending.action.tag in _SKILL_PAGE_CLOSE_TAGS
+            )
             if (
                 task.ctx.current_state in _BOARD_WATCH_STATES
                 and task.wants_board_watch()
@@ -1224,18 +1236,27 @@ class Runner:
                 "主C技能图标模板缺失: " + ", ".join(missing) + f"（模板包: {pack.root}）"
             )
 
-    def _build_gold_reader(self) -> tuple[Any | None, float]:
-        """按标定情况装配金币读取器；三个 ROI 未全部标定时返回 (None, 间隔)。"""
-        interval = float(
-            self.tasks_config.gold_recognition.get("read_min_interval_seconds", 1.0)
+    def _build_gold_reader(self) -> tuple[Any | None, float, bool]:
+        """按标定情况装配金币读取器；费用 ROI 未标定时返回 (None, 间隔, 只认色)。
+
+        color_only（gold_recognition.color_only）为真时金币门控只做费用文字
+        红/白判定（毫秒级 OpenCV 统计），跳过数字 OCR——数字 OCR 每次读取
+        ~5 秒（慢速机），是选技能节奏的最大瓶颈；只需两个费用区域标定。
+        """
+        cfg = self.tasks_config.gold_recognition
+        interval = float(cfg.get("read_min_interval_seconds", 1.0))
+        color_only = bool(cfg.get("color_only", False))
+        required = (
+            ("skill_cost_area", "summon_cost_area")
+            if color_only
+            else ("gold_current_area", "skill_cost_area", "summon_cost_area")
         )
-        required = ("gold_current_area", "skill_cost_area", "summon_cost_area")
         if not all(name in self.tasks_config.rois for name in required):
             logger.info("金币感知 ROI 未标定，金币门控不可用")
-            return None, interval
+            return None, interval, color_only
         from wlxq_bot.perception.ocr import GoldReader
 
-        return GoldReader(), interval
+        return GoldReader(), interval, color_only
 
     def _build_skill_priority(self, mc: str) -> tuple[Any | None, dict[str, int] | None, Path | None]:
         """装配技能标题 OCR 主路径（优先级选卡）三件套。

@@ -22,8 +22,10 @@ _engine: Any = None
 
 # 金币/费用数字格式：纯数字或 K 后缀(3.3K)；中间不允许空格(识别结果先拼接)
 _GOLD_VALUE_RE = re.compile(r"^\d+(?:\.\d+)?[Kk]?$")
-# 红色(买不起)判定阈值：红字帧实测 0.17~0.27,白字帧实测 0.00
-_RED_RATIO_THRESHOLD = 0.15
+# 红色(买不起)判定阈值：红字占比随文本长度变化——"2.5K"实测 0.233、
+# "3K"实测 0.136（2026-09-11 实机：短文本红字像素少，0.15 阈值把红色
+# 误判为白色导致盲点）；白字实测 ≈0.00。0.05 居中分隔两组
+_RED_RATIO_THRESHOLD = 0.05
 # 小 ROI 的 OCR 预处理放大倍数与边距(边距给检测器留上下文,无边距会漏检)
 _GOLD_SCALE = 3
 _GOLD_PAD = 30
@@ -84,6 +86,9 @@ class GoldInfo:
     summon_cost: int | None
     skill_red: bool
     summon_red: bool
+    # 只认色模式的判定依据（红色占比实测值），便于实机排查阈值问题
+    skill_red_ratio: float = 0.0
+    summon_red_ratio: float = 0.0
 
     def can_afford_skill(self) -> bool:
         """选技能是否付得起：红色(游戏自身的买不起信号)或数值比较任一判负即不可。"""
@@ -133,6 +138,32 @@ class GoldReader:
     def __init__(self, engine: Any = None) -> None:
         # engine 可注入用于测试；默认懒加载共享 RapidOCR 引擎
         self._injected_engine = engine
+
+    def read_affordability(
+        self,
+        frame: np.ndarray,
+        skill_roi: tuple[int, int, int, int],
+        summon_roi: tuple[int, int, int, int],
+    ) -> GoldInfo:
+        """只认色的金币门控：红 = 游戏判买不起，白 = 付得起，不做数字 OCR。
+
+        游戏自身的红色费用文字就是买不起信号（红字占比随文本长度变化：
+        "2.5K" 实测 0.233、"3K" 实测 0.136；白字 ≈0.00，阈值 0.05 居中
+        分隔），数值比较只是颜色之外的对账。颜色判定是纯 OpenCV 统计
+        （毫秒级），替代数字 OCR 每次读取 ~5 秒的开销；数值字段全部为
+        None，任务层 _can_afford 对 None 数值视为付得起，门控语义不变。
+        """
+        skill_ratio = red_ratio(self._crop(frame, skill_roi))
+        summon_ratio = red_ratio(self._crop(frame, summon_roi))
+        return GoldInfo(
+            current=None,
+            skill_cost=None,
+            summon_cost=None,
+            skill_red=skill_ratio >= _RED_RATIO_THRESHOLD,
+            summon_red=summon_ratio >= _RED_RATIO_THRESHOLD,
+            skill_red_ratio=skill_ratio,
+            summon_red_ratio=summon_ratio,
+        )
 
     def read(
         self,

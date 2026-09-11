@@ -218,7 +218,17 @@ class RunConfig(BaseModel):
     # Runner 的单局最终保险。每当返回验证成功、round_count 增加时重置，
     # 防止异常状态无限循环，但不限制多局任务的累计步数。
     max_steps_per_round: int = Field(default=5000, ge=1, le=100000)
-    minimum_summon_count_before_skills: int = Field(default=5, ge=1, le=100)
+    # 开局强制召唤次数（填满开局 7 格）；游戏门禁为累计 5 次解锁选技能，
+    # 该值是其上的策略配置（2026-09-10 用户决策改为 7）
+    minimum_summon_count_before_skills: int = Field(default=7, ge=1, le=100)
+    # 批次召唤（2026-09-10 用户策略）：培养阶段棋盘识别后有空位时，按空格数
+    # 规划一批召唤填满；每次点击前做召唤费用红/白金币门控，间隔共用
+    # forced_summon_interval_seconds，全部点完并稳定等待后重新识别棋盘
+    batch_summon_enabled: bool = True
+    # 批次合成：一次棋盘识别上把互不相交的非主C 1/2星合法对一批拖完再统一
+    # 识别；主C对与3星对不进批次（仍走单动作策略），拖动未生效的对在批末
+    # 按位置签名归因记入失败记忆
+    batch_merge_enabled: bool = True
     initial_board_capacity: int = 7
     target_star_level: int = 2
     summon_recognition_delay_min: float = Field(default=1.0, ge=0.0, le=10.0)
@@ -281,6 +291,9 @@ class RunConfig(BaseModel):
     # 选技能/召唤的金币检查间隔（秒）：每 0.5 秒读一次金币，够就操作，不够就等。
     # 节奏跟着金币走（2026-09-05 定案，取代旧的随机间隔）
     gold_check_interval_seconds: float = Field(default=0.5, gt=0.0, le=60.0)
+    # 金币费用红色（游戏自身判买不起）时的等待时长（秒）：等待后重新识别
+    # 再判，等击杀回金（2026-09-10 用户定案：红色等 1 秒再查）
+    gold_red_wait_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
     # 其他队友英雄的技能卡图标（本局阵容 lineup_others 对应）：技能页已打开但
     # 未识别到主C图标时，识别到任一队友图标即确认页面稳定且本组无主C技能卡，
     # 立即随机选一张，不再等满 skill_recognition_frames 帧

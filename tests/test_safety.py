@@ -124,6 +124,36 @@ class TestActionExecutor:
         assert result.executed
         assert not result.verified
 
+    def test_click_parks_mouse_when_hover_park_set(self) -> None:
+        """金币门控按钮点击后把指针停靠到无关位置，避免悬停高亮污染色判。"""
+        input_ctrl = FakeInput()
+        executor = ActionExecutor(
+            SafetyGuard(frame_ttl_ms=5000),
+            input_ctrl,
+            min_delay=0,
+            max_delay=0,
+        )
+
+        executor.execute(
+            _make_ctx(),
+            Action(kind="click", target=(100, 100), hover_park=(460, 100)),
+        )
+
+        assert [call[0] for call in input_ctrl.calls] == ["click", "move"]
+
+    def test_click_without_hover_park_does_not_move(self) -> None:
+        input_ctrl = FakeInput()
+        executor = ActionExecutor(
+            SafetyGuard(frame_ttl_ms=5000),
+            input_ctrl,
+            min_delay=0,
+            max_delay=0,
+        )
+
+        executor.execute(_make_ctx(), Action(kind="click", target=(100, 100)))
+
+        assert [call[0] for call in input_ctrl.calls] == ["click"]
+
     def test_wait_is_verified_without_external_state_change(self) -> None:
         executor = ActionExecutor(
             SafetyGuard(frame_ttl_ms=5000),
