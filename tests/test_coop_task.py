@@ -25,7 +25,12 @@ from wlxq_bot.models import (
 from wlxq_bot.perception.locator import roi_column_centers
 from wlxq_bot.perception.mode_tab import ModeTabRow
 from wlxq_bot.tasks.base import TaskContext
-from wlxq_bot.tasks.coop import _EMPTY_BOARD_RETRY, CoopTask, _RecruitStep
+from wlxq_bot.tasks.coop import (
+    _EMPTY_BOARD_RETRY,
+    _ENTRY_RECLICK_MISSES,
+    CoopTask,
+    _RecruitStep,
+)
 
 # ---------------------------------------------------------------------------
 # 构造辅助
@@ -3256,6 +3261,100 @@ class TestTerritoryEntry:
         )
         assert decision is not None and decision[0].tag == "territory_open_pending"
 
+    def test_territory_confirm_reclicks_when_still_lingdi(self):
+        """点击被吞（实机 2026-09-12）：导航连续多帧仍读「领地」时重点领地。
+
+        领地没打开时重点按钮是安全的（不会误点「返回」退出）；重点后
+        misses 与等待 deadline 重新起算。
+        """
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+        lingdi = Observation(frame_id=1, raw_data={"territory_nav_text": "领地"})
+        for _ in range(_ENTRY_RECLICK_MISSES - 1):
+            decision = task.decide_action(lingdi, make_window_ctx())
+            assert decision is not None and decision[0].tag == "territory_open_pending"
+        decision = task.decide_action(lingdi, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "open_territory"
+        assert decision[0].kind == "click"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.CONFIRM_TERRITORY_OPEN
+        assert task._entry_reclicks == 1
+        assert task._entry_misses == 0
+
+    def test_territory_confirm_stops_after_reclicks_exhausted(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+        task._entry_reclicks = task._entry_max_reclicks
+        task._entry_misses = _ENTRY_RECLICK_MISSES - 1
+        lingdi = Observation(frame_id=1, raw_data={"territory_nav_text": "领地"})
+        assert task.decide_action(lingdi, make_window_ctx()) is None
+
+    def test_territory_confirm_no_reclick_when_nav_unreadable(self):
+        """导航读不到文字时不重点（可能已在领地页，重点会误点「返回」）。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+        unreadable = Observation(frame_id=1)
+        for frame_id in range(1, _ENTRY_RECLICK_MISSES + 5):
+            decision = task.decide_action(
+                Observation(frame_id=frame_id), make_window_ctx()
+            )
+            assert decision is not None
+            assert decision[0].tag == "territory_open_pending"
+        assert task._entry_reclicks == 0
+
+    def test_mode_select_confirm_advances_on_card_rows_even_if_title_missed(self):
+        """标题漏读但本模式卡名可读：弹窗必然已打开，直接放行选卡。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+        decision = task.decide_action(
+            Observation(
+                frame_id=1,
+                raw_data={"mode_card_rows": [ModeTabRow("合作模式", 0.7, (250, 600))]},
+            ),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "mode_select_open_confirmed"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_CARD
+
+    def test_challenge_confirm_returns_to_card_while_popup_visible(self):
+        """弹窗仍打开=选卡点击未生效：连续多帧后回选卡步骤重读重点。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
+        popup = Observation(
+            frame_id=1,
+            raw_data={"mode_select_visible": True, "challenge_text": ""},
+        )
+        for _ in range(_ENTRY_RECLICK_MISSES - 1):
+            decision = task.decide_action(popup, make_window_ctx())
+            assert decision is not None and decision[0].tag == "challenge_page_pending"
+        decision = task.decide_action(popup, make_window_ctx())
+        assert decision is not None and decision[0].tag == "challenge_page_pending"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_CARD
+        assert task._entry_reclicks == 1
+
+    def test_challenge_confirm_keeps_polling_when_popup_gone(self):
+        """弹窗已关闭时不回选卡（可能已在挑战页，重点会点到空白处）。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
+        for frame_id in range(1, _ENTRY_RECLICK_MISSES + 5):
+            decision = task.decide_action(
+                Observation(frame_id=frame_id, raw_data={"challenge_text": ""}),
+                make_window_ctx(),
+            )
+            assert decision is not None
+            assert decision[0].tag == "challenge_page_pending"
+        assert task._recruit_step == _RecruitStep.CONFIRM_CHALLENGE_PAGE
+        assert task._entry_reclicks == 0
+
     def test_missing_card_text_stops_conservatively(self):
         """模式档案缺卡片文字：无法选卡，保守停止而不是盲点。"""
         task = make_task(mode_profile=make_mode_profile(mode_card_text=None))
@@ -3526,3 +3625,221 @@ class TestBatchStateReset:
         assert task._batch_summon_remaining == 0
         assert task._batch_merge_queue == []
         assert task._pending_merge_batch_signatures == []
+
+
+# ---------------------------------------------------------------------------
+# 局内技能页「刷新」分支（2026-09-12 用户确认：每局一次，刷后等 1-2 秒必选一张）
+# ---------------------------------------------------------------------------
+
+
+def _refresh_obs(frame_id: int = 1, **raw_extra) -> Observation:
+    """三张卡均非主C系技能（档位 9/10/11）+ 刷新按钮命中的局内技能页帧。"""
+    raw = {
+        "select_skill_button_visible": True,
+        "skill_card_options": [
+            {"column": 0, "name": "圣羽加持", "tier": 9, "known": True, "position": (100, 600)},
+            {"column": 1, "name": "光矢协同", "tier": 10, "known": True, "position": (460, 600)},
+            {"column": 2, "name": "星辰护盾", "tier": 11, "known": False, "position": (820, 600)},
+        ],
+        "skill_refresh_match": MatchResult("shua_xin.png", (472, 1321), 0.99),
+    }
+    raw.update(raw_extra)
+    return Observation(frame_id=frame_id, raw_data=raw)
+
+
+def _skill_options_obs(names_with_tiers: list[tuple[str, int]]) -> Observation:
+    return Observation(
+        frame_id=1,
+        raw_data={
+            "select_skill_button_visible": True,
+            "skill_card_options": [
+                {"column": i, "name": n, "tier": t, "known": True, "position": (i, 0)}
+                for i, (n, t) in enumerate(names_with_tiers)
+            ],
+        },
+    )
+
+
+class TestSkillRefresh:
+    """局内技能页「刷新」决策：触发条件、每局预算、刷新后必选一张。"""
+
+    def _awaiting_task(self) -> CoopTask:
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._awaiting_main_candidates = True
+        return task
+
+    def test_refresh_fires_when_no_main_c_skill(self):
+        task = self._awaiting_task()
+        decision = task.decide_action(_refresh_obs(), make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.kind == "click"
+        assert action.tag == "skill_refresh"
+        assert action.target == (472, 1321)
+        assert to_state == State.SELECT_MAIN_C_SKILLS
+
+    def test_no_refresh_when_main_c_skill_present(self):
+        """三张卡里有任意一张主C系技能（档位 ≤8）就不刷，直接按优先级选。"""
+        task = self._awaiting_task()
+        decision = task.decide_action(
+            _skill_options_obs([("圣羽加持", 9), ("天穹支援", 1), ("星辰护盾", 11)]),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_skill_priority"
+
+    def test_no_refresh_after_budget_used(self):
+        """本局刷新机会用完：同样没有主C系技能也必须直接选一张。"""
+        task = self._awaiting_task()
+        task._skill_refresh_used_count = task._run_config.skill_refresh_max_per_round
+        decision = task.decide_action(_refresh_obs(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_skill_priority"
+
+    def test_no_refresh_without_card_options(self):
+        """OCR 没读出卡名：不在识别不可靠时浪费每局唯一机会，走等帧流程。"""
+        task = self._awaiting_task()
+        decision = task.decide_action(
+            _refresh_obs(skill_card_options=None), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag != "skill_refresh"
+
+    def test_button_miss_waits_then_falls_to_selection(self):
+        """按钮未识别到：先限次等待重试（页面过渡帧），预算耗尽才直接选卡。"""
+        task = self._awaiting_task()
+        # 前几次 miss → 等待重试，不浪费刷新机会也不盲选
+        for i in range(task._run_config.skill_refresh_button_wait_max):
+            decision = task.decide_action(
+                _refresh_obs(skill_refresh_match=None), make_window_ctx()
+            )
+            assert decision is not None
+            action, to_state = decision
+            assert action.kind == "wait"
+            assert action.tag == "skill_refresh_wait_button"
+            assert to_state == State.SELECT_MAIN_C_SKILLS
+            task.on_action_verified(action, to_state)
+
+        # 等待预算耗尽 → 放弃刷新（本局机会保留），按优先级直接选卡
+        decision = task.decide_action(
+            _refresh_obs(skill_refresh_match=None), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_skill_priority"
+
+        # 刷新机会未被消耗（按钮没点到不算用掉）
+        assert task._skill_refresh_used_count == 0
+
+    def test_button_wait_budget_resets_on_page_reopen(self):
+        """重新打开技能页（open_main_skills）后按钮等待预算从零开始。"""
+        task = self._awaiting_task()
+        task._skill_refresh_button_waits = task._run_config.skill_refresh_button_wait_max
+        task.on_action_verified(
+            Action(kind="click", tag="open_main_skills", target=(1, 1)),
+            State.SELECT_MAIN_C_SKILLS,
+        )
+        assert task._skill_refresh_button_waits == 0
+
+    def test_no_refresh_when_disabled(self):
+        task = self._awaiting_task()
+        task._run_config.skill_refresh_enabled = False
+        decision = task.decide_action(_refresh_obs(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "skill_refresh"
+
+    def test_no_refresh_when_budget_zero(self):
+        task = self._awaiting_task()
+        task._run_config.skill_refresh_max_per_round = 0
+        decision = task.decide_action(_refresh_obs(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "skill_refresh"
+
+    def test_refresh_verified_then_same_frame_selects(self):
+        """刷新生效后不再固定等待：验证帧已 OCR 出新卡面，直接按优先级选卡。"""
+        task = self._awaiting_task()
+        task.decide_action(_refresh_obs(), make_window_ctx())  # 决策：点刷新
+        task.on_action_verified(
+            Action(kind="click", tag="skill_refresh", target=(1, 1)),
+            State.SELECT_MAIN_C_SKILLS,
+        )
+        assert task._skill_refresh_used_count == 1
+        assert task._awaiting_main_candidates is True
+
+        # 验证帧（runner 验证通过后在同一帧上继续决策）：新卡面里有主C系技能
+        # → 立即按优先级选，无任何额外等待
+        decision = task.decide_action(
+            _skill_options_obs([("天穹支援", 1), ("星辰护盾", 11), ("圣羽加持", 9)]),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "main_skill_priority"
+        assert action.kind == "click"
+
+    def test_refresh_verifies_cards_changed(self):
+        """验证口径：页面仍开着且卡面变化；卡面没变或页面已关都不算生效。"""
+        task = self._awaiting_task()
+        action = Action(kind="click", tag="skill_refresh", target=(472, 1321))
+        before = Observation(
+            frame_id=1,
+            raw_data={
+                "select_skill_button_visible": True,
+                "skill_card_options": [
+                    {"column": i, "name": n, "tier": 9 + i, "known": True, "position": (i, 0)}
+                    for i, n in enumerate(["甲", "乙", "丙"])
+                ],
+            },
+        )
+
+        def after_with(names: list[str], *, page_open: bool) -> Observation:
+            raw = {
+                "skill_card_options": [
+                    {"column": i, "name": n, "tier": 9 + i, "known": True, "position": (i, 0)}
+                    for i, n in enumerate(names)
+                ]
+            }
+            if page_open:
+                raw["select_skill_button_visible"] = True
+            return Observation(frame_id=2, raw_data=raw)
+
+        assert task.verify_action(action, before, after_with(["丁", "戊", "己"], page_open=True))
+        assert not task.verify_action(action, before, after_with(["甲", "乙", "丙"], page_open=True))
+        assert not task.verify_action(action, before, after_with(["丁", "戊", "己"], page_open=False))
+
+    def test_verified_refresh_counts_budget(self):
+        task = self._awaiting_task()
+        task.on_action_verified(
+            Action(kind="click", tag="skill_refresh", target=(1, 1)),
+            State.SELECT_MAIN_C_SKILLS,
+        )
+        assert task._skill_refresh_used_count == 1
+        assert task._skill_refresh_button_waits == 0
+        # 刷新后仍处于等待候选状态：验证帧直接进入选卡决策
+        assert task._awaiting_main_candidates is True
+
+    def test_failed_refresh_marks_used_and_falls_to_selection(self):
+        """刷新点击重试耗尽：机会按已用处理，恢复后直接按优先级选卡。"""
+        task = self._awaiting_task()
+        task.on_action_failed(Action(kind="click", tag="skill_refresh", target=(1, 1)))
+        assert task._skill_refresh_used_count == 1
+        decision = task.decide_action(_refresh_obs(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_skill_priority"
+
+    def test_ready_match_resets_refresh_budget(self):
+        """新一局开始（点准备）：刷新机会恢复一次。"""
+        task = self._awaiting_task()
+        task._skill_refresh_used_count = 1
+        task.on_action_verified(
+            Action(kind="click", tag="ready_match", target=(1, 1)),
+            State.SELECT_OPENING_SKILLS,
+        )
+        assert task._skill_refresh_used_count == 0
+
+    def test_home_reentry_resets_refresh_budget(self):
+        """被踢回首页/结算重开：刷新机会恢复一次。"""
+        task = self._awaiting_task()
+        task._skill_refresh_used_count = 1
+        task._reset_for_home_reentry()
+        assert task._skill_refresh_used_count == 0

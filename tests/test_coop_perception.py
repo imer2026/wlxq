@@ -517,10 +517,13 @@ _FLAG_LOCATOR_FILES = {
     "select_skill_button": "xuan_ze_ji_neng.png",
     "merge_gift_skill_title": "4_xing_e_wai_ji_neng.png",
     "summon_button": "zhao_huan.png",
+    "skill_refresh_button": "shua_xin.png",
 }
 
 
-def _flag_gated_perception(tmp_path, vision) -> CoopPerception:
+def _flag_gated_perception(
+    tmp_path, vision, *, skill_refresh_enabled: bool = False
+) -> CoopPerception:
     from wlxq_bot.assets import TemplatePack
 
     pack_root = tmp_path / "3000x2000"
@@ -540,6 +543,7 @@ def _flag_gated_perception(tmp_path, vision) -> CoopPerception:
         tasks_cfg,
         CoopRole.HELPER,
         "assault",
+        skill_refresh_enabled=skill_refresh_enabled,
     )
 
 
@@ -612,6 +616,46 @@ class TestInterfaceFlagGating:
             perception = _flag_gated_perception(tmp_path, vision)
             perception._detect_interface_flags(_make_window_ctx(), None, state, {}, [])
             assert set(vision.template_calls) == expected, state
+
+    def test_skill_refresh_flag_gated_by_config(self, tmp_path):
+        """刷新按钮标志：默认关闭不匹配；开启后仅局内选技能状态匹配并写出命中。"""
+        from wlxq_bot.models import State
+
+        vision_off = _RecordingVision()
+        perception_off = _flag_gated_perception(
+            tmp_path, vision_off, skill_refresh_enabled=False
+        )
+        raw_off: dict = {}
+        perception_off._detect_interface_flags(
+            _make_window_ctx(), None, State.SELECT_MAIN_C_SKILLS, raw_off, []
+        )
+        assert "shua_xin.png" not in vision_off.template_calls
+        assert "skill_refresh_visible" not in raw_off
+
+        vision_on = _RecordingVision(
+            {"shua_xin.png": MatchResult("shua_xin.png", (472, 1321), 0.99)}
+        )
+        perception_on = _flag_gated_perception(
+            tmp_path, vision_on, skill_refresh_enabled=True
+        )
+        raw_on: dict = {}
+        perception_on._detect_interface_flags(
+            _make_window_ctx(), None, State.SELECT_MAIN_C_SKILLS, raw_on, []
+        )
+        assert "shua_xin.png" in vision_on.template_calls
+        assert raw_on["skill_refresh_visible"] is True
+        assert raw_on["skill_refresh_match"].position == (472, 1321)
+
+        # 开局技能状态即使开启也不识别刷新按钮（刷新只在局内「请选择」页）
+        vision_opening = _RecordingVision()
+        perception_opening = _flag_gated_perception(
+            tmp_path, vision_opening, skill_refresh_enabled=True
+        )
+        raw_opening: dict = {}
+        perception_opening._detect_interface_flags(
+            _make_window_ctx(), None, State.SELECT_OPENING_SKILLS, raw_opening, []
+        )
+        assert "shua_xin.png" not in vision_opening.template_calls
 
     def test_observe_passes_grab_mode_to_flag_detection(self, tmp_path):
         """observe 把 observation_mode 传给标志识别：抢合作模式下准备按钮可命中。"""

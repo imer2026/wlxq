@@ -309,6 +309,19 @@ class RunConfig(BaseModel):
     # 技能卡点击（开局/局内选技能）验证失败的整动作重试上限；重试耗尽后不结束任务
     # （对局仍在自动进行，结算窗口终将出现），改为通知任务放弃本次选择、等待对局推进
     skill_click_max_retries: int = Field(default=3, ge=0, le=20)
+    # 局内技能页「刷新」（2026-09-12 用户确认，宠物/合作共用）：三张卡均非主C系
+    # 技能（优先级档位全部 ≥9）时点一次刷新换卡，之后必选一张。每局最多
+    # max_per_round 次；0 或关闭即禁用该分支。刷新后的「等卡面换新」由动作后
+    # 验证承担（验证帧 OCR 出新卡面即证明换卡完成并已可识别），不再额外固定
+    # 等待（2026-09-12 用户反馈：验证+固定等待+重复 OCR 太慢）。
+    # 开局技能页/天使页/4星赠送页不刷新（按钮仅局内「请选择」页实拍存在）
+    skill_refresh_enabled: bool = True
+    skill_refresh_max_per_round: int = Field(default=1, ge=0, le=10)
+    # 刷新按钮未识别到时的限次等待重试（2026-09-12 实机：点开技能页后的首个
+    # 决策帧按钮可能尚未渲染完，静态同位置 0.99+ 命中）。每次等待 wait_seconds
+    # 后重新识别；连续 wait_max 次仍未命中才放弃刷新、直接选卡。0 = 不等待
+    skill_refresh_button_wait_seconds: float = Field(default=1.0, gt=0.0, le=10.0)
+    skill_refresh_button_wait_max: int = Field(default=3, ge=0, le=10)
     # 等待开局期间连续这么多帧识别到首页标记，才判定本局被取消/被踢回首页
     # （加载画面可能与首页有短暂相似，单帧命中不能直接判定）
     home_return_confirm_frames: int = Field(default=2, ge=1, le=10)

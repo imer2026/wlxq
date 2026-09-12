@@ -79,6 +79,13 @@ _SETTLEMENT_STATES: frozenset[State] = frozenset(
 # 棋盘为空只可能是页面/弹窗/结算过渡遮挡，持续等待比退出安全（2026-08-21）
 _EMPTY_BOARD_RETRY = 10
 _NO_PROGRESS_LIMIT = 8
+# 领地入口确认步骤：连续这么多帧未见目标标识就重点入口按钮（0.3s 轮询
+# 间隔下约 3 秒）；重点次数上限由 mode_select_recognition.entry_max_reclicks 配置
+_ENTRY_RECLICK_MISSES = 10
+# 主C系技能的最高优先级档位（compute_skill_tiers：第 8 档=主C未被显式档覆盖的
+# 技能，主C技能永不落第 11 档）。三张卡最低档 > 该值 = 本组没有任何主C系技能，
+# 是「刷新」分支的触发条件之一
+_MAIN_C_TIER_CEILING = 8
 
 
 class _RecruitStep(Enum):
@@ -126,6 +133,7 @@ class CoopTask(Task):
         pet_difficulty_min_confidence: float = 0.5,
         mode_tab_miss_limit: int = 8,
         entry_wait_timeout_seconds: float = 60.0,
+        entry_max_reclicks: int = 3,
         main_c_profile: MainCProfile | None = None,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
@@ -152,6 +160,11 @@ class CoopTask(Task):
         # 领地入口各等待步骤（领地变返回/弹窗出现/挑战页出现）共用的秒级
         # 上限；超时打 ERROR 保守停止，不盲点不无限重试
         self._entry_wait_timeout_seconds = max(1.0, entry_wait_timeout_seconds)
+        # 领地入口确认步骤的重点预算：连续多帧未见标识时重点入口按钮，
+        # 用尽仍不成功才保守停止（同难度弹窗打开确认的重点模式）
+        self._entry_max_reclicks = max(0, entry_max_reclicks)
+        self._entry_reclicks = 0
+        self._entry_misses = 0
         # 当前入口等待步骤的 deadline 起点；None = 尚未开始计时
         self._entry_wait_started_at: float | None = None
         self._clock = clock
@@ -237,6 +250,11 @@ class CoopTask(Task):
         self._awaiting_main_candidates = False
         self._main_skill_empty_checks = 0
         self._main_page_missing_checks = 0
+        # 局内技能页「刷新」：本局已用次数、按钮未识别到的等待重试计数
+        # （2026-09-12 用户确认：每局一次，刷新后必选一张；「等卡面换新」由
+        # 动作后验证承担——验证帧 OCR 出新卡面即已可识别，不再额外固定等待）
+        self._skill_refresh_used_count = 0
+        self._skill_refresh_button_waits = 0
         self._main_skill_selections = 0
         # 本局局内技能选择总次数（回补重置不清零；达到档案上限后停止选技能）
         self._main_skill_selections_total = 0
@@ -610,11 +628,17 @@ class CoopTask(Task):
     def _action_confirm_territory_open(
         self,
         observation: Observation,
+        window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
         """正向确认领地页真的打开：导航文字从「领地」变成「返回」。
 
-        页面打开快慢不定：轮询复识，超过入口等待上限仍未变化说明点击未
-        生效或页面异常，保守停止——绝不带着「没打开」的假设点进入按钮。
+        页面打开快慢不定、首次点击可能被吞（实机 2026-09-12：点击后 60 秒
+        导航一直读「领地」）：导航仍读「领地」=页面确认未打开，连续多帧
+        未变化时**重点领地按钮**（最多 entry_max_reclicks 次，每次重点重新
+        起算等待上限）——再点一次是安全的，领地没开就不会误点「返回」退出；
+        导航读不到文字时不重点（可能已在领地页，重点会误点「返回」），只
+        等待。重点用尽仍打不开则保守停止——绝不带着「没打开」的假设点
+        进入按钮。
         """
         text = str(observation.raw_data.get("territory_nav_text") or "")
         if "返回" in text:
@@ -633,6 +657,26 @@ class CoopTask(Task):
                 ),
                 State.FIND_COOP,
             )
+        self._entry_misses += 1
+        if "领地" in text and self._entry_misses >= _ENTRY_RECLICK_MISSES:
+            if self._entry_reclicks >= self._entry_max_reclicks:
+                logger.error(
+                    "frame=%d 重点领地 %d 次后导航仍未变成「返回」，保守停止",
+                    observation.frame_id,
+                    self._entry_reclicks,
+                )
+                return None
+            self._entry_reclicks += 1
+            self._entry_misses = 0
+            self._start_entry_wait()
+            return self._hotspot_click(
+                "territory_nav",
+                "open_territory",
+                f"领地页未打开，重点领地按钮"
+                f"（{self._entry_reclicks}/{self._entry_max_reclicks}）",
+                State.FIND_COOP,
+                window_ctx,
+            )
         if self._entry_deadline_exceeded(observation, "点领地后导航未变成「返回」"):
             return None
         return self._entry_wait_action(
@@ -647,11 +691,22 @@ class CoopTask(Task):
         """正向确认模式选择弹窗打开：标题区域 OCR 读到「模式选择」。
 
         点击进入按钮后弹窗有延迟；超过入口等待上限仍未出现说明点击未生效
-        或页面异常，保守停止。
+        或页面异常，保守停止。标题偶发漏读时，本模式卡名文字可读同样证明
+        弹窗已打开（卡名与标题同帧识别），直接放行选卡。本步骤不做盲点
+        重点：进入按钮坐标落在弹窗卡面附近，弹窗已开时重点可能误选另一
+        模式卡片。
         """
-        if observation.flag("mode_select_visible"):
+        card_text = self._mode.entry.mode_card_text if self._mode else None
+        card_rows = observation.raw_data.get("mode_card_rows") or []
+        card_hit = bool(card_text) and any(
+            card_text in row.text for row in card_rows
+        )
+        if observation.flag("mode_select_visible") or card_hit:
             logger.info(
-                "frame=%d 模式选择弹窗确认打开", observation.frame_id
+                "frame=%d 模式选择弹窗确认打开（标题命中=%s 卡名兜底=%s）",
+                observation.frame_id,
+                observation.flag("mode_select_visible"),
+                card_hit,
             )
             self._recruit_step = _RecruitStep.SELECT_MODE_CARD
             self._start_entry_wait()
@@ -661,7 +716,7 @@ class CoopTask(Task):
                     duration=0.0,
                     verification="immediate",
                     tag="mode_select_open_confirmed",
-                    reason="模式选择弹窗已确认打开（标题 OCR 命中）",
+                    reason="模式选择弹窗已确认打开（标题命中或卡名可读）",
                 ),
                 State.FIND_COOP,
             )
@@ -749,6 +804,30 @@ class CoopTask(Task):
                 ),
                 State.FIND_COOP,
             )
+        self._entry_misses += 1
+        # 弹窗标题仍可见=选卡点击未生效（弹窗没关、页面没切）：连续多帧
+        # 如此就回选卡步骤重读卡名并重点。弹窗已关闭时不回退——此时可能
+        # 已在挑战页（按钮文字漏读），重点选卡会点到挑战页空白处
+        if (
+            observation.flag("mode_select_visible")
+            and self._entry_misses >= _ENTRY_RECLICK_MISSES
+        ):
+            if self._entry_reclicks >= self._entry_max_reclicks:
+                logger.error(
+                    "frame=%d 重点选卡 %d 次后仍未读到「%s」，保守停止",
+                    observation.frame_id,
+                    self._entry_reclicks,
+                    challenge_text or "挑战文字",
+                )
+                return None
+            self._entry_reclicks += 1
+            self._entry_misses = 0
+            self._recruit_step = _RecruitStep.SELECT_MODE_CARD
+            self._start_entry_wait()
+            return self._entry_wait_action(
+                "challenge_page_pending",
+                "选卡未生效（弹窗仍打开），回到选卡步骤重点",
+            )
         if self._entry_deadline_exceeded(
             observation, f"点击模式卡后未读到「{challenge_text or '挑战文字'}」"
         ):
@@ -771,6 +850,8 @@ class CoopTask(Task):
             if observation.flag("home_page_visible"):
                 logger.info("退队后识别到游戏首页，从领地入口进入招募")
                 self._recruit_step = _RecruitStep.OPEN_TERRITORY
+                self._entry_reclicks = 0
+                self._entry_misses = 0
                 self._start_entry_wait()
             else:
                 logger.info("退队后未识别到首页标志，按合作页面处理")
@@ -788,7 +869,7 @@ class CoopTask(Task):
         if self._recruit_step == _RecruitStep.OPEN_TERRITORY:
             return self._action_open_territory(observation, window_ctx)
         if self._recruit_step == _RecruitStep.CONFIRM_TERRITORY_OPEN:
-            return self._action_confirm_territory_open(observation)
+            return self._action_confirm_territory_open(observation, window_ctx)
         if self._recruit_step == _RecruitStep.OPEN_MODE_SELECT:
             return self._hotspot_click(
                 "open_mode_select",
@@ -1572,6 +1653,14 @@ class CoopTask(Task):
             self._schedule_next_skill(now)
 
         if self._awaiting_main_candidates:
+            # 刷新分支（优先于按档位选卡）：本组没有任何主C系技能时点刷新换卡；
+            # 机会用完、OCR 未读出卡名或按钮在等待预算内仍未出现时返回 None，
+            # 直接落入下方选卡流程——刷新机会已用尽后必选一张（2026-09-12 用户确认）。
+            # 刷新点击生效后的「等卡面换新」由验证帧承担：验证通过即新卡面已
+            # OCR 可读，本帧（验证帧）的 skill_card_options 直接供下方按档位选卡
+            refresh_action = self._skill_refresh_action(observation)
+            if refresh_action is not None:
+                return refresh_action, State.SELECT_MAIN_C_SKILLS
             priority_action = self._skill_priority_action(
                 observation, "main_skill_priority", State.SELECT_MAIN_C_SKILLS
             )
@@ -1780,6 +1869,62 @@ class CoopTask(Task):
                 reason=f"按优先级第 {best_tier} 档选卡：{chosen['name']}（同档候选：{names}）",
             ),
             to_state,
+        )
+
+    def _skill_refresh_action(self, observation: Observation) -> Action | None:
+        """局内技能页「刷新」分支：三张卡均无主C系技能时点一次刷新换卡。
+
+        触发条件（全部满足）：功能开启、本局刷新机会未用完、标题 OCR 读出
+        全部卡名且最低档位 > 主C档上限（无任何主C系技能）。按钮命中即返回
+        点击动作；按钮未命中返回限次等待动作（页面过渡帧上按钮可能尚未渲染
+        完），等待预算耗尽返回 None 交调用方落入现有选卡流程。OCR 没读出
+        卡名时不等待不刷新（识别不可靠时不浪费每局唯一的机会）。验证与
+        后续等待见 verify_action / on_action_verified。
+        """
+        cfg = self._run_config
+        if not cfg.skill_refresh_enabled or cfg.skill_refresh_max_per_round <= 0:
+            return None
+        if self._skill_refresh_used_count >= cfg.skill_refresh_max_per_round:
+            return None
+        options = observation.raw_data.get("skill_card_options")
+        if not options:
+            return None
+        best_tier = min(int(option["tier"]) for option in options)
+        if best_tier <= _MAIN_C_TIER_CEILING:
+            return None
+        match = self._flag_match(observation, "skill_refresh_match")
+        if match is None:
+            # 页面刚弹开后的首个决策帧按钮可能尚未渲染完（2026-09-12 实机：
+            # 两次 miss 都在打开页面后的第一帧，静态截图同位置 0.99+ 命中）：
+            # 限次等待重试，预算内不选卡；耗尽才按「按钮不可用」放弃刷新
+            if self._skill_refresh_button_waits < cfg.skill_refresh_button_wait_max:
+                return Action(
+                    kind="wait",
+                    duration=cfg.skill_refresh_button_wait_seconds,
+                    verification="immediate",
+                    tag="skill_refresh_wait_button",
+                    reason=(
+                        "刷新按钮未识别到（可能为页面过渡帧），"
+                        f"等待重试（{self._skill_refresh_button_waits + 1}"
+                        f"/{cfg.skill_refresh_button_wait_max}）"
+                    ),
+                )
+            logger.warning(
+                "刷新按钮连续 %d 次等待后仍未识别到，本局机会保留、直接选卡",
+                cfg.skill_refresh_button_wait_max,
+            )
+            return None
+        names = "、".join(str(option["name"]) for option in options)
+        return Action(
+            kind="click",
+            target=match.position,
+            duration=0.08,
+            verification="next_frame",
+            tag="skill_refresh",
+            reason=(
+                f"三张卡均无主C系技能（最低档 {best_tier}：{names}），"
+                f"点刷新换卡（本局第 {self._skill_refresh_used_count + 1} 次）"
+            ),
         )
 
     def _skill_fallback_action(
@@ -2331,6 +2476,18 @@ class CoopTask(Task):
         if action.tag == "leave_team":
             # 以【退队】按钮消失确认已退出组队大厅
             return not after.flag("leave_team_visible")
+        if action.tag == "skill_refresh":
+            # 刷新生效=页面仍开着且卡面变化（换出同三张的概率极低；届时重试
+            # 耗尽走 on_action_failed 按已用处理，直接选卡，不会死循环）。
+            # 验证帧走完整识别（本 tag 不在轻量集合里），skill_card_options
+            # 可用于比对，同开局页比对口径
+            if not after.flag("select_skill_button_visible"):
+                return False
+            before_cmp = _comparable_skill_options(before.raw_data.get("skill_card_options"))
+            after_cmp = _comparable_skill_options(after.raw_data.get("skill_card_options"))
+            return (
+                before_cmp is not None and after_cmp is not None and before_cmp != after_cmp
+            )
         if action.tag in {
             "opening_skill_priority",
             "main_skill_priority",
@@ -2393,10 +2550,24 @@ class CoopTask(Task):
 
     def on_action_verified(self, action: Action, to_state: State) -> None:
         tag = action.tag
-        if tag == "open_territory":
+        if tag == "skill_refresh_wait_button":
+            # 刷新按钮等待重试计数；页面过渡帧过去后下一帧通常会命中
+            self._skill_refresh_button_waits += 1
+        elif tag == "skill_refresh":
+            # 刷新生效：本局机会减一。验证帧（卡面已变化且 OCR 可读）会直接
+            # 进入本帧决策，按优先级选卡——不再额外固定等待
+            self._skill_refresh_used_count += 1
+            self._skill_refresh_button_waits = 0
+            logger.info(
+                "技能页刷新已生效，直接按验证帧识别结果选卡（本局已用 %d/%d 次）",
+                self._skill_refresh_used_count,
+                self._run_config.skill_refresh_max_per_round,
+            )
+        elif tag == "open_territory":
             # 领地点击已发送：进入打开确认（轮询导航文字变「返回」），
-            # deadline 从点击时刻重新起算
+            # deadline 从点击时刻重新起算；重点计数保留（同一入口链共用预算）
             self._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
+            self._entry_misses = 0
             self._start_entry_wait()
         elif tag == "open_mode_select":
             # 进入按钮点击已发送：确认弹窗打开后再选卡
@@ -2495,6 +2666,8 @@ class CoopTask(Task):
             self._home_return_count = 0
             self._main_skill_selections = 0
             self._main_skill_selections_total = 0
+            self._skill_refresh_used_count = 0
+            self._skill_refresh_button_waits = 0
             self._topup_active = False
             self._topup_done = False
             self._summon_retry_at = None
@@ -2564,6 +2737,8 @@ class CoopTask(Task):
             self._awaiting_main_candidates = True
             self._main_skill_empty_checks = 0
             self._main_page_missing_checks = 0
+            # 新一次打开技能页：按钮等待重试预算从零开始
+            self._skill_refresh_button_waits = 0
         elif tag == "main_skill_empty_check":
             self._main_skill_empty_checks += 1
         elif tag == "main_skill_page_missing_check":
@@ -2571,6 +2746,7 @@ class CoopTask(Task):
         elif tag in {"main_skill_candidate", "main_skill_fallback", "main_skill_priority"}:
             self._awaiting_main_candidates = False
             self._main_page_missing_checks = 0
+            self._skill_refresh_button_waits = 0
             self._main_skill_selections += 1
             self._main_skill_selections_total += 1
             self._schedule_next_skill(self._clock())
@@ -2592,7 +2768,16 @@ class CoopTask(Task):
     def on_action_failed(self, action: Action) -> None:
         """动作重试耗尽、Runner 放弃该动作时调整内部进度，均不结束任务。"""
         tag = action.tag
-        if tag in {"main_skill_candidate", "main_skill_fallback", "main_skill_priority"}:
+        if tag == "skill_refresh":
+            # 刷新点击未生效（或换出同三张）：本局机会按已用处理，页面仍开时
+            # 下一帧直接按优先级选卡——刷新不可用后必须选一张
+            self._skill_refresh_used_count += 1
+            logger.warning(
+                "技能页刷新未生效，本局不再刷新（已用 %d/%d），直接选卡",
+                self._skill_refresh_used_count,
+                self._run_config.skill_refresh_max_per_round,
+            )
+        elif tag in {"main_skill_candidate", "main_skill_fallback", "main_skill_priority"}:
             # 本次局内选技能未生效：停止等待图标，按随机间隔稍后重新打开技能页
             self._awaiting_main_candidates = False
             self._main_skill_empty_checks = 0
@@ -2642,6 +2827,8 @@ class CoopTask(Task):
         难度勾选不重复（_difficulty_done_session 保持已置位）。
         """
         self._recruit_step = _RecruitStep.OPEN_TERRITORY
+        self._entry_reclicks = 0
+        self._entry_misses = 0
         self._start_entry_wait()
         self._summon_count = 0
         self._batch_summon_remaining = 0
@@ -2670,6 +2857,8 @@ class CoopTask(Task):
         self._main_page_missing_checks = 0
         self._main_skill_selections = 0
         self._main_skill_selections_total = 0
+        self._skill_refresh_used_count = 0
+        self._skill_refresh_button_waits = 0
         self._topup_active = False
         self._topup_done = False
 

@@ -412,6 +412,7 @@ class TestModeProfile:
         assert rec["title_text"] == "模式选择"
         assert rec["min_confidence"] == 0.5
         assert rec["entry_wait_timeout_seconds"] == 60
+        assert rec["entry_max_reclicks"] == 3
         for roi_name in (
             "territory_nav_area",
             "coop_mode_label_area",

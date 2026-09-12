@@ -82,6 +82,9 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
     # 进入游戏后的两种开局标识：先「选择技能」再「召唤」，二者互斥，
     # 出现其一即确认对局界面已稳定及其开局类型（见 CoopTask._action_opening_skills）。
     ("select_skill_button", "select_skill_button_visible", "select_skill_button_match"),
+    # 局内技能页「刷新」按钮：三张卡均无主C系技能时点一次换卡（每局一次，
+    # 见 CoopTask 刷新分支）；仅 SELECT_MAIN_C_SKILLS 状态识别，开局/赠送页不识别
+    ("skill_refresh_button", "skill_refresh_visible", "skill_refresh_match"),
     # 【请选择1个额外技能】提示条：合成4星赠送技能页的主标识（该页上【选技能】图
     # 不稳定，实机 2026-08-21）；仅 BUILD 状态识别
     ("merge_gift_skill_title", "merge_gift_skill_page_visible", "merge_gift_skill_title_match"),
@@ -111,7 +114,13 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
         }
     ),
     State.SELECT_MAIN_C_SKILLS: frozenset(
-        {"select_skill_button", "tan_chuang", "return_button", "zeng_song_ji_neng"}
+        {
+            "select_skill_button",
+            "skill_refresh_button",
+            "tan_chuang",
+            "return_button",
+            "zeng_song_ji_neng",
+        }
     ),
     State.HANDLE_RESULT: frozenset({"return_button"}),
     State.CLAIM_REWARD: frozenset({"return_button"}),
@@ -157,6 +166,7 @@ class CoopPerception:
         mode_card_roi: str | None = None,
         challenge_roi: str | None = None,
         mode_select_min_confidence: float = 0.5,
+        skill_refresh_enabled: bool = False,
     ) -> None:
         self._vision = vision
         self._pack = template_pack
@@ -222,6 +232,9 @@ class CoopPerception:
         self._mode_card_roi = mode_card_roi
         self._challenge_roi = challenge_roi
         self._mode_select_min_confidence = mode_select_min_confidence
+        # 局内技能页「刷新」按钮识别开关（RunConfig.skill_refresh_enabled）：
+        # 关闭时跳过模板匹配，任务层也不会收到该标志
+        self._skill_refresh_enabled = skill_refresh_enabled
 
     @property
     def available_heroes(self) -> list[str]:
@@ -474,6 +487,8 @@ class CoopPerception:
         wanted = _INTERFACE_FLAGS_BY_STATE.get(hint_state, frozenset())
         if observation_mode == "coop_grab":
             wanted = wanted | {"ready_button"}
+        if not self._skill_refresh_enabled:
+            wanted = wanted - {"skill_refresh_button"}
 
         # 当帧需要的标志并行匹配（模板匹配释放全局锁，总耗时≈最慢一个）
         # canonical locator 名先经别名重映射，模式专属 locator 不存在时该标志

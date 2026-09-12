@@ -105,6 +105,8 @@ _SKILL_CLICK_TAGS = frozenset(
         "merge_gift_skill_candidate",
         "merge_gift_skill_fallback",
         "merge_gift_skill_priority",
+        # 技能页「刷新」：点击未生效同样可恢复（重试耗尽按已用处理，直接选卡）
+        "skill_refresh",
     }
 )
 
@@ -318,6 +320,7 @@ class Runner:
             mode_select_min_confidence=float(
                 self.tasks_config.mode_select_recognition.get("min_confidence", 0.5)
             ),
+            skill_refresh_enabled=run_config.skill_refresh_enabled,
         )
 
         required_heroes = {mc, *self.default_config.hero_classifier.lineup_others}
@@ -380,6 +383,9 @@ class Runner:
                 self.tasks_config.mode_select_recognition.get(
                     "entry_wait_timeout_seconds", 60.0
                 )
+            ),
+            entry_max_reclicks=int(
+                self.tasks_config.mode_select_recognition.get("entry_max_reclicks", 3)
             ),
         )
         task.ctx.current_state = initial_state

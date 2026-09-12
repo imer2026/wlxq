@@ -252,6 +252,17 @@ locators:
     roi: zeng_song_area
     action_point:
       source: match_center
+  # 局内技能页「刷新」按钮：三张卡均无主C系技能（优先级档位全部 ≥9）时点一次
+  # 换卡（每局最多 RunConfig.skill_refresh_max_per_round 次）。仅
+  # SELECT_MAIN_C_SKILLS 状态识别；开局技能页/天使页/4星赠送页不识别、不刷新
+  # （2026-09-12 用户确认：刷新只在局内「请选择」页，一局一次，点击直接生效无弹窗）
+  skill_refresh_button:
+    strategy: template
+    template: buttons/shua_xin.png
+    threshold: 0.82
+    roi: skill_refresh_button_area
+    action_point:
+      source: match_center
   # 【合作模式】标题图：难度弹窗打开时的稳定标识。2026-08-21 更换为重新采集的
   # 标题图（buttons/coop_difficulty/）；旧图（2026-08-15）实为列表行内
   # 「合作模式-彩虹N」标签，只存在于彩虹区且随列表滚动，2026-08-19 面板每次
@@ -384,6 +395,15 @@ rois:
     y_ratio: 0.2786
     width_ratio: 0.9621
     height_ratio: 0.3587
+  # 局内技能页「刷新」按钮区，标定自 927×1727 客户区实机截图（2026-09-12，
+  # wlxq-bot pick --rect）。覆盖「当局剩余观看次数」标注与按钮整块并留边距；
+  # 按钮实测范围 x [0.393,0.626] y [0.743,0.787]，ROI 内模板匹配 0.9988（无缩放）
+  skill_refresh_button_area:
+    relative_to: client
+    x_ratio: 0.2783
+    y_ratio: 0.7018
+    width_ratio: 0.4498
+    height_ratio: 0.1384
   # 合作难度弹窗的可滚动列表区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
   coop_difficulty_list:
     relative_to: client
@@ -577,7 +597,9 @@ mode_tab_recognition:
 # 保卫，2026-09-09 按用户约定），按子串匹配并点击文字框中心（开环）。
 # min_confidence 是 OCR 文字置信度（离线验证 0.665/0.666，单帧），语义与
 # 模板匹配置信度不同，不得混用；entry_wait_timeout_seconds 是入口链每个
-# 等待步骤（领地变返回/弹窗出现/挑战页出现）的秒级上限，超时保守停止
+# 等待步骤（领地变返回/弹窗出现/挑战页出现）的秒级上限；entry_max_reclicks
+# 是「点击未生效」时的重点预算（领地未打开重点领地、弹窗仍开重点选卡），
+# 每次重点重新起算等待上限，用尽仍不成功才保守停止
 mode_select_recognition:
   title_roi: mode_select_title_area
   title_text: 模式选择
@@ -587,6 +609,7 @@ mode_select_recognition:
   pet_text: 保卫
   min_confidence: 0.5
   entry_wait_timeout_seconds: 60
+  entry_max_reclicks: 3
 
 # 棋盘格子坐标模型
 # 由 wlxq-bot pick --rect 量测排1/排2 格子后计算得出（见 docs/game-rules.md）
