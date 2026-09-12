@@ -203,6 +203,18 @@ run:
   merge_gift_poll_interval_seconds: 0.5
   merge_gift_confirm_hits: 2
   merge_gift_fail_misses: 12
+  # 英雄变身（2026-09-13 用户策略，设计见 docs/superpowers/specs/2026-09-13-hero-transform-design.md）：
+  # 3 星非主 C 且无达标主 C 时点击英雄 → 轮询头顶变身按钮 → 点击 → 验证
+  # 类型必变星级不变；每局 transform_max_per_round 次、可对同一位置连用。
+  # 按钮约 1 秒内弹出、无其他点击不消失、点按钮后先消失再变身（实机确认）。
+  transform_enabled: true
+  transform_max_per_round: 2
+  transform_min_star_level: 3
+  transform_button_poll_interval_seconds: 0.3
+  transform_button_appear_timeout_seconds: 1.5
+  transform_button_reclick_max: 2
+  transform_settle_seconds: 4.0
+  transform_verify_attempts: 2
   # 窗口非前台/最小化时的最长挂起等待（秒）：期间任务不发送任何输入（点击会落到
   # 当前前台窗口），对局自动进行，切回窗口后从当前进度继续；超过该时长才保守停止。
   # 想挂机离开更久（吃饭、回消息）可调大

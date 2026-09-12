@@ -512,3 +512,36 @@ class TestLoggingConfig:
         assert cfg.enabled is True
         assert cfg.file_level == "DEBUG"
         assert cfg.retention_days == 7
+
+
+class TestTransformConfig:
+    """英雄变身运行参数（设计文档 2026-09-13-hero-transform §4.4）。"""
+
+    def test_transform_defaults(self) -> None:
+        run = RunConfig()
+        assert run.transform_enabled is True
+        assert run.transform_max_per_round == 2
+        assert run.transform_min_star_level == 3
+        assert run.transform_button_poll_interval_seconds == 0.3
+        assert run.transform_button_appear_timeout_seconds == 1.5
+        assert run.transform_button_reclick_max == 2
+        assert run.transform_settle_seconds == 4.0
+        assert run.transform_verify_attempts == 2
+
+    def test_transform_bounds_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="transform_max_per_round"):
+            RunConfig(transform_max_per_round=-1)
+        with pytest.raises(ValidationError, match="transform_min_star_level"):
+            RunConfig(transform_min_star_level=0)
+        with pytest.raises(ValidationError, match="transform_button_appear_timeout_seconds"):
+            RunConfig(transform_button_appear_timeout_seconds=0.0)
+
+    def test_repo_default_yaml_transform_section(self) -> None:
+        """仓库 default.yaml 显式定义变身参数且与模型默认一致。"""
+        from pathlib import Path
+
+        from wlxq_bot.config import load_default_config
+
+        cfg = load_default_config(Path("configs/default.yaml"))
+        assert cfg.run.transform_enabled is True
+        assert cfg.run.transform_settle_seconds == 4.0

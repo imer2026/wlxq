@@ -317,6 +317,22 @@ class RunConfig(BaseModel):
     # 开局技能页/天使页/4星赠送页不刷新（按钮仅局内「请选择」页实拍存在）
     skill_refresh_enabled: bool = True
     skill_refresh_max_per_round: int = Field(default=1, ge=0, le=10)
+    # ---- 英雄变身（2026-09-13 用户策略，设计文档 docs/superpowers/specs/2026-09-13-hero-transform-design.md）----
+    # 3 星非主 C 且无达标主 C 时变身碰主 C（类型必变、星级不变、每局 2 次、
+    # 可对同一位置连用）。按钮点击确认消失后才扣次数；失败路径一律保守放弃。
+    transform_enabled: bool = True
+    transform_max_per_round: int = Field(default=2, ge=0, le=10)
+    # 触发变身的最低星级：仅该星级及以上的非主 C 英雄触发（用户定案仅 3 星）
+    transform_min_star_level: int = Field(default=3, ge=1, le=4)
+    # 点英雄后按钮轮询：实测约 1 秒内弹出，轮询不发送输入
+    transform_button_poll_interval_seconds: float = Field(default=0.3, gt=0.0, le=5.0)
+    transform_button_appear_timeout_seconds: float = Field(default=1.5, gt=0.0, le=10.0)
+    # 重点击预算：按钮未弹出时重点击英雄 / 按钮未消失时重点按钮（共用）
+    transform_button_reclick_max: int = Field(default=2, ge=0, le=10)
+    # 点击按钮确认消失后的变身动画稳定等待（实测约 4 秒）
+    transform_settle_seconds: float = Field(default=4.0, gt=0.0, le=30.0)
+    # 动作后验证轮数：棋盘重识别确认「类型改变且星级不变」，每轮前再等 settle
+    transform_verify_attempts: int = Field(default=2, ge=1, le=10)
     # 刷新按钮未识别到时的限次等待重试（2026-09-12 实机：点开技能页后的首个
     # 决策帧按钮可能尚未渲染完，静态同位置 0.99+ 命中）。每次等待 wait_seconds
     # 后重新识别；连续 wait_max 次仍未命中才放弃刷新、直接选卡。0 = 不等待
