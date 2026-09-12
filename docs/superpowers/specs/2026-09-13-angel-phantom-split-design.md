@@ -53,6 +53,8 @@
 
 **决策规则**（对 train/validation/test 三个 split 的 `angel/star1~star3` 逐张判定；star4 不动）：
 
+> 迁移是**原地移动**：在既有 labeled 树内把 `labeled/angel/starN/` 的幻样本移到同 split 的 `labeled/angel_phantom/starN/`，不新建 rounds 或局的目录；train/validation/test 的局级隔离与文件名（含局号前缀）保持不变。训练仍一次覆盖全部累积标注（train 9,399 张 / 8 局 + validation 918 张 / 1 局，2026-09-13 核实与 v4 metadata 训练局一一对应；test 470 张 / 2 局仅用于评估）。
+
 | purple_frac | 动作 |
 |---|---|
 | ≥ 0.50 | 移入 `angel_phantom/starN` |
