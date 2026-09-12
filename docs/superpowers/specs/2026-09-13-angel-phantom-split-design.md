@@ -111,9 +111,9 @@ hero_classifier:
 ### 4.5 策略层（strategy.py / tasks/coop.py）
 
 - `CultivationStrategy.select_merge`：候选池内显式排序**非通配低星对 → 通配低星对**（不再隐式依赖候选构造顺序）；3 星规避逻辑原样覆盖通配对（棋盘有空位时召唤避开、占满才被迫合、随后走既有赠送技能页确认流程）——事实 5 自然满足。
-- `CultivationStrategy.select_merge_batch`：**排除 `is_wildcard` 对**。批次只做无争议合并；通配对的选择（与谁合）是策略决策，留给单动作路径。与现有流程（批次优先、批次为空走单动作）组合后自然实现事实 4：先批次合完同类项 → 批次为空 → 单动作才轮到幻天使对。
+- `CultivationStrategy.select_merge_batch`：**通配对纳入批次**（用户定案 2026-09-13），与同类项对一起排批；既有过滤对通配对照常生效——绝不动主 C 对、只排 1/2 星对（3 星规避，事实 5）、跳过失败记忆、位置互不相交。候选顺序（同类项在前、通配在后）在批次内保持，一批里先把同类项合完、幻天使对随后（事实 4）；单动作路径继续兜底批次不接的场景（3 星对棋盘占满、主 C 对最后手段等）。
 - `tasks/coop.py` 两处调用传入配置通配集合：培养阶段 `find_merge_candidates(self.ctx.main_c)`（约 L2214）与金币等待合成（约 L2277）改为 `find_merge_candidates(self.ctx.main_c, wildcard_heroes=frozenset(self._run_config.wildcard_merge_heroes))`。
-- 日志约定（docs/logging.md）：通配对被选中合成、被 3 星规避或被批次排除时打 INFO（含幻天使星级与搭档）；候选生成统计打 DEBUG。棋盘识别日志自动带出 `angel_phantom` 类名，无需额外处理。
+- 日志约定（docs/logging.md）：通配对被选中合成（单动作或批次）或被 3 星规避时打 INFO（含幻天使星级与搭档）；候选生成统计打 DEBUG。棋盘识别日志自动带出 `angel_phantom` 类名，无需额外处理。
 - 合并产物随机（事实 3）无需专门处理：既有动作后重识别流程天然覆盖。产物若是阵容外英雄，分类器无对应类 → 低置信拒绝 → 该格按 unknown 保守处理（棋盘占用统计不受影响，该英雄不参与后续配对；记入 §7 TODO 观察）。
 
 ### 4.6 错误处理与保守行为
@@ -128,7 +128,7 @@ hero_classifier:
 1. **单元（纯决策）**：
    - `find_merge_candidates`：同类项优先于通配对；通配+任意同星；通配+通配；每个英雄单次使用；星级不匹配不配对；通配+主 C → `is_main_c=True`；`wildcard_heroes` 默认空集时与现状逐例一致（回归）。
    - `select_merge`：同类项与通配对并存时选同类项；仅剩通配对时选通配；3 星通配对在棋盘未满时召唤避开（与同类项 3 星对同待遇）。
-   - `select_merge_batch`：通配对被排除。
+   - `select_merge_batch`：通配对纳入批次；主 C 对、3 星对、失败记忆、位置相交的既有过滤对通配对同样生效；批次内同类项对排在通配对前。
    - 配置：`lineup_others` 含 angel_phantom 且档案齐全时加载通过；`wildcard_merge_heroes` 非法标识报错。
 2. **数据/模型离线验证**：dry-run 分布报告人工过目后迁移；训练后 `evaluate --split test` 按验收标准出报告。
 3. **回归**：`python -m pytest` 全绿；既有 coop 任务用例（fake 识别喂 `angel`）不受影响。
