@@ -883,9 +883,15 @@ from typing import Any, Literal
 在 `def` 行与第一个 `if` 之间插入：
 
 ```python
-        if self._transform_stage in ("poll", "confirm"):
-            # 变身按钮轮询阶段：请求 transform_button 专项观察模式
-            return "transform_button"
+        if self._transform_stage is not None:
+            # 变身阶段机接管观察模式（设计 §4.2）：poll/confirm 用按钮专项
+            # 模式；verify 恢复默认（无专项模式）。整阶段机拦截而不是只拦
+            # poll/confirm——否则 verify 阶段落入下方招募步骤分支（如测试
+            # 夹具停在 OPEN_TERRITORY 时返回 territory_nav，2026-09-13 执行
+            # 反馈修正）
+            if self._transform_stage in ("poll", "confirm"):
+                return "transform_button"
+            return None
 ```
 
 - [ ] **Step 8: 插入点 5——阶段机入口与触发检查（_action_build_main_c 两处）**
