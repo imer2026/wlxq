@@ -78,6 +78,7 @@
 ### 4.2 模型层：重训与部署
 
 - 训练：`wlxq-bot hero-classifier train datasets/hero_classifier/assault/3000x2000/helper -o outputs/hero_classifier/assault-helper-v5`（默认 epochs 20 / batch 64 / input 96 / 预训练权重；本机 CPU，后台执行）。
+- **无需重走 seed→主动学习采集循环**（2026-09-13 核实）：现役模型的多次训练（seed 2局 → v2/v3/v4 均 8 局）每次都从 torchvision ImageNet 权重从头训练，循环的价值全部沉淀在 `labeled/` 累积标注里；v5 一次性在全量累积标注上重训即等价于「循环走完后的最终重训」。后续新局照旧走 collect → suggest-labels → 人工确认闭环，v5 届时以 `angel_phantom` 类别给预分类建议。
 - 新类别 `angel_phantom_star1~3` 由目录自动生成；trainer 采样权重、suggest-labels 主动学习闭环对新类别自动生效，trainer 零改动。
 - 评估：`wlxq-bot hero-classifier evaluate … --model <v5> --split test`，验收标准（对比 `outputs/hero_classifier/evaluation` 既有报告）：
   1. 混淆矩阵中 `angel_*` 与 `angel_phantom_*` 互混样本 ≤ 3 张（test star3 约 62 张幻样本），且不集中在同一星级；
