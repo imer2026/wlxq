@@ -965,6 +965,7 @@ class TestOtherStates:
                     "mode_card_selected",
                     "challenge_page_confirmed",
                 ],
+                strict=False,
             )
         ) + [
             (Observation(frame_id=7), "open_challenge_chat"),
@@ -3310,7 +3311,6 @@ class TestTerritoryEntry:
         task = make_task()
         task.ctx.current_state = State.FIND_COOP
         task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
-        unreadable = Observation(frame_id=1)
         for frame_id in range(1, _ENTRY_RECLICK_MISSES + 5):
             decision = task.decide_action(
                 Observation(frame_id=frame_id), make_window_ctx()
@@ -3762,7 +3762,7 @@ class TestSkillRefresh:
         """按钮未识别到：先限次等待重试（页面过渡帧），预算耗尽才直接选卡。"""
         task = self._awaiting_task()
         # 前几次 miss → 等待重试，不浪费刷新机会也不盲选
-        for i in range(task._run_config.skill_refresh_button_wait_max):
+        for _i in range(task._run_config.skill_refresh_button_wait_max):
             decision = task.decide_action(
                 _refresh_obs(skill_refresh_match=None), make_window_ctx()
             )

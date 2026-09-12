@@ -391,7 +391,6 @@ def test_normal_run_requires_skill_icon_templates() -> None:
 
 
 def test_normal_run_requires_skill_template_files(tmp_path) -> None:
-    from wlxq_bot.assets import TemplatePack
     from wlxq_bot.config import MainCProfile
 
     pack_root = tmp_path / "profile"
@@ -461,7 +460,6 @@ def test_load_hero_classifier_reports_missing_model(tmp_path) -> None:
 
 
 def test_normal_run_requires_requested_difficulty_templates(tmp_path) -> None:
-    from wlxq_bot.assets import TemplatePack
 
     pack_root = tmp_path / "profile"
     difficulty_dir = pack_root / "buttons" / "coop_difficulty"
@@ -477,7 +475,6 @@ def test_normal_run_requires_requested_difficulty_templates(tmp_path) -> None:
 
 
 def test_skip_difficulty_selection_does_not_require_difficulty_templates(tmp_path) -> None:
-    from wlxq_bot.assets import TemplatePack
 
     pack_root = tmp_path / "profile"
     pack_root.mkdir(parents=True)
@@ -488,7 +485,6 @@ def test_skip_difficulty_selection_does_not_require_difficulty_templates(tmp_pat
 
 
 def test_normal_run_requires_home_page_template(tmp_path) -> None:
-    from wlxq_bot.assets import TemplatePack
 
     pack_root = tmp_path / "profile"
     buttons_dir = pack_root / "buttons"
@@ -516,7 +512,6 @@ def test_normal_run_requires_home_page_template(tmp_path) -> None:
 
 
 def test_normal_run_requires_calibrated_home_page_threshold(tmp_path) -> None:
-    from wlxq_bot.assets import TemplatePack
 
     pack_root = tmp_path / "profile"
     buttons_dir = pack_root / "buttons"
@@ -547,13 +542,11 @@ def test_normal_run_requires_calibrated_home_page_threshold(tmp_path) -> None:
 
 class TestLoopStopConditions:
     def test_runner_enables_difficulty_observation_only_for_dialog_step(self):
-        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.config import Hotspot, ModeProfile, RunConfig
         from wlxq_bot.models import CoopRole
+        from wlxq_bot.perception.mode_tab import ModeTabRow
         from wlxq_bot.tasks.base import TaskContext
         from wlxq_bot.tasks.coop import CoopTask
-
-        from wlxq_bot.config import ModeProfile
-        from wlxq_bot.perception.mode_tab import ModeTabRow
 
         ctx = TaskContext(main_c="assault", max_rounds=10)
         ctx.current_state = State.FIND_COOP
@@ -2208,7 +2201,6 @@ class TestModeAssets:
     def test_check_mode_assets_missing_hotspot_raises(self, tmp_path) -> None:
         runner = self._runner(self._pet_profile())
         runner.tasks_config.hotspots.pop("recruit_pet_tab")
-        from wlxq_bot.assets import TemplatePack
 
         with pytest.raises(RuntimeError, match="recruit_pet_tab"):
             runner._check_mode_assets(
@@ -2219,7 +2211,6 @@ class TestModeAssets:
 
     def test_check_mode_assets_missing_template_raises(self, tmp_path) -> None:
         runner = self._runner(self._pet_profile())
-        from wlxq_bot.assets import TemplatePack
 
         with pytest.raises(RuntimeError, match="zhun_bei"):
             runner._check_mode_assets(
@@ -2232,7 +2223,6 @@ class TestModeAssets:
         # OCR 模式会探测引擎：测试里打桩，避免真实加载 rapidocr
         monkeypatch.setattr("wlxq_bot.runner.ensure_engine", lambda: None)
         runner = self._runner(self._pet_profile())
-        from wlxq_bot.assets import TemplatePack
 
         pack_root = tmp_path / "3000x2000"
         tpl_dir = pack_root / "buttons" / "bao_wei_chong_wu"
@@ -2248,7 +2238,6 @@ class TestModeAssets:
     def test_check_mode_assets_ocr_requires_nonzero_roi(self, tmp_path) -> None:
         runner = self._runner(self._pet_profile())
         runner.tasks_config.rois["pet_difficulty_list"].width_ratio = 0.0
-        from wlxq_bot.assets import TemplatePack
 
         pack_root = tmp_path / "3000x2000"
         tpl_dir = pack_root / "buttons" / "bao_wei_chong_wu"

@@ -14,11 +14,11 @@ from pydantic import ValidationError
 from wlxq_bot.config import (
     DefaultConfig,
     Hotspot,
-    TasksConfig,
     MainCProfile,
     ModeProfile,
     RoiConfig,
     RunConfig,
+    TasksConfig,
     WindowSpec,
     load_default_config,
     load_tasks_config,
@@ -275,15 +275,15 @@ class TestModeProfile:
     """模式档案模型与主C覆盖解析测试。"""
 
     def _mode(self, **kw) -> ModeProfile:
-        base = dict(
-            display_name="保卫宠物",
-            mode_chat_hotspot="pet_chat",
-            entry={"mode_tab_hotspot": "recruit_pet_tab",
-                   "difficulty": {"kind": "ocr", "targets": ["普通", "中等"]}},
-            match={"ready_button": "pet_ready_button", "leave_team": "pet_leave_team"},
-            settlement={"like_chest": False, "return_button": "pet_return_button"},
-            main_c_overrides={"assault": {"skill_selection_cap": 0}},
-        )
+        base = {
+            "display_name": "保卫宠物",
+            "mode_chat_hotspot": "pet_chat",
+            "entry": {"mode_tab_hotspot": "recruit_pet_tab",
+                      "difficulty": {"kind": "ocr", "targets": ["普通", "中等"]}},
+            "match": {"ready_button": "pet_ready_button", "leave_team": "pet_leave_team"},
+            "settlement": {"like_chest": False, "return_button": "pet_return_button"},
+            "main_c_overrides": {"assault": {"skill_selection_cap": 0}},
+        }
         base.update(kw)
         return ModeProfile(**base)
 

@@ -1300,7 +1300,7 @@ class TestPetDifficultyBar:
             },
         )
 
-    def _perception(self, tmp_path, reader: "FakeBarRowReader"):
+    def _perception(self, tmp_path, reader: FakeBarRowReader):
         from wlxq_bot.assets import TemplatePack
 
         pack_root = tmp_path / "3000x2000"
