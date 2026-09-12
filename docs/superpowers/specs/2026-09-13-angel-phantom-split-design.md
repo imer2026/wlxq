@@ -95,21 +95,19 @@ run:
   # 新增：通配合并英雄（赖子）。可与任意同星级英雄合并；同类项对优先，通配对兜底。
   wildcard_merge_heroes: [angel_phantom]
 
-main_c_profiles:
-  # 新增档案：仅为 lineup 校验与裁剪目录预建服务；永不主 C（事实 6）。
-  angel_phantom:
-    display_name: 幻天使
-    hero_template_dir: heroes/angel_phantom   # 模板未采集（见 §7 TODO），无模板校验，不影响运行
-    hero_classifier_model: ""                 # 不作为主 C 加载，留空
-    skill_icon_templates: []
-
 hero_classifier:
-  # angel_phantom 必须在列，否则 _restrict_prediction 会把幻天使判为 hero_not_in_lineup → unknown
-  lineup_others: [angel, angel_phantom, snow, death_knight]
+  lineup_others: [angel, snow, death_knight]   # 不变：幻天使不是独立英雄，不进阵容
+  # 新增：阵容英雄的棋盘形态变体白名单。幻天使是天使的形态而非新英雄（用户定案
+  # 2026-09-13），不建 main_c_profiles 档案、永不作为主 C；但分类器类别与棋盘
+  # hero_type 需要独立标识 angel_phantom，本白名单让其通过 _restrict_prediction
+  # 的阵容过滤（否则被拒为 hero_not_in_lineup → unknown）。
+  lineup_variants: [angel_phantom]
 ```
 
-- `RunConfig` 新增 `wildcard_merge_heroes: list[str]`（默认空），复用 lineup_others 的小写标识符校验。
-- `runner.py` 两处 `allowed_heroes={main_c, *lineup_others}` 构造自动包含 angel_phantom；watch 路径阵容覆盖校验（`runner.py:1186-1189`）按**英雄类型级**比对（`available_heroes`），幻天使只有 star1~3 类不阻塞（已核实代码）。
+- `HeroClassifierConfig` 新增 `lineup_variants: list[str]`（默认空），复用 lineup_others 的小写标识符校验；**不**校验与 main_c_profiles 的从属关系（变体不是主 C 英雄）。
+- `RunConfig` 新增 `wildcard_merge_heroes: list[str]`（默认空），复用小写标识符校验。
+- `runner.py` 两处 allowed 集合构造（run 路径约 L298、watch 路径约 L1184）改为 `{main_c, *lineup_others, *lineup_variants}`；watch 路径阵容覆盖校验的 required 集合同步扩展。`main_c_profiles` 零改动。
+- 棋盘 `hero_type` 仍是独立字符串 `angel_phantom`（与代码库「全链路字符串判等」惯例一致，合并通配逻辑按字符串集合判断）；「幻天使属于天使」这一层语义只体现在 lineup_variants 注释与 game-rules.md，不进代码分支。
 
 ### 4.4 领域层：合并候选生成（models.py）
 
@@ -143,7 +141,7 @@ hero_classifier:
    - `find_merge_candidates`：同类项优先于通配对；通配+任意同星；通配+通配；每个英雄单次使用；星级不匹配不配对；通配+主 C → `is_main_c=True`；`wildcard_heroes` 默认空集时与现状逐例一致（回归）。
    - `select_merge`：同类项与通配对并存时选同类项；仅剩通配对时选通配；3 星通配对在棋盘未满时召唤避开（与同类项 3 星对同待遇）。
    - `select_merge_batch`：通配对纳入批次；主 C 对、3 星对、失败记忆、位置相交的既有过滤对通配对同样生效；批次内同类项对排在通配对前。
-   - 配置：`lineup_others` 含 angel_phantom 且档案齐全时加载通过；`wildcard_merge_heroes` 非法标识报错。
+   - 配置：`lineup_variants` 非法标识报错、变体不要求 main_c_profiles 档案；`wildcard_merge_heroes` 非法标识报错；allowed 集合展开后含 angel_phantom（run 与 watch 两路径）。
 2. **数据/模型离线验证**：dry-run 分布报告人工过目后迁移；训练后 `evaluate --split test` 按验收标准出报告。
 3. **回归**：`python -m pytest` 全绿；既有 coop 任务用例（fake 识别喂 `angel`）不受影响。
 4. **首跑人工验证清单**（实机，跑通前不声称完整可用）：
@@ -170,7 +168,7 @@ hero_classifier:
 | 新模型既有类别准确率漂移 | evaluate 对比验收，不达标不切配置 |
 | 合并产物为阵容外英雄 → 该格 unknown，占用格子且不参与配对 | 保守可接受；实机观察是否需要「清理/忽略」策略（TODO） |
 | star4 幻天使类不存在 | 游戏规则不可能出现（事实 1）；若真出现则退化为 unknown，保守 |
-| 幻天使模板未采集（`heroes/angel_phantom` 空目录） | 模板路径非主链路；需要时再采集（TODO） |
+| 幻天使模板未采集 | 不影响：本方案不建 main_c_profiles 档案、不引用模板路径；如将来模板备用路径需要支持幻天使再采集（TODO） |
 
 ## 8. 实施顺序（供 writing-plans 展开）
 
