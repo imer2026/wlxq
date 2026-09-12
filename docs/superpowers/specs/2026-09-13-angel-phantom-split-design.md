@@ -49,17 +49,22 @@
 
 ### 4.1 数据层：重分拣（一次性，无新采集）
 
-**分拣特征**：`purple_frac` = 饱和像素（s>60, v>60，少于 30 像素视为无效样本）中 hue∈[120,180) 的占比。
+**分拣特征（双信号，2026-09-13 全量 2176 张校准）**：对每张图取饱和像素（s>60, v>60，少于 30 像素视为无效样本）计算：
+
+- `hue_circ`：饱和像素的环向 hue 均值（OpenCV 0~179）。参考图实测：正常天使 ≈24.3（金）、幻天使 ≈141.9（紫）——主判别量；
+- `purple_frac`：hue∈[120,180) 的占比。参考图实测 ≈0.003 与 ≈0.391——第二信号，防蓝/绿特效把暖色图误判为迁移。
 
 **决策规则**（对 train/validation/test 三个 split 的 `angel/star1~star3` 逐张判定；star4 不动）：
 
 > 迁移是**原地移动**：在既有 labeled 树内把 `labeled/angel/starN/` 的幻样本移到同 split 的 `labeled/angel_phantom/starN/`，不新建 rounds 或局的目录；train/validation/test 的局级隔离与文件名（含局号前缀）保持不变。训练仍一次覆盖全部累积标注（train 9,399 张 / 8 局 + validation 918 张 / 1 局，2026-09-13 核实与 v4 metadata 训练局一一对应；test 470 张 / 2 局仅用于评估）。
 
-| purple_frac | 动作 |
-|---|---|
-| ≥ 0.50 | 移入 `angel_phantom/starN` |
-| ≤ 0.15 | 留在 `angel` |
-| 0.15 ~ 0.50 | 留在 `angel`，列入人工复核清单 |
+| 判定 | 动作 | 全量校准预计 |
+|---|---|---|
+| hue_circ ∈ [105,180) 且 purple_frac ≥ 0.15 | 移入 `angel_phantom/starN` | 约 360 张（train 276 = star1 93 / star2 51 / star3 132；validation 36；test 57） |
+| hue_circ < 80 | 留在 `angel` | 约 1776 张 |
+| 其余（80~104 中间带，或紫占比不足） | 留在 `angel`，列入人工复核清单 | 约 40 张 |
+
+> 早期草案的单信号 purple_frac ≥0.50 阈值经实测否决：已确认幻天使参考图的 purple_frac 仅 0.391，自身都不满足；环向 hue 是更强的判别量，purple_frac 降级为第二信号。
 
 **执行顺序（含人工确认硬门，用户定案 2026-09-13）**：
 
