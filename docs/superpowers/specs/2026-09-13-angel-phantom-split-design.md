@@ -85,6 +85,7 @@
 - 评估：`wlxq-bot hero-classifier evaluate … --model <v5> --split test`，验收标准（对比 `outputs/hero_classifier/evaluation` 既有报告）：
   1. 混淆矩阵中 `angel_*` 与 `angel_phantom_*` 互混样本 ≤ 3 张（test star3 约 62 张幻样本），且不集中在同一星级；
   2. 已接受样本准确率（accuracy_accepted）不低于现模型 − 0.5 个百分点。
+- 验证局无 3 星天使（既定整局 split 的固有组成，v4 同条件）：验证集只负责选最佳轮次，star3 的质量由 test 评估兜底（test 恰以 star3 为主）。**不为补验证集挪局**——会破坏局级隔离并改变与 v4 的可比性。
 - 部署：达标后将 `main_c_profiles.assault.hero_classifier_model` 指向 v5；回滚 = 改回一行配置。**评估不达标不切换。**
 
 ### 4.3 配置层（configs/default.yaml + config.py）
