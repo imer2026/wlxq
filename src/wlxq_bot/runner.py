@@ -362,6 +362,18 @@ class Runner:
             main_c=mc,
             max_rounds=run_config.max_rounds,
         )
+        # 变身 locator 接线（设计文档 §4.5）：模板/locator 缺失时降级禁用
+        # （WARNING），不阻断整局 run——变身是增益能力
+        transform_button_locator = self.tasks_config.locators.get("transform_button")
+        if run_config.transform_enabled and transform_button_locator is not None:
+            transform_template = str(transform_button_locator.get("template", ""))
+            if not pack.resolve_template(transform_template).is_file():
+                logger.warning(
+                    "变身按钮模板缺失（%s），本局禁用变身功能，不影响其他流程",
+                    transform_template,
+                )
+                transform_button_locator = None
+
         task = CoopTask(
             ctx,
             run_config,
@@ -387,6 +399,7 @@ class Runner:
             entry_max_reclicks=int(
                 self.tasks_config.mode_select_recognition.get("entry_max_reclicks", 3)
             ),
+            transform_button_locator=transform_button_locator,
         )
         task.ctx.current_state = initial_state
         logger.info(
