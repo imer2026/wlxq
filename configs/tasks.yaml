@@ -325,6 +325,21 @@ locators:
     threshold: 0.82
     action_point:
       source: match_center
+  # 英雄变身按钮（2026-09-13 实机采集）：点击英雄后约 1 秒内弹出、悬浮于英雄
+  # 头顶（实测水平对齐格子中心±4.5px、按钮底边略压本格顶边）；5/5 实机截图
+  # 命中 0.984~0.9998。仅 observation_mode=transform_button（任务层变身轮询
+  # 阶段）识别；未配置 roi 时退化全图匹配，任务层再用 search_*_ratio 窗口
+  # 校验命中位置是否在目标英雄格上方（窗口由棋盘格尺寸推导：
+  # ±1.5 格宽 / 上探 2.5 格高 / 下压 0.4 格高，见设计文档 §4.3）
+  transform_button:
+    strategy: template
+    template: buttons/bian_shen.png
+    threshold: 0.85
+    action_point:
+      source: match_center
+    search_dx_ratio: 0.11
+    search_up_ratio: 0.093
+    search_down_ratio: 0.015
 
 # ROI 区域定义
 # 使用比例坐标（ratio），相对于客户区左上角

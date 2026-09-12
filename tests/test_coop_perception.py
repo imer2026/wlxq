@@ -1533,3 +1533,58 @@ class TestTerritoryEntryDetection:
         raw: dict = {}
         perception._detect_territory_nav_text(_make_window_ctx(), _frame(), raw)
         assert raw["territory_nav_text"] == ""
+
+
+class TestTransformButtonObservation:
+    """变身按钮只在 transform_button 观察模式识别（设计 §4.2/§4.3）。"""
+
+    def _build(self, tmp_path, vision):
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "3000x2000"
+        buttons_dir = pack_root / "buttons"
+        buttons_dir.mkdir(parents=True)
+        (buttons_dir / "bian_shen.png").write_bytes(b"template")
+        tasks_cfg = TasksConfig(
+            locators={
+                "transform_button": {
+                    "strategy": "template",
+                    "template": "buttons/bian_shen.png",
+                    "threshold": 0.85,
+                }
+            }
+        )
+        return CoopPerception(
+            vision,
+            TemplatePack(client_size=(3000, 2000), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+        )
+
+    def test_detects_transform_button_only_in_requested_mode(self, tmp_path):
+        match = MatchResult("bian_shen.png", (689, 986), 0.99)
+        vision = _SingleTemplateVision("bian_shen.png", match)
+        perception = self._build(tmp_path, vision)
+
+        normal = perception.observe(_make_window_ctx(), None, observation_mode=None)
+        transforming = perception.observe(
+            _make_window_ctx(), None, observation_mode="transform_button"
+        )
+
+        assert "transform_button_visible" not in normal.raw_data
+        assert transforming.flag("transform_button_visible") is True
+        assert transforming.raw_data["transform_button_match"] == match
+        assert len(vision.template_calls) == 1
+
+    def test_missing_template_reports_invisible(self, tmp_path):
+        """模板文件缺失时按不可见处理（runner 启动时已降级禁用，双保险）。"""
+        vision = _SingleTemplateVision("bian_shen.png", None)
+        perception = self._build(tmp_path, vision)
+
+        observation = perception.observe(
+            _make_window_ctx(), None, observation_mode="transform_button"
+        )
+
+        assert observation.flag("transform_button_visible") is False
+        assert "transform_button_match" not in observation.raw_data

@@ -356,6 +356,20 @@ class CoopPerception:
         elif observation_mode == "challenge_page":
             # 领地入口最后一步：OCR 挑战页按钮文字（页面到达锚点）
             self._detect_challenge_text(ctx, frame, raw_data)
+        elif observation_mode == "transform_button":
+            # 变身按钮轮询（任务层变身阶段机，仅 poll/confirm 两阶段请求）：
+            # 匹配 locator transform_button；模板缺失时 _match_locator_template
+            # 返回 None（按不可见处理，runner 启动检查已先行降级禁用）
+            transform_locator = self._cfg.locators.get("transform_button")
+            transform_match = (
+                self._match_locator_template(ctx, frame, transform_locator)
+                if transform_locator
+                else None
+            )
+            raw_data["transform_button_visible"] = transform_match is not None
+            if transform_match is not None:
+                matches.append(transform_match)
+                raw_data["transform_button_match"] = transform_match
 
         # 2. 培养阶段做棋盘英雄识别
         board: BoardSnapshot | None = None
