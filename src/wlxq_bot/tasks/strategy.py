@@ -112,6 +112,36 @@ class CultivationStrategy:
         return skill_selections >= self._profile.topup_after_skill_selections
 
     # ------------------------------------------------------------------
+    # 变身决策
+    # ------------------------------------------------------------------
+
+    def select_transform(
+        self,
+        board: BoardSnapshot,
+        used_count: int,
+        max_count: int,
+    ) -> BoardHero | None:
+        """选择本次变身目标；None 表示不变身（设计文档 §4.1）。
+
+        条件（全部满足才返回目标）：
+        1. 本局变身次数未用完（used_count < max_count）；
+        2. 尚无达标主 C（复用 has_target_main_c）；
+        3. 棋盘存在星级不低于 run.transform_min_star_level 的非主 C 英雄。
+
+        多个候选取 heroes 列表中的第一个（感知层按棋盘格序构建 heroes，
+        即按格位顺序）；返回 None 时调用方落入常规召唤/合成决策。
+        """
+        if used_count >= max_count:
+            return None
+        if self.has_target_main_c(board):
+            return None
+        min_star = self._run_config.transform_min_star_level
+        for hero in board.heroes:
+            if hero.hero_type != self._main_c and hero.star_level >= min_star:
+                return hero
+        return None
+
+    # ------------------------------------------------------------------
     # 合成决策
     # ------------------------------------------------------------------
 

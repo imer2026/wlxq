@@ -3882,3 +3882,53 @@ class TestSkillRefresh:
         task._skill_refresh_used_count = 1
         task._reset_for_home_reentry()
         assert task._skill_refresh_used_count == 0
+
+
+class TestSelectTransform:
+    """变身目标纯决策（设计文档 §4.1）。"""
+
+    def test_returns_first_three_star_non_main_c(self):
+        task = make_task()
+        board = make_board(
+            [
+                make_hero("snow", star=2, pos=(100, 100)),
+                make_hero("angel", star=3, pos=(300, 300)),
+                make_hero("death_knight", star=3, pos=(500, 500)),
+            ]
+        )
+        target = task._strategy.select_transform(board, 0, 2)
+        assert target is not None
+        assert target.hero_type == "angel"
+        assert target.star_level == 3
+
+    def test_none_when_main_c_target_reached(self):
+        task = make_task()
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("snow", star=3, pos=(300, 300)),
+            ]
+        )
+        assert task._strategy.select_transform(board, 0, 2) is None
+
+    def test_none_when_charges_exhausted(self):
+        task = make_task()
+        board = make_board([make_hero("snow", star=3, pos=(300, 300))])
+        assert task._strategy.select_transform(board, 2, 2) is None
+
+    def test_none_when_below_min_star(self):
+        task = make_task()
+        board = make_board([make_hero("snow", star=2, pos=(300, 300))])
+        assert task._strategy.select_transform(board, 0, 2) is None
+
+    def test_four_star_non_main_c_triggers(self):
+        """min_star_level 是下限：4 星非主 C 同样触发（>= 3）。"""
+        task = make_task()
+        board = make_board([make_hero("snow", star=4, pos=(300, 300))])
+        target = task._strategy.select_transform(board, 0, 2)
+        assert target is not None
+        assert target.star_level == 4
+
+    def test_none_when_board_empty(self):
+        task = make_task()
+        assert task._strategy.select_transform(make_board([]), 0, 2) is None
