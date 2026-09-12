@@ -2229,38 +2229,7 @@ class CoopTask(Task):
             # 返回 None 表示本次不合并，落入下方召唤分支
             pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
         if pair is not None:
-            source, dest = CultivationStrategy.drag_direction(pair)
-            pair_kind = "主C对" if pair.is_main_c else "非主C对"
-            logger.info(
-                "拖动合成%s: %s%d星 %s -> %s",
-                pair_kind,
-                source.hero_type,
-                source.star_level,
-                _hero_location(source),
-                _hero_location(dest),
-            )
-            if max(source.star_level, dest.star_level) >= 3:
-                # 被迫合并 3 星对：合成 4 星将弹赠送技能页，合并后进入确认流程
-                self._awaiting_merge_gift = True
-                self._merge_gift_settled = False
-                self._merge_gift_hits = 0
-                self._merge_gift_misses = 0
-            return (
-                Action(
-                    kind="drag",
-                    target=source.position,
-                    end=dest.position,
-                    duration=self._run_config.merge_drag_duration,
-                    verification="next_frame",
-                    tag="merge_heroes",
-                    reason=(
-                        "优先拖动合成非主C合法对"
-                        if not pair.is_main_c
-                        else "无其他合法对，拖动合成主C对"
-                    ),
-                ),
-                State.BUILD_MAIN_C,
-            )
+            return self._merge_drag_action(pair)
 
         point = self._hotspot_point("add_hero", window_ctx)
         if point is None:
@@ -2291,6 +2260,76 @@ class CoopTask(Task):
             State.BUILD_MAIN_C,
         )
 
+    def _gold_wait_merge_action(
+        self,
+        observation: Observation,
+    ) -> tuple[Action, State] | None:
+        """批次召唤金币等待期的合成动作（2026-09-13 用户策略）。
+
+        合成不花金币，正好利用等金币恢复的空档：用与培养阶段相同的策略
+        选合法对（非主C优先、主C数量保护、3星规避等规则全部生效），以
+        单动作合成发出（next_frame 验证，拖动失败对记忆照常生效）。棋盘
+        快照缺失或无可合对返回 None，调用方退回原地等待。
+        """
+        board = observation.board
+        if board is None:
+            return None
+        candidates = board.find_merge_candidates(self.ctx.main_c)
+        pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
+        if pair is None:
+            return None
+        logger.info(
+            "批次召唤金币不足，等待恢复期间优先合成（本批剩余 %d 次）",
+            self._batch_summon_remaining,
+        )
+        return self._merge_drag_action(
+            pair,
+            reason=(
+                f"批次召唤金币不足，等待恢复期间合成"
+                f"（本批剩余 {self._batch_summon_remaining} 次）"
+            ),
+        )
+
+    def _merge_drag_action(
+        self,
+        pair: MergeCandidate,
+        reason: str | None = None,
+    ) -> tuple[Action, State]:
+        """单动作合成：日志、3 星对赠送技能页标记与拖动动作（next_frame 验证）。"""
+        source, dest = CultivationStrategy.drag_direction(pair)
+        pair_kind = "主C对" if pair.is_main_c else "非主C对"
+        logger.info(
+            "拖动合成%s: %s%d星 %s -> %s",
+            pair_kind,
+            source.hero_type,
+            source.star_level,
+            _hero_location(source),
+            _hero_location(dest),
+        )
+        if max(source.star_level, dest.star_level) >= 3:
+            # 被迫合并 3 星对：合成 4 星将弹赠送技能页，合并后进入确认流程
+            self._awaiting_merge_gift = True
+            self._merge_gift_settled = False
+            self._merge_gift_hits = 0
+            self._merge_gift_misses = 0
+        return (
+            Action(
+                kind="drag",
+                target=source.position,
+                end=dest.position,
+                duration=self._run_config.merge_drag_duration,
+                verification="next_frame",
+                tag="merge_heroes",
+                reason=reason
+                or (
+                    "优先拖动合成非主C合法对"
+                    if not pair.is_main_c
+                    else "无其他合法对，拖动合成主C对"
+                ),
+            ),
+            State.BUILD_MAIN_C,
+        )
+
     def _batch_summon_action(
         self,
         observation: Observation,
@@ -2308,6 +2347,11 @@ class CoopTask(Task):
                 detail = "召唤费用红色（游戏判买不起）"
             else:
                 detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
+            # 等金币恢复的空档优先合成（2026-09-13 用户策略）：合成不花
+            # 金币，正好利用等待时间；无合法对再原地等待
+            merge = self._gold_wait_merge_action(observation)
+            if merge is not None:
+                return merge
             return (
                 Action(
                     kind="wait",

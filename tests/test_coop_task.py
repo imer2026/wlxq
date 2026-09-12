@@ -3449,6 +3449,45 @@ class TestBatchSummon:
         assert action.tag == "summon_gold_wait"
         assert task._batch_summon_remaining == 3
 
+    def test_batch_summon_gold_wait_merges_first(self):
+        """金币不足不空等（2026-09-13）：等待恢复期间优先合成（合成不花金币）。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 3
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "merge_heroes"
+        assert action.kind == "drag"
+        assert action.verification == "next_frame"
+        assert "等待恢复期间合成" in action.reason
+        # 批次不消耗：合成腾出的空格由批后下一轮规划补召唤
+        assert task._batch_summon_remaining == 3
+
+    def test_batch_summon_gold_wait_waits_without_pairs(self):
+        """无合法合成对时退回原地等待（原行为）。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 3
+        obs = Observation(
+            frame_id=1,
+            board=make_board([make_hero("snow", star=1, pos=(100, 100))]),
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "summon_gold_wait"
+        assert task._batch_summon_remaining == 3
+
     def test_board_watch_resumes_after_batch_finishes(self):
         task = self._task_after_forced_phase()
         task._batch_summon_remaining = 1

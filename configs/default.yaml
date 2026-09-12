@@ -103,7 +103,7 @@ run:
   # 组队对局模式：coop（合作模式）| pet（保卫宠物）；CLI --mode 覆盖本次运行
   mode: coop
   # 首次进入招募时需要勾选的合作难度（编号指彩虹难度）；按从小到大（如 1→10）依次点击
-  coop_difficulties: '1-13'
+  coop_difficulties: '1-14'
   # 游戏本次会话已手动选过难度时置 true（或 run --skip-difficulty-selection）：
   # 首局招募只跳过「勾选难度等级」，难度弹窗仍打开并关闭一次以刷新最新合作邀请
   skip_difficulty_selection: false
