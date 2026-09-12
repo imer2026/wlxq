@@ -59,11 +59,21 @@
 | ≤ 0.15 | 留在 `angel` |
 | 0.15 ~ 0.50 | 留在 `angel`，列入人工复核清单 |
 
-**执行门槛**：先 dry-run 输出各 split/star 的 purple_frac 分布与两参考图数值；确认分界落在双峰谷底才执行迁移，分布不干净则停下向用户报告。
+**执行顺序（含人工确认硬门，用户定案 2026-09-13）**：
 
-**审计与可回滚**：所有移动记 CSV（路径、purple_frac、决策）到 `outputs/hero_classifier/relabel_angel_phantom_<日期>.csv`；复核清单拼 montage 存 `outputs/hero_classifier/relabel_review_<日期>/`，供用户事后人工确认（复核结论可驱动二轮迁移，非本期必需）。`rounds/` 原始整局截图不受影响。
+1. dry-run：输出各 split/star 的 purple_frac 分布与两参考图数值；分界落在双峰谷底才继续，分布不干净则停下向用户报告；
+2. 迁移：按上表规则移动文件；
+3. **用户确认（硬门）**：生成分拣复核包供用户逐张过目（重点查错迁/漏迁）；发现问题的图当场人工改判，改判后重新汇总再确认；
+4. 确认通过后才执行 `wlxq-bot hero-classifier sync-labels` 重建 `dataset_manifest.csv`。
 
-迁移后执行 `wlxq-bot hero-classifier sync-labels` 重建 `dataset_manifest.csv`。
+**复核包内容**（`outputs/hero_classifier/relabel_review_<日期>/`）：
+
+- 迁移全景：`angel_phantom/` 各星级**全部**迁移图的带文件名 montage（按 split/star 分页）；
+- 留守抽样：`angel/` 各星级低 purple_frac 样本的抽样 montage（查漏迁）；
+- 中间带清单：0.15~0.50 样本 montage（本期待定留在 `angel`，用户复核时可现场改判）;
+- 汇总表：每张图路径、purple_frac、机器决策、人工改判栏（CSV）。
+
+**审计与可回滚**：所有移动记 CSV（路径、purple_frac、决策）到 `outputs/hero_classifier/relabel_angel_phantom_<日期>.csv`；`rounds/` 原始整局截图不受影响。
 
 ### 4.2 模型层：重训与部署
 
@@ -160,8 +170,8 @@ hero_classifier:
 
 ## 8. 实施顺序（供 writing-plans 展开）
 
-1. 数据重分拣（dry-run → 迁移 → sync-labels）
-2. 后台启动训练；并行实施 4.3~4.5 代码与配置改动
+1. 数据重分拣（dry-run → 迁移 → **用户确认分拣结果（硬门）** → sync-labels）；用户确认前不得进入后续步骤
+2. 后台启动训练（依赖步骤 1 确认通过）；并行实施 4.3~4.5 代码与配置改动
 3. 单元测试 + 全量回归
 4. 模型评估达验收标准 → 切换 `main_c_profiles.assault.hero_classifier_model` 指向 v5
 5. 文档同步：game-rules.md（§2 六条事实）、coop/TODO.md（§7）、architecture.md 英雄列表、hero-classifier-usage.md 目录结构、README（如提及 lineup）
