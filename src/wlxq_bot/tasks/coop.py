@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from wlxq_bot.config import Hotspot, MainCProfile, ModeProfile, RoiConfig, RunConfig
 from wlxq_bot.models import (
@@ -137,6 +137,7 @@ class CoopTask(Task):
         main_c_profile: MainCProfile | None = None,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
+        transform_button_locator: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(ctx)
         self._run_config = run_config
@@ -255,6 +256,21 @@ class CoopTask(Task):
         # 动作后验证承担——验证帧 OCR 出新卡面即已可识别，不再额外固定等待）
         self._skill_refresh_used_count = 0
         self._skill_refresh_button_waits = 0
+        # 变身（2026-09-13 用户策略，设计文档 2026-09-13-hero-transform）：
+        # locator 未接线（配置缺失/模板缺失降级）时整分支禁用
+        self._transform_locator = transform_button_locator
+        # 阶段机：None=未在进行；poll=已点英雄轮询按钮；confirm=已点按钮
+        # 确认消失；verify=settle 等待后棋盘验证
+        self._transform_stage: str | None = None
+        self._transform_target: BoardHero | None = None
+        self._transform_button_pos: tuple[int, int] | None = None
+        self._transform_reclicks = 0
+        self._transform_verify_attempts = 0
+        # 本局已用变身次数（按钮确认消失后扣减；重置点与技能刷新一致）
+        self._transform_used_count = 0
+        self._transform_poll_deadline = 0.0
+        # 放弃记忆：放弃变身时的棋盘签名；棋盘未演化前不再触发（防死循环）
+        self._transform_skip_signature: tuple | None = None
         self._main_skill_selections = 0
         # 本局局内技能选择总次数（回补重置不清零；达到档案上限后停止选技能）
         self._main_skill_selections_total = 0
@@ -424,11 +440,24 @@ class CoopTask(Task):
         # 快识别（BUILD 状态标志集含标题图与击杀弹窗，弹窗优先不受影响）
         if self._awaiting_merge_gift:
             return False
+        if self._transform_stage is not None:
+            # 变身阶段机：poll/confirm 单帧快识别（含按钮专项模式）；
+            # verify 恢复多帧棋盘识别做动作后验证
+            return self._transform_stage == "verify"
         if self._batch_summon_remaining > 0 or self._batch_merge_queue:
             return False
         return self._summon_count >= self._run_config.minimum_summon_count_before_skills
 
     def observation_mode(self) -> str | None:
+        if self._transform_stage is not None:
+            # 变身阶段机接管观察模式（设计 §4.2）：poll/confirm 用按钮专项
+            # 模式；verify 恢复默认（无专项模式）。整阶段机拦截而不是只拦
+            # poll/confirm——否则 verify 阶段落入下方招募步骤分支（如测试
+            # 夹具停在 OPEN_TERRITORY 时返回 territory_nav，2026-09-13 执行
+            # 反馈修正）
+            if self._transform_stage in ("poll", "confirm"):
+                return "transform_button"
+            return None
         if self._recruit_step is _RecruitStep.DETECT_ENTRY_PAGE:
             # 退队落点探测：只区分首页/非首页，首页也改走领地入口
             return "home_page"
@@ -2040,6 +2069,14 @@ class CoopTask(Task):
                     State.BUILD_MAIN_C,
                 )
 
+        # ---- 变身阶段机（2026-09-13 用户策略，设计文档 §4.2）----
+        # 进行中的变身优先于下方所有常规决策；返回 None 表示本次变身结束
+        # （成功/放弃/预算耗尽），清空阶段后落入常规培养决策
+        if self._transform_stage is not None:
+            stage_action = self._transform_stage_action(observation, window_ctx)
+            if stage_action is not None:
+                return stage_action
+
         # 合成 4 星后系统赠送的技能选择页（实机确认 2026-08-16）：两个 3 星
         # 合成 4 星时弹出，3 选 1，页面遮住棋盘导致识别为空。优先点主C技能卡，
         # 识别不到就用三列兜底随机选一张；选完页面关闭、棋盘恢复。
@@ -2197,6 +2234,56 @@ class CoopTask(Task):
                 State.SELECT_MAIN_C_SKILLS,
             )
 
+        # ---- 变身触发（设计文档 §4.1：无达标主C + 次数未满 + 3星非主C）----
+        # 免费且可能直接达标，优先于批次召唤/合成；locator 未接线（模板缺失
+        # 降级）或开关关闭时整分支跳过；放弃记忆未解除（棋盘签名未演化）时
+        # 抑制触发，防止「放弃 → 立刻再触发」死循环
+        if (
+            self._transform_skip_signature is not None
+            and self._board_signature(board) != self._transform_skip_signature
+        ):
+            # 棋盘已演化（召唤/合成改变了英雄集合）：解除放弃记忆的抑制
+            self._transform_skip_signature = None
+        if (
+            self._run_config.transform_enabled
+            and self._transform_locator is not None
+            and self._transform_skip_signature is None
+        ):
+            transform_target = self._strategy.select_transform(
+                board,
+                self._transform_used_count,
+                self._run_config.transform_max_per_round,
+            )
+            if transform_target is not None:
+                self._transform_stage = "poll"
+                self._transform_target = transform_target
+                self._transform_button_pos = None
+                self._transform_reclicks = 0
+                self._transform_verify_attempts = 0
+                self._transform_poll_deadline = (
+                    self._clock() + self._run_config.transform_button_appear_timeout_seconds
+                )
+                logger.info(
+                    "触发变身：%s%d星 %s 变身碰主C（本局已用 %d/%d 次）",
+                    transform_target.hero_type,
+                    transform_target.star_level,
+                    _hero_location(transform_target),
+                    self._transform_used_count,
+                    self._run_config.transform_max_per_round,
+                )
+                return (
+                    Action(
+                        kind="click",
+                        target=transform_target.position,
+                        duration=0.08,
+                        post_delay=self._run_config.transform_button_poll_interval_seconds,
+                        verification="immediate",
+                        tag="transform_click_hero",
+                        reason="点击3星非主C英雄，弹出变身按钮",
+                    ),
+                    State.BUILD_MAIN_C,
+                )
+
         # ---- 批次规划（2026-09-10 用户策略）：识别一次、动作攒批、批后统一识别 ----
         # 先把空格一批召唤填满（每次点击前金币门控），填满后再把互不相交的
         # 非主C 1/2星对一批拖完；两档都可以按配置关闭，走原有逐动作识别验证
@@ -2329,6 +2416,243 @@ class CoopTask(Task):
             ),
             State.BUILD_MAIN_C,
         )
+
+    def _transform_stage_action(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """变身阶段机主体（设计文档 §4.2）：poll → confirm → verify。
+
+        返回 None = 本次变身结束（成功、放弃或预算耗尽），调用方先经
+        ``_clear_transform_state`` 清空后落入常规培养决策；任何失败路径都
+        不结束任务、不盲点。settle 不是独立阶段：confirm 确认按钮消失后
+        直接置 verify 并返回 settle 时长的等待动作。
+        """
+        cfg = self._run_config
+        target = self._transform_target
+        assert target is not None  # 阶段存在即有目标（触发处成对设置）
+
+        def _wait(tag: str, duration: float, reason: str) -> tuple[Action, State]:
+            return (
+                Action(
+                    kind="wait",
+                    duration=duration,
+                    verification="immediate",
+                    tag=tag,
+                    reason=reason,
+                ),
+                State.BUILD_MAIN_C,
+            )
+
+        if self._transform_stage == "poll":
+            match = self._flag_match(observation, "transform_button_match")
+            if (
+                match is not None
+                and self._match_in_transform_window(
+                    match.position, target.position, window_ctx
+                )
+            ):
+                self._transform_button_pos = match.position
+                self._transform_stage = "confirm"
+                return (
+                    Action(
+                        kind="click",
+                        target=match.position,
+                        duration=0.08,
+                        post_delay=0.3,
+                        verification="immediate",
+                        tag="transform_click_button",
+                        reason=f"点击变身按钮（置信度 {match.confidence:.2f}）",
+                    ),
+                    State.BUILD_MAIN_C,
+                )
+            if self._clock() < self._transform_poll_deadline:
+                return _wait(
+                    "transform_button_poll",
+                    cfg.transform_button_poll_interval_seconds,
+                    "轮询等待变身按钮弹出",
+                )
+            if self._transform_reclicks < cfg.transform_button_reclick_max:
+                self._transform_reclicks += 1
+                self._transform_poll_deadline = (
+                    self._clock() + cfg.transform_button_appear_timeout_seconds
+                )
+                logger.info(
+                    "变身按钮未弹出，重点击英雄 %d/%d（按钮约1秒内弹出，仅未弹出时重点击）",
+                    self._transform_reclicks,
+                    cfg.transform_button_reclick_max,
+                )
+                return (
+                    Action(
+                        kind="click",
+                        target=target.position,
+                        duration=0.08,
+                        post_delay=cfg.transform_button_poll_interval_seconds,
+                        verification="immediate",
+                        tag="transform_reclick_hero",
+                        reason="变身按钮未弹出，重点击英雄",
+                    ),
+                    State.BUILD_MAIN_C,
+                )
+            logger.warning(
+                "变身按钮轮询超时（游戏侧次数已尽或按钮未渲染），放弃本次变身，"
+                "不扣次数（计数失步自愈兜底）"
+            )
+            self._remember_transform_giveup(observation)
+            self._clear_transform_state()
+            return None
+
+        if self._transform_stage == "confirm":
+            match = self._flag_match(observation, "transform_button_match")
+            button_tolerance = (
+                max(20, int(0.04 * window_ctx.client_size[0]))
+                if window_ctx is not None
+                else 40
+            )
+            still_at_pos = (
+                match is not None
+                and self._transform_button_pos is not None
+                and abs(match.position[0] - self._transform_button_pos[0])
+                <= button_tolerance
+                and abs(match.position[1] - self._transform_button_pos[1])
+                <= button_tolerance
+            )
+            if not still_at_pos:
+                # 按钮已消失（原位不在）：变身已开始——扣减本局次数（开环计次，
+                # 与技能刷新同哲学），等待动画后棋盘验证
+                self._transform_used_count += 1
+                self._transform_stage = "verify"
+                logger.info(
+                    "变身按钮已消失（变身开始），等待动画稳定（本局已用 %d/%d 次）",
+                    self._transform_used_count,
+                    cfg.transform_max_per_round,
+                )
+                return _wait(
+                    "transform_settle",
+                    cfg.transform_settle_seconds,
+                    f"变身动画稳定等待（{cfg.transform_settle_seconds:.0f}秒，实测约4秒）",
+                )
+            if self._transform_reclicks < cfg.transform_button_reclick_max:
+                self._transform_reclicks += 1
+                return (
+                    Action(
+                        kind="click",
+                        target=self._transform_button_pos,
+                        duration=0.08,
+                        post_delay=0.3,
+                        verification="immediate",
+                        tag="transform_reclick_button",
+                        reason="变身按钮未消失，重点按钮（点击可能未落上）",
+                    ),
+                    State.BUILD_MAIN_C,
+                )
+            logger.warning("变身按钮点击未生效（原位按钮仍在），放弃本次变身，不扣次数")
+            self._remember_transform_giveup(observation)
+            self._clear_transform_state()
+            return None
+
+        # stage == "verify"：多帧棋盘识别已恢复（wants_board_watch 对本阶段
+        # 返回 True）；「类型改变且星级不变」才算成功（变身类型必变）
+        board = observation.board
+        if board is None or not board.heroes:
+            return _wait(
+                "transform_verify_wait",
+                0.5,
+                "棋盘识别为空（页面遮挡），等待恢复后验证变身",
+            )
+        near_tolerance = (
+            int(0.03 * window_ctx.client_size[1]) if window_ctx is not None else 52
+        )
+        nearest = min(
+            board.heroes,
+            key=lambda hero: (
+                (hero.position[0] - target.position[0]) ** 2
+                + (hero.position[1] - target.position[1]) ** 2
+            ),
+        )
+        near = (
+            abs(nearest.position[0] - target.position[0]) <= near_tolerance
+            and abs(nearest.position[1] - target.position[1]) <= near_tolerance
+        )
+        if (
+            near
+            and nearest.star_level == target.star_level
+            and nearest.hero_type != target.hero_type
+        ):
+            logger.info(
+                "变身验证通过：%s%d星 → %s%d星（同位置星级不变、类型必变）",
+                target.hero_type,
+                target.star_level,
+                nearest.hero_type,
+                nearest.star_level,
+            )
+            self._clear_transform_state()
+            return None
+        self._transform_verify_attempts += 1
+        if self._transform_verify_attempts < cfg.transform_verify_attempts:
+            return _wait(
+                "transform_verify_retry",
+                cfg.transform_settle_seconds,
+                (
+                    f"变身未确认（第 {self._transform_verify_attempts} 次：类型未变"
+                    "或动画未完），再等动画后重识别"
+                ),
+            )
+        logger.warning(
+            "变身验证 %d 次未确认（类型未变或英雄缺失），放弃验证，继续常规决策",
+            cfg.transform_verify_attempts,
+        )
+        self._remember_transform_giveup(observation)
+        self._clear_transform_state()
+        return None
+
+    def _remember_transform_giveup(self, observation: Observation) -> None:
+        """放弃变身时记住棋盘签名：棋盘演化前不再触发（防死循环）。
+
+        单帧观察（poll/confirm 阶段）无棋盘快照，退回最近一次多帧识别
+        记录的签名（触发时的棋盘）。
+        """
+        signature = (
+            self._board_signature(observation.board)
+            if observation.board is not None
+            else self._last_board_signature
+        )
+        if signature is not None:
+            self._transform_skip_signature = signature
+
+    def _match_in_transform_window(
+        self,
+        match_pos: tuple[int, int],
+        hero_pos: tuple[int, int],
+        window_ctx: WindowContext | None,
+    ) -> bool:
+        """按钮命中位置是否落在目标英雄的搜索窗口内（设计文档 §4.3）。
+
+        窗口相对英雄格中心：±search_dx_ratio 宽、向上 search_up_ratio 高、
+        向下 search_down_ratio 高（比例参数在 tasks.yaml 的
+        locators.transform_button，由棋盘格尺寸推导）。窗口外命中（如误点了
+        别的英雄弹出的按钮）不算本次目标。window_ctx 缺失时不拦截。
+        """
+        if window_ctx is None:
+            return True
+        cfg = self._transform_locator or {}
+        cw, ch = window_ctx.client_size
+        dx_tol = float(cfg.get("search_dx_ratio", 0.11)) * cw
+        up_tol = float(cfg.get("search_up_ratio", 0.093)) * ch
+        down_tol = float(cfg.get("search_down_ratio", 0.015)) * ch
+        dx = match_pos[0] - hero_pos[0]
+        dy = match_pos[1] - hero_pos[1]
+        return abs(dx) <= dx_tol and -up_tol <= dy <= down_tol
+
+    def _clear_transform_state(self) -> None:
+        """清空变身阶段状态（不重置本局已用次数计数器）。"""
+        self._transform_stage = None
+        self._transform_target = None
+        self._transform_button_pos = None
+        self._transform_reclicks = 0
+        self._transform_verify_attempts = 0
+        self._transform_poll_deadline = 0.0
 
     def _batch_summon_action(
         self,
@@ -2715,6 +3039,9 @@ class CoopTask(Task):
             self._topup_active = False
             self._topup_done = False
             self._summon_retry_at = None
+            self._transform_used_count = 0
+            self._transform_skip_signature = None
+            self._clear_transform_state()
             # 点过准备 = 本会话已完成难度勾选（无论程序选的还是手动选的）
             self._difficulty_done_session = True
         elif tag == "opening_load_wait":
@@ -2905,6 +3232,9 @@ class CoopTask(Task):
         self._skill_refresh_button_waits = 0
         self._topup_active = False
         self._topup_done = False
+        self._transform_used_count = 0
+        self._transform_skip_signature = None
+        self._clear_transform_state()
 
     @staticmethod
     def _board_signature(board: BoardSnapshot) -> tuple:

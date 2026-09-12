@@ -36,6 +36,17 @@ from wlxq_bot.tasks.coop import (
 # 构造辅助
 # ---------------------------------------------------------------------------
 
+# 变身按钮 locator 测试夹具（与 configs/tasks.yaml 的 transform_button 同构）
+TRANSFORM_LOCATOR = {
+    "strategy": "template",
+    "template": "buttons/bian_shen.png",
+    "threshold": 0.85,
+    "action_point": {"source": "match_center"},
+    "search_dx_ratio": 0.11,
+    "search_up_ratio": 0.093,
+    "search_down_ratio": 0.015,
+}
+
 
 def make_window_ctx(cw: int = 923, ch: int = 1723) -> WindowContext:
     return WindowContext(
@@ -65,6 +76,7 @@ def make_task(
     main_c_profile: MainCProfile | None = None,
     mode_profile: ModeProfile | None = None,
     pet_difficulty_targets: list[str] | None = None,
+    transform_button_locator: dict | None = None,
 ) -> CoopTask:
     ctx = TaskContext(main_c=main_c, max_rounds=max_rounds)
     run_cfg = RunConfig(
@@ -115,6 +127,7 @@ def make_task(
         main_c_profile=main_c_profile,
         mode_profile=mode_profile or default_entry_mode_profile(),
         pet_difficulty_targets=pet_difficulty_targets,
+        transform_button_locator=transform_button_locator,
     )
 
 
@@ -3932,3 +3945,289 @@ class TestSelectTransform:
     def test_none_when_board_empty(self):
         task = make_task()
         assert task._strategy.select_transform(make_board([]), 0, 2) is None
+
+
+class TestTransformSequence:
+    """变身阶段机：poll → confirm → verify（设计文档 §4.2）。
+
+    驱动方式与仓库惯例一致：直接设置任务私有字段 + 构造 Observation 断言动作。
+    """
+
+    def _ready_task(self) -> CoopTask:
+        task = make_task(transform_button_locator=TRANSFORM_LOCATOR)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        return task
+
+    def _button_obs(self, match: MatchResult | None) -> Observation:
+        raw: dict = {"transform_button_visible": match is not None}
+        if match is not None:
+            raw["transform_button_match"] = match
+        return Observation(frame_id=1, raw_data=raw)
+
+    # ---- 触发 ----
+
+    def test_triggers_click_hero_on_three_star_non_main_c(self):
+        task = self._ready_task()
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "transform_click_hero"
+        assert decision[0].target == (100, 100)
+        assert task._transform_stage == "poll"
+        assert task._transform_target is not None
+        assert task._transform_target.hero_type == "snow"
+
+    def test_no_trigger_without_locator(self):
+        """未接线 locator（如模板缺失降级）时不变身，回落常规决策。"""
+        task = make_task()  # 默认不传 locator
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "transform_click_hero"
+        assert task._transform_stage is None
+
+    def test_no_trigger_when_main_c_ready(self):
+        task = self._ready_task()
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("snow", star=3, pos=(300, 300)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert task._transform_stage is None
+
+    def test_no_trigger_when_charges_exhausted(self):
+        task = self._ready_task()
+        task._transform_used_count = 2
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "transform_click_hero"
+
+    # ---- poll ----
+
+    def _enter_poll(self, task: CoopTask) -> None:
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None and decision[0].tag == "transform_click_hero"
+
+    def test_poll_clicks_button_when_in_window(self):
+        task = self._ready_task()
+        self._enter_poll(task)
+        match = MatchResult("bian_shen.png", (100, 45), 0.95)
+        decision = task.decide_action(self._button_obs(match), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "transform_click_button"
+        assert decision[0].target == (100, 45)
+        assert task._transform_stage == "confirm"
+        assert task._transform_button_pos == (100, 45)
+
+    def test_poll_waits_when_button_missing(self):
+        task = self._ready_task()
+        self._enter_poll(task)
+        decision = task.decide_action(self._button_obs(None), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "wait"
+        assert decision[0].tag == "transform_button_poll"
+
+    def test_poll_rejects_match_outside_window(self):
+        """窗口外命中（如点击落到了别的英雄上弹出的按钮）不算我们的按钮。"""
+        task = self._ready_task()
+        self._enter_poll(task)
+        match = MatchResult("bian_shen.png", (500, 45), 0.95)
+        decision = task.decide_action(self._button_obs(match), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_button_poll"
+
+    def test_poll_timeout_reclicks_hero_then_gives_up(self):
+        task = self._ready_task()
+        self._enter_poll(task)
+        task._transform_poll_deadline = 0.0  # 轮询超时
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        obs = Observation(frame_id=1, board=board)
+        # 第一次超时：重点击英雄
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_reclick_hero"
+        assert task._transform_reclicks == 1
+        # 耗尽重点击预算后再超时：放弃，回落常规决策；放弃记忆抑制立刻再触发
+        task._transform_reclicks = task._run_config.transform_button_reclick_max
+        task._transform_poll_deadline = 0.0
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag not in {
+            "transform_click_hero",
+            "transform_reclick_hero",
+            "transform_button_poll",
+        }
+        assert task._transform_stage is None
+        assert task._transform_used_count == 0
+        assert task._transform_skip_signature is not None
+
+    def test_giveup_suppression_lifts_when_board_evolves(self):
+        """棋盘演化（如召唤新英雄）后放弃记忆解除，变身可再次触发。"""
+        task = self._ready_task()
+        self._enter_poll(task)
+        task._transform_poll_deadline = 0.0
+        task._transform_reclicks = task._run_config.transform_button_reclick_max
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag != "transform_click_hero"
+        # 召唤后棋盘多了一个英雄：签名变化，解除抑制
+        board2 = make_board(
+            [
+                make_hero("snow", star=3, pos=(100, 100)),
+                make_hero("angel", star=1, pos=(300, 300)),
+            ]
+        )
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board2), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "transform_click_hero"
+        assert task._transform_skip_signature is None
+
+    # ---- confirm ----
+
+    def _enter_confirm(self, task: CoopTask) -> None:
+        self._enter_poll(task)
+        match = MatchResult("bian_shen.png", (100, 45), 0.95)
+        decision = task.decide_action(self._button_obs(match), make_window_ctx())
+        assert decision is not None and decision[0].tag == "transform_click_button"
+
+    def test_confirm_button_gone_settles_and_deducts(self):
+        task = self._ready_task()
+        self._enter_confirm(task)
+        decision = task.decide_action(self._button_obs(None), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "wait"
+        assert decision[0].tag == "transform_settle"
+        assert decision[0].duration == task._run_config.transform_settle_seconds
+        assert task._transform_stage == "verify"
+        assert task._transform_used_count == 1
+
+    def test_confirm_button_still_there_reclicks(self):
+        task = self._ready_task()
+        self._enter_confirm(task)
+        match = MatchResult("bian_shen.png", (105, 48), 0.94)  # 原位附近仍在
+        decision = task.decide_action(self._button_obs(match), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "transform_reclick_button"
+        assert task._transform_used_count == 0
+
+    def test_confirm_button_moved_counts_as_gone(self):
+        """原位按钮消失、别处出现新按钮（如另一次点击残留）按已消失处理。"""
+        task = self._ready_task()
+        self._enter_confirm(task)
+        match = MatchResult("bian_shen.png", (400, 700), 0.94)
+        decision = task.decide_action(self._button_obs(match), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_settle"
+        assert task._transform_used_count == 1
+
+    def test_confirm_exhausted_gives_up_without_deduct(self):
+        task = self._ready_task()
+        self._enter_confirm(task)
+        task._transform_reclicks = task._run_config.transform_button_reclick_max
+        match = MatchResult("bian_shen.png", (100, 45), 0.94)
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"transform_button_visible": True, "transform_button_match": match},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag not in {"transform_click_button", "transform_reclick_button"}
+        assert task._transform_stage is None
+        assert task._transform_used_count == 0
+        assert task._transform_skip_signature is not None
+
+    # ---- verify ----
+
+    def _enter_verify(self, task: CoopTask) -> None:
+        self._enter_confirm(task)
+        decision = task.decide_action(self._button_obs(None), make_window_ctx())
+        assert decision is not None and decision[0].tag == "transform_settle"
+
+    def test_verify_success_retriggers_on_same_position(self):
+        """变身出非主C：验证通过后立即对同一位置再次触发（连用，用户定案）。"""
+        task = self._ready_task()
+        self._enter_verify(task)
+        board = make_board([make_hero("angel", star=3, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_click_hero"  # 第二次连用
+        assert task._transform_stage == "poll"
+        assert task._transform_target is not None
+        assert task._transform_target.hero_type == "angel"
+        assert task._transform_used_count == 1
+
+    def test_verify_main_c_result_goes_to_skills(self):
+        """变出主C：验证通过后正常达标，进入选技能。"""
+        task = self._ready_task()
+        self._enter_verify(task)
+        board = make_board([make_hero("assault", star=3, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+
+    def test_verify_unchanged_type_retries_then_gives_up(self):
+        task = self._ready_task()
+        self._enter_verify(task)
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])  # 类型未变
+        obs = Observation(frame_id=1, board=board)
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_verify_retry"
+        task._transform_verify_attempts = task._run_config.transform_verify_attempts
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag not in {
+            "transform_verify_retry",
+            "transform_click_hero",  # 放弃记忆抑制立刻再触发
+        }
+        assert task._transform_stage is None
+        assert task._transform_skip_signature is not None
+
+    def test_verify_empty_board_waits(self):
+        task = self._ready_task()
+        self._enter_verify(task)
+        decision = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "wait"
+        assert decision[0].tag == "transform_verify_wait"
+
+    # ---- 钩子与重置 ----
+
+    def test_observation_mode_and_board_watch_by_stage(self):
+        task = self._ready_task()
+        self._enter_poll(task)
+        assert task.observation_mode() == "transform_button"
+        assert task.wants_board_watch() is False
+        task._transform_stage = "verify"
+        assert task.observation_mode() is None
+        assert task.wants_board_watch() is True
+
+    def test_round_reset_clears_counter(self):
+        task = self._ready_task()
+        self._enter_verify(task)
+        task._transform_used_count = 2
+        task._transform_skip_signature = (("snow", 3, (100, 100)),)
+        task.on_action_verified(Action(kind="wait", tag="ready_match"), State.ENTER_MATCH)
+        assert task._transform_used_count == 0
+        assert task._transform_stage is None
+        assert task._transform_skip_signature is None
