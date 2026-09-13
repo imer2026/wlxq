@@ -20,6 +20,14 @@ logger = get_logger(__name__)
 
 _engine: Any = None
 
+# 免检测整行识别（RapidOCR Global.width_height_ratio，默认 8）：宽高比超此值
+# 的图跳过文本检测、整图按一行识别。检测路径会把窄条带按 min_side=736
+# 放大后推理（慢速机实测 ~2.8s/条），整行路径只需一次识别（~0.6s）。
+# 技能页标题带每列只有标题一行文本，正好适配整行识别。
+_LINE_SHAPE_RATIO = 8
+# 填充灰：与检测预处理 letterbox 同色，识别模型视其为无内容背景
+_PAD_GRAY = 114
+
 # 金币/费用数字格式：纯数字或 K 后缀(3.3K)；中间不允许空格(识别结果先拼接)
 _GOLD_VALUE_RE = re.compile(r"^\d+(?:\.\d+)?[Kk]?$")
 # 红色(买不起)判定阈值：红字占比随文本长度变化——"2.5K"实测 0.233、
@@ -55,8 +63,10 @@ def _get_engine() -> Any:
 class TitleReader:
     """横带标题识别器。
 
-    read_with_confidence() 对输入图做一次 OCR，返回 [(文字, 置信度, (中心x, 中心y))]，
-    坐标相对输入图左上角。read() 是丢弃置信度的兼容封装。
+    read_with_confidence() 对输入图做一次 OCR（检测+识别），返回
+    [(文字, 置信度, (中心x, 中心y))]，坐标相对输入图左上角。read() 是丢弃
+    置信度的兼容封装。read_line() 把整图当一行识别（免检测快速路径，
+    只适合确定单行文本的图）。
     """
 
     def read_with_confidence(self, image: np.ndarray) -> list[tuple[str, float, tuple[int, int]]]:
@@ -75,6 +85,57 @@ class TitleReader:
 
     def read(self, image: np.ndarray) -> list[tuple[str, tuple[int, int]]]:
         return [(text, center) for text, _, center in self.read_with_confidence(image)]
+
+    def read_line(self, image: np.ndarray) -> list[tuple[str, tuple[int, int]]]:
+        """整图按单行文本识别（免检测快速路径）。
+
+        图过窄时对称灰色填充到宽高比 > _LINE_SHAPE_RATIO，触发引擎的
+        免检测分支（见模块注释）。返回 [(文字, (中心x, 中心y))] 与 read()
+        同构（单行，中心即图中心）；无文本返回空列表。输入必须确实是
+        单行文本——多行文本整行识别会串读。
+        """
+        if image is None or image.size == 0:
+            return []
+        height, width = image.shape[:2]
+        target = height * _LINE_SHAPE_RATIO + 2
+        if width < target:
+            canvas = np.full((height, target, 3), _PAD_GRAY, dtype=np.uint8)
+            left = (target - width) // 2
+            canvas[:, left : left + width] = image
+            image = canvas
+            height, width = image.shape[:2]
+        engine = _get_engine()
+        result, _ = engine(image)
+        if not result:
+            return []
+        text = str(result[0][1]).strip()
+        if not text:
+            return []
+        return [(text, (width // 2, height // 2))]
+
+
+def tight_text_rows(image: np.ndarray) -> np.ndarray:
+    """按行水平梯度能量把条带上下收紧到文字实际行。
+
+    整行识别统一按 48px 高归一：不收紧时标题字符被缩到 ~20px、误读率明显
+    升高（2026-09-13 离线 120 条带对比：收紧后门控通过率 95%）。找不到
+    文字行（纯色带）时原样返回。
+    """
+    if image is None or image.size == 0:
+        return image
+    gray = image.mean(axis=2) if image.ndim == 3 else image.astype(float)
+    gradient = np.abs(np.diff(gray, axis=1)).sum(axis=1)
+    if gradient.size == 0 or gradient.max() == 0:
+        return image
+    rows = np.where(gradient > gradient.max() * 0.05)[0]
+    if rows.size == 0:
+        return image
+    margin = max(2, image.shape[0] // 20)
+    top = max(0, int(rows[0]) - margin)
+    bottom = min(image.shape[0], int(rows[-1]) + 1 + margin)
+    if bottom - top < 12:
+        return image
+    return image[top:bottom, :]
 
 
 @dataclass(frozen=True)

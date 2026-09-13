@@ -317,6 +317,7 @@ class Runner:
             ),
             mode_card_roi=mode_profile.entry.mode_card_roi,
             challenge_roi=mode_profile.entry.challenge_roi,
+            weekly_buff_roi=mode_profile.entry.weekly_buff_roi,
             mode_select_min_confidence=float(
                 self.tasks_config.mode_select_recognition.get("min_confidence", 0.5)
             ),
@@ -544,6 +545,7 @@ class Runner:
             ),
             mode_card_roi=mode_profile.entry.mode_card_roi,
             challenge_roi=mode_profile.entry.challenge_roi,
+            weekly_buff_roi=mode_profile.entry.weekly_buff_roi,
             mode_select_min_confidence=float(
                 self.tasks_config.mode_select_recognition.get("min_confidence", 0.5)
             ),
@@ -808,6 +810,14 @@ class Runner:
                     light=light_verify,
                 )
             observe_ms = (time.perf_counter() - observe_started) * 1000
+            # 每帧耗时基线（与截图超龄告警同一口径）：定位慢环节用——
+            # 识别大头是技能页三列标题 OCR，慢速机单次数秒
+            logger.debug(
+                "frame=%d 截图=%.0fms 识别=%.0fms",
+                ctx.frame_id,
+                capture_ms,
+                observe_ms,
+            )
 
             if observation.frame_id != ctx.frame_id:
                 logger.error(
@@ -1057,7 +1067,17 @@ class Runner:
                     )
 
             # 7. 执行
+            exec_started = time.perf_counter()
             result = executor.execute(ctx, action)
+            # 执行耗时含动作后的稳定等待（wait 的 duration / 点击的拟人间隔
+            # 或 post_delay），用于与截图/识别耗时对照定位慢环节
+            logger.debug(
+                "frame=%d 动作执行=%.0fms kind=%s tag=%s",
+                ctx.frame_id,
+                (time.perf_counter() - exec_started) * 1000,
+                action.kind,
+                action.tag,
+            )
             if not result.executed:
                 logger.warning("动作执行失败: %s", result.failure_reason)
                 if safety.record_failure():
@@ -1507,6 +1527,20 @@ class Runner:
                 f"模式 {display!r} 的领地入口 OCR ROI 未标定: "
                 f"rois.{missing_entry_rois}（OCR 必须限域，禁止全图识别）"
             )
+        # 挑战页每周弹窗（保卫宠物=本周Buff）：两项须同时配置或同时缺省；
+        # 配置了就要求识别区已标定（OCR 必须限域）
+        if bool(entry.weekly_buff_text) != bool(entry.weekly_buff_roi):
+            raise RuntimeError(
+                f"模式 {display!r} 的 entry.weekly_buff_text 与 entry.weekly_buff_roi "
+                "必须同时配置或同时缺省（configs/default.yaml mode_profiles）"
+            )
+        if entry.weekly_buff_roi:
+            buff_roi = self.tasks_config.rois.get(entry.weekly_buff_roi)
+            if buff_roi is None or buff_roi.width_ratio <= 0 or buff_roi.height_ratio <= 0:
+                raise RuntimeError(
+                    f"模式 {display!r} 的每周弹窗 OCR ROI 未标定: "
+                    f"rois.{entry.weekly_buff_roi}（OCR 必须限域，禁止全图识别）"
+                )
         try:
             ensure_engine()
         except RuntimeError as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -19,24 +20,55 @@ from wlxq_bot.tasks.coop import CoopTask
 
 
 class FakeTitleReader:
-    """假标题识别器：按调用顺序返回预设响应（每次 read 消费一条）。
+    """假标题识别器（线程安全，按图像内容分发响应）。
 
-    逐列裁剪后每列调用一次 read；未收录技能还会对整卡补一次描述 OCR。
+    read_line 是免检测整行快速路径（三列并发调用，按 make_column_frame
+    的列底色分发）；read 是检测路径（同样按列分发，整卡描述 OCR 按
+    高度 ≥300 单独分发）。
     """
 
-    def __init__(self, responses: list[list[tuple[str, tuple[int, int]]]]) -> None:
-        self._responses = list(responses)
-        self.calls = 0
+    _COL_GRAY = (200.0, 170.0, 140.0)
+
+    def __init__(
+        self,
+        line_by_col: dict[int, list[tuple[str, tuple[int, int]]]] | None = None,
+        title_by_col: dict[int, list[tuple[str, tuple[int, int]]]] | None = None,
+        desc_lines: list[list[tuple[str, tuple[int, int]]]] | None = None,
+    ) -> None:
+        self._line_by_col = dict(line_by_col or {})
+        self._title_by_col = dict(title_by_col or {})
+        self._desc_lines = list(desc_lines or [])
+        self.line_calls = 0
+        self.read_calls = 0
+        self._lock = threading.Lock()
+
+    def _column_of(self, image: np.ndarray) -> int:
+        gray = float(image[:, :, 0].mean())
+        return min(range(3), key=lambda i: abs(self._COL_GRAY[i] - gray))
+
+    def read_line(self, image: np.ndarray) -> list[tuple[str, tuple[int, int]]]:
+        with self._lock:
+            self.line_calls += 1
+            return list(self._line_by_col.get(self._column_of(image), []))
 
     def read(self, image: np.ndarray) -> list[tuple[str, tuple[int, int]]]:
-        self.calls += 1
-        if not self._responses:
-            return []
-        return self._responses.pop(0)
+        with self._lock:
+            self.read_calls += 1
+            if image.shape[0] >= 300:
+                return list(self._desc_lines.pop(0)) if self._desc_lines else []
+            return list(self._title_by_col.get(self._column_of(image), []))
 
 
 def make_frame(width: int = 300, height: int = 600) -> np.ndarray:
     return np.full((height, width, 3), 200, dtype=np.uint8)
+
+
+def make_column_frame(width: int = 300, height: int = 600) -> np.ndarray:
+    """三列不同底色的帧（200/170/140），供检测路径测试按列分发响应。"""
+    frame = make_frame(width, height)
+    for column, gray in enumerate(FakeTitleReader._COL_GRAY):
+        frame[:, column * 100 : (column + 1) * 100] = int(gray)
+    return frame
 
 
 def make_ctx(frame_id: int) -> WindowContext:
@@ -87,16 +119,16 @@ SKILL_TIERS = {"天穹支援": 1, "冰雪凤鸣": 11, "血量传承": 11}
 
 class TestPerceptionTitleOcr:
     def test_options_produced_with_tiers(self, tmp_path: Path) -> None:
-        """逐列 OCR 读出三张卡标题 → skill_card_options 带列号/档位/点击位置。"""
+        """逐列免检测整行识别读出三张卡标题 → skill_card_options 带列号/档位。"""
         reader = FakeTitleReader(
-            [
-                [("天穹支援", (20, 10))],   # 第 0 列标题
-                [("冰雪凤鸣", (20, 10))],   # 第 1 列标题
-                [("血量传承", (20, 10))],   # 第 2 列标题
-            ]
+            line_by_col={
+                0: [("天穹支援", (10, 10))],
+                1: [("冰雪凤鸣", (10, 10))],
+                2: [("血量传承", (10, 10))],
+            }
         )
         perception = make_perception(tmp_path, reader, SKILL_TIERS)
-        frame = make_frame()
+        frame = make_column_frame()
         raw_data: dict = {"select_skill_button_visible": True}
 
         result = perception._detect_skill_candidates(
@@ -104,6 +136,8 @@ class TestPerceptionTitleOcr:
         )
 
         assert result == []  # OCR 主路径不走图标识别
+        assert reader.line_calls == 3  # 快速路径每列一次整行识别
+        assert reader.read_calls == 0  # 三列全部过门控，无需检测路径
         options = raw_data["skill_card_options"]
         assert [o["column"] for o in options] == [0, 1, 2]
         assert [o["name"] for o in options] == ["天穹支援", "冰雪凤鸣", "血量传承"]
@@ -113,18 +147,76 @@ class TestPerceptionTitleOcr:
         assert options[0]["position"][0] == 50
         assert options[2]["position"][0] == 250
 
-    def test_unknown_title_recorded_and_tier11(self, tmp_path: Path) -> None:
-        """标题不在清单 → 第 11 档,整卡补描述并记录到 new_skills.yaml。"""
+    def test_fuzzy_variant_fast_path_accepts(self, tmp_path: Path) -> None:
+        """快速识别的单字误读（圣灵底护）模糊命中清单（圣灵庇护）→ 接受。"""
+        tiers = {"天穹支援": 1, "圣灵庇护": 5, "血量传承": 11}
         reader = FakeTitleReader(
-            [
-                [("新技能甲", (20, 10))],  # 第 0 列标题
-                [],                        # 第 0 列整卡描述 OCR（纯色图无文字）
-                [],                        # 第 1 列标题（无文字）
-                [],                        # 第 2 列标题（无文字）
-            ]
+            line_by_col={
+                0: [("天穹支援", (10, 10))],
+                1: [("圣灵底护", (10, 10))],
+                2: [("血量传承", (10, 10))],
+            }
+        )
+        perception = make_perception(tmp_path, reader, tiers)
+        frame = make_column_frame()
+        raw_data: dict = {"select_skill_button_visible": True}
+
+        perception._detect_skill_candidates(make_ctx(1), frame, [], raw_data, page="X")
+
+        assert reader.read_calls == 0  # 全部可归入清单，不走检测
+        options = raw_data["skill_card_options"]
+        assert options[1]["name"] == "圣灵底护"
+        assert options[1]["tier"] == 5
+        assert options[1]["known"] is True
+
+    def test_gate_fail_falls_back_per_strip(self, tmp_path: Path) -> None:
+        """单列快速识别对不上清单（双字符误读）→ 只有该列回退检测路径。"""
+        reader = FakeTitleReader(
+            line_by_col={
+                0: [("天享支摄", (10, 10))],  # 对不上清单 → 该列回退
+                1: [("冰雪凤鸣", (10, 10))],
+                2: [("血量传承", (10, 10))],
+            },
+            title_by_col={0: [("天穹支援", (20, 10))]},
         )
         perception = make_perception(tmp_path, reader, dict(SKILL_TIERS))
-        frame = make_frame()
+        frame = make_column_frame()
+        raw_data: dict = {"select_skill_button_visible": True}
+
+        perception._detect_skill_candidates(make_ctx(1), frame, [], raw_data, page="X")
+
+        assert reader.line_calls == 3 and reader.read_calls == 1  # 只有第 0 列检测
+        options = raw_data["skill_card_options"]
+        assert [o["name"] for o in options] == ["天穹支援", "冰雪凤鸣", "血量传承"]
+
+    def test_blank_strips_accepted_without_detection(self, tmp_path: Path) -> None:
+        """三列全读空（页面未渲染的过渡帧）→ 判空，不浪费检测路径。"""
+        reader = FakeTitleReader(line_by_col={0: [], 1: [], 2: []})
+        perception = make_perception(tmp_path, reader, dict(SKILL_TIERS))
+        frame = make_column_frame()
+        raw_data: dict = {"select_skill_button_visible": True}
+
+        result = perception._detect_skill_candidates(
+            make_ctx(1), frame, [], raw_data, page="X"
+        )
+
+        assert result == []
+        assert reader.read_calls == 0  # 过渡帧不再付逐列检测的 ~2.4s
+        assert "skill_card_options" not in raw_data
+
+    def test_unknown_title_recorded_and_tier11(self, tmp_path: Path) -> None:
+        """标题不在清单 → 检测路径读出后走未知技能流程：整卡补描述并记录。"""
+        reader = FakeTitleReader(
+            line_by_col={
+                0: [("新技能甲", (10, 10))],  # 不在清单 → 该列回退检测
+                1: [("冰雪凤鸣", (10, 10))],
+                2: [("血量传承", (10, 10))],
+            },
+            title_by_col={0: [("新技能甲", (20, 10))]},
+            desc_lines=[[]],  # 第 0 列整卡描述 OCR（纯色图无文字）
+        )
+        perception = make_perception(tmp_path, reader, dict(SKILL_TIERS))
+        frame = make_column_frame()
         raw_data: dict = {"select_skill_button_visible": True}
 
         perception._detect_skill_candidates(
@@ -132,7 +224,7 @@ class TestPerceptionTitleOcr:
         )
 
         options = raw_data["skill_card_options"]
-        assert len(options) == 1
+        assert len(options) == 3
         assert options[0]["name"] == "新技能甲"
         assert options[0]["tier"] == 11
         assert options[0]["known"] is False
@@ -141,19 +233,28 @@ class TestPerceptionTitleOcr:
         data = yaml.safe_load(new_file.read_text(encoding="utf-8"))
         assert data["new_skills"][0]["name"] == "新技能甲"
 
-    def test_fuzzy_variant_matches_catalog(self, tmp_path: Path) -> None:
-        """OCR 误写(圣灵底护)模糊命中清单(圣灵庇护) → 已知技能,不记录。"""
-        reader = FakeTitleReader([[("圣灵底护", (20, 10))]])
-        perception = make_perception(tmp_path, reader, {"圣灵庇护": 5})
-        frame = make_frame()
+    def test_topmost_line_wins_per_column(self, tmp_path: Path) -> None:
+        """检测路径回退时同一列多行文本取最上方（标题），与旧语义一致。"""
+        reader = FakeTitleReader(
+            line_by_col={
+                0: [("坏读数", (10, 10))],  # 对不上清单 → 该列回退
+                1: [("冰雪凤鸣", (10, 10))],
+                2: [("血量传承", (10, 10))],
+            },
+            title_by_col={
+                0: [("真标题甲", (20, 10)), ("噪声明", (20, 60))],  # y=10 在上
+            },
+        )
+        perception = make_perception(
+            tmp_path, reader, {"真标题甲": 1, "冰雪凤鸣": 11, "血量传承": 11}
+        )
+        frame = make_column_frame()
         raw_data: dict = {"select_skill_button_visible": True}
 
         perception._detect_skill_candidates(make_ctx(1), frame, [], raw_data, page="X")
 
         options = raw_data["skill_card_options"]
-        assert options[0]["tier"] == 5
-        assert options[0]["known"] is True
-        assert not (tmp_path / "skill_cards" / "new_skills.yaml").exists()
+        assert options[0]["name"] == "真标题甲"
 
     def test_no_reader_falls_back_to_icons(self, tmp_path: Path) -> None:
         """未配置识别器时不产 options,走图标兜底(此处仅验证不产 options)。"""
@@ -177,7 +278,9 @@ class TestPerceptionTitleOcr:
             tasks_cfg,
             CoopRole.HELPER,
             "assault",
-            title_reader=FakeTitleReader([("天穹支援", 50)]),
+            title_reader=FakeTitleReader(
+                line_by_col={0: [("天穹支援", (50, 10))]}
+            ),
             skill_tiers=dict(SKILL_TIERS),
         )
         frame = make_frame()

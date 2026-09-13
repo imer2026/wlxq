@@ -160,6 +160,13 @@ run:
   # 金币费用红色（游戏自身判买不起）时的等待时长（秒）：等待后重新识别再判，
   # 等击杀回金（2026-09-10 用户定案：红色等 1 秒再查）
   gold_red_wait_seconds: 1.0
+  # 局内付费选技能流程（点【选技能】开页 / 按档位选卡 / 图标命中选卡 / 兜底
+  # 选卡）点击后的固定间隔（秒）：替代全局 input.min/max_delay 的 1.0~2.0
+  # 随机拟人间隔，加快「开页→OCR→选卡」循环（2026-09-13 实机：一轮 5 秒里
+  # 1~2 秒是随机间隔）。间隔偏短时页面动画未播完只会多一次 0.2 秒的廉价
+  # 验证重试，不会误点；开局技能页与 4 星赠送页不适用（其验证帧需完整
+  # OCR 比对卡面）。0 = 退回全局随机拟人间隔
+  skill_click_post_delay_seconds: 0.5
   # 其他队友英雄的技能卡图标（对应 hero_classifier.lineup_others 的三名英雄，
   # 实机采集 2026-08-15）：技能页已打开但未识别到主C图标时，识别到任一队友
   # 图标即确认页面已稳定、本组没有主C技能卡，立即随机选一张，
@@ -367,6 +374,12 @@ mode_profiles:
       mode_card_text: 保卫
       challenge_roi: pet_challenge_start_area
       challenge_text: 挑战
+      # 每天首次进入保卫宠物挑战页弹出「本周Buff」弹窗：OCR 读【知道了】
+      # 按钮文字并点文字框中心关闭（开环）。OCR 实测丢末字读成「知道」，
+      # 匹配目标配两字（子串命中「知道」/「知道了」两种读法）；ROI 见
+      # tasks.yaml rois.pet_weekly_buff_area（离线验证 2026-09-13）
+      weekly_buff_roi: pet_weekly_buff_area
+      weekly_buff_text: 知道
       difficulty:
         kind: ocr
         targets: [普通, 中等]

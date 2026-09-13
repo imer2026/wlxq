@@ -137,6 +137,11 @@ class EntryProfile(BaseModel):
     mode_card_text: str | None = None
     challenge_roi: str | None = None
     challenge_text: str | None = None
+    # 挑战页可能弹出的每周弹窗（保卫宠物=本周Buff，每天首次进入弹出）：
+    # roi 指向弹窗确认按钮文字区域，text 为 OCR 子串匹配目标。两项须同时
+    # 配置或同时缺省；缺省 = 挑战页确认后直接进招募（旧行为）
+    weekly_buff_roi: str | None = None
+    weekly_buff_text: str | None = None
     difficulty: DifficultyProfile = Field(default_factory=DifficultyProfile)
 
 
@@ -294,6 +299,14 @@ class RunConfig(BaseModel):
     # 金币费用红色（游戏自身判买不起）时的等待时长（秒）：等待后重新识别
     # 再判，等击杀回金（2026-09-10 用户定案：红色等 1 秒再查）
     gold_red_wait_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
+    # 局内付费选技能流程（点【选技能】开页 / 按档位选卡 / 图标命中选卡 /
+    # 兜底选卡）点击后的固定间隔（秒）：替代全局 input.min/max_delay 的
+    # 1.0~2.0 随机拟人间隔——2026-09-13 实机日志，「开页→OCR→选卡」一轮
+    # 5 秒里 1~2 秒是随机间隔。选卡验证帧为轻量识别、失败重试间隔 0.2 秒，
+    # 间隔偏短时页面动画未播完只会多一次廉价重试，不会误点。开局技能页与
+    # 4 星赠送页不适用（验证帧需完整 OCR 比对卡面，过早截图反而多等一轮
+    # 数秒的完整识别）。0 = 退回全局随机拟人间隔。
+    skill_click_post_delay_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
     # 其他队友英雄的技能卡图标（本局阵容 lineup_others 对应）：技能页已打开但
     # 未识别到主C图标时，识别到任一队友图标即确认页面稳定且本组无主C技能卡，
     # 立即随机选一张，不再等满 skill_recognition_frames 帧

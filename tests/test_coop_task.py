@@ -158,6 +158,7 @@ def make_mode_profile(
     return_button: str = "return_button",
     mode_card_text: str | None = "合作",
     challenge_text: str | None = "开始挑战",
+    weekly_buff_text: str | None = None,
 ) -> ModeProfile:
     return ModeProfile(
         display_name="测试模式",
@@ -167,6 +168,7 @@ def make_mode_profile(
             "mode_tab_text": mode_tab_text,
             "mode_card_text": mode_card_text,
             "challenge_text": challenge_text,
+            "weekly_buff_text": weekly_buff_text,
             "difficulty": {"kind": difficulty_kind, "targets": difficulty_targets or []},
         },
         match={"ready_button": ready_button, "leave_team": leave_team},
@@ -3251,6 +3253,101 @@ class TestTerritoryEntry:
         assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
         assert task._after_tab_step == _RecruitStep.OPEN_DIFFICULTY_DIALOG
 
+    def test_weekly_buff_full_path_click_then_advance(self):
+        """配置了每周弹窗识别：挑战页确认先进关闭步骤，命中点文字框中心，
+        弹窗消失后经宽限帧放行进招募（旧行为：直接进聊天步骤）。"""
+        task = make_task(
+            mode_profile=make_mode_profile(weekly_buff_text="知道")
+        )
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "challenge_page_confirmed"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.CLOSE_WEEKLY_BUFF
+
+        # 弹窗在：点「知道」文字框中心（开环），步骤停留等弹窗关闭
+        popup = Observation(
+            frame_id=2, raw_data={"weekly_buff_rows": [ModeTabRow("知道", 0.665, (452, 1306))]}
+        )
+        decision = task.decide_action(popup, make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "close_weekly_buff"
+        assert decision[0].target == (452, 1306)
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.CLOSE_WEEKLY_BUFF
+
+        # 点击后弹窗消失：宽限帧内继续等（弹窗可能延迟弹出/关闭有过渡帧），
+        # 宽限耗尽后放行进招募聊天步骤
+        empty = Observation(frame_id=3, raw_data={"weekly_buff_rows": []})
+        pending = task.decide_action(empty, make_window_ctx())
+        assert pending is not None and pending[0].tag == "weekly_buff_pending"
+        task.on_action_verified(*pending)
+        absent = task.decide_action(empty, make_window_ctx())
+        assert absent is not None and absent[0].tag == "weekly_buff_absent"
+        task.on_action_verified(*absent)
+        assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
+
+    def test_weekly_buff_absent_advances_after_grace(self):
+        """无弹窗（非首次进入）：连续宽限帧读不到按钮文字，直接放行进招募。"""
+        task = make_task(
+            mode_profile=make_mode_profile(weekly_buff_text="知道")
+        )
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CLOSE_WEEKLY_BUFF
+        empty = Observation(frame_id=1, raw_data={"weekly_buff_rows": []})
+        pending = task.decide_action(empty, make_window_ctx())
+        assert pending is not None and pending[0].tag == "weekly_buff_pending"
+        task.on_action_verified(*pending)
+        absent = task.decide_action(empty, make_window_ctx())
+        assert absent is not None and absent[0].tag == "weekly_buff_absent"
+        task.on_action_verified(*absent)
+        assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
+
+    def test_weekly_buff_ignores_unrelated_rows(self):
+        """识别区读到无关文字（如弹窗缺席时的背景「刷新」）：不算命中。"""
+        task = make_task(
+            mode_profile=make_mode_profile(weekly_buff_text="知道")
+        )
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CLOSE_WEEKLY_BUFF
+        noisy = Observation(
+            frame_id=1, raw_data={"weekly_buff_rows": [ModeTabRow("刷新", 0.56, (400, 1300))]}
+        )
+        decision = task.decide_action(noisy, make_window_ctx())
+        assert decision is not None and decision[0].tag == "weekly_buff_pending"
+
+    def test_weekly_buff_timeout_stops_conservatively(self):
+        """弹窗持续可见（点击未生效）超过入口等待上限：保守停止不无限重点。"""
+        task = make_task(
+            mode_profile=make_mode_profile(weekly_buff_text="知道")
+        )
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CLOSE_WEEKLY_BUFF
+        task._entry_wait_started_at = 0.0
+        task._clock = lambda: task._entry_wait_timeout_seconds + 1.0
+        popup = Observation(
+            frame_id=1, raw_data={"weekly_buff_rows": [ModeTabRow("知道", 0.665, (452, 1306))]}
+        )
+        assert task.decide_action(popup, make_window_ctx()) is None
+
+    def test_weekly_buff_unconfigured_mode_skips_step(self):
+        """未配置 weekly_buff_text（合作模式）：挑战页确认后直接进聊天步骤。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "challenge_page_confirmed"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
+
     def test_entry_wait_timeout_stops_conservatively(self):
         """等待超上限：保守停止（decide 返回 None），不盲点不无限重试。"""
         task = make_task()
@@ -3895,6 +3992,77 @@ class TestSkillRefresh:
         task._skill_refresh_used_count = 1
         task._reset_for_home_reentry()
         assert task._skill_refresh_used_count == 0
+
+
+class TestSkillClickPostDelay:
+    """局内付费选技能流程点击用固定 post_delay（skill_click_post_delay_seconds）。
+
+    替代全局 input.min/max_delay 的随机拟人间隔，加快「开页→OCR→选卡」
+    循环；只作用于局内主流程（开页 / 按档位 / 图标命中 / 兜底选卡），
+    开局技能页与 4 星赠送页保持默认间隔（0）——它们的验证帧需完整 OCR
+    比对卡面，过早截图反而多等一轮数秒的完整识别。
+    """
+
+    def test_open_main_skills_uses_configured_post_delay(self):
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._next_skill_at = 0.0
+        obs = Observation(frame_id=1, raw_data={"gold": {"skill_red": False}})
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "open_main_skills"
+        assert decision[0].post_delay == task._run_config.skill_click_post_delay_seconds
+
+    def test_priority_pick_uses_configured_post_delay(self):
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._awaiting_main_candidates = True
+        decision = task.decide_action(
+            _skill_options_obs([("天穹支援", 1), ("星辰护盾", 11), ("圣羽加持", 9)]),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_skill_priority"
+        assert decision[0].post_delay == task._run_config.skill_click_post_delay_seconds
+
+    def test_icon_candidate_pick_uses_configured_post_delay(self):
+        # OCR 无结果但主C图标命中 → 图标选卡路径同样走固定间隔
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._awaiting_main_candidates = True
+        candidates = [SkillCandidate("assault", (100, 100), 0.9)]
+        decision = task.decide_action(
+            Observation(frame_id=1, skill_candidates=candidates),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_skill_candidate"
+        assert decision[0].post_delay == task._run_config.skill_click_post_delay_seconds
+
+    def test_fallback_pick_uses_configured_post_delay(self):
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._awaiting_main_candidates = True
+        task._main_skill_empty_checks = task._run_config.skill_recognition_frames
+        obs = Observation(frame_id=1, raw_data={"select_skill_button_visible": True})
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_skill_fallback"
+        assert decision[0].post_delay == task._run_config.skill_click_post_delay_seconds
+
+    def test_opening_flow_keeps_default_pacing(self):
+        # 开局技能页不适用固定间隔：验证帧要完整 OCR 比对卡面
+        task = make_task()
+        task.ctx.current_state = State.SELECT_OPENING_SKILLS
+        task._opening_loaded = True
+        candidates = [SkillCandidate("assault", (100, 100), 0.9)]
+        decision = task.decide_action(
+            Observation(frame_id=1, skill_candidates=candidates),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "opening_skill_candidate"
+        assert decision[0].post_delay == 0.0
 
 
 class TestSelectTransform:

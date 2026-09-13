@@ -2169,6 +2169,13 @@ class TestModeAssets:
                     "width_ratio": 0.17,
                     "height_ratio": 0.05,
                 },
+                "pet_weekly_buff_area": {
+                    "relative_to": "client",
+                    "x_ratio": 0.39,
+                    "y_ratio": 0.73,
+                    "width_ratio": 0.22,
+                    "height_ratio": 0.05,
+                },
             },
             pet_difficulty_recognition={"candidate_roi": "pet_difficulty_list",
                                         "min_confidence": 0.5,
@@ -2250,6 +2257,62 @@ class TestModeAssets:
                 TemplatePack(client_size=(923, 1723), root=pack_root),
                 State.FIND_COOP,
             )
+
+    def _pet_profile_with_weekly_buff(self, roi: str | None) -> ModeProfile:
+        data = self._pet_profile().model_dump()
+        data["entry"]["weekly_buff_text"] = "知道"
+        data["entry"]["weekly_buff_roi"] = roi
+        return ModeProfile.model_validate(data)
+
+    @staticmethod
+    def _pet_pack(tmp_path) -> TemplatePack:
+        pack_root = tmp_path / "3000x2000"
+        tpl_dir = pack_root / "buttons" / "bao_wei_chong_wu"
+        tpl_dir.mkdir(parents=True)
+        for name in ("zhun_bei.png", "fan_hui.png", "tui_dui.png"):
+            (tpl_dir / name).write_bytes(b"t")
+        return TemplatePack(client_size=(923, 1723), root=pack_root)
+
+    def test_check_mode_assets_weekly_buff_requires_paired_config(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """weekly_buff_text 与 weekly_buff_roi 必须同时配置或同时缺省。"""
+        monkeypatch.setattr("wlxq_bot.runner.ensure_engine", lambda: None)
+        runner = self._runner(self._pet_profile())
+
+        with pytest.raises(RuntimeError, match="同时配置"):
+            runner._check_mode_assets(
+                self._pet_profile_with_weekly_buff(roi=None),
+                self._pet_pack(tmp_path),
+                State.FIND_COOP,
+            )
+
+    def test_check_mode_assets_weekly_buff_requires_calibrated_roi(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """配置了每周弹窗识别：ROI 必须已标定（OCR 必须限域）。"""
+        monkeypatch.setattr("wlxq_bot.runner.ensure_engine", lambda: None)
+        runner = self._runner(self._pet_profile())
+        runner.tasks_config.rois["pet_weekly_buff_area"].width_ratio = 0.0
+
+        with pytest.raises(RuntimeError, match="pet_weekly_buff_area"):
+            runner._check_mode_assets(
+                self._pet_profile_with_weekly_buff(roi="pet_weekly_buff_area"),
+                self._pet_pack(tmp_path),
+                State.FIND_COOP,
+            )
+
+    def test_check_mode_assets_weekly_buff_calibrated_passes(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("wlxq_bot.runner.ensure_engine", lambda: None)
+        runner = self._runner(self._pet_profile())
+
+        runner._check_mode_assets(
+            self._pet_profile_with_weekly_buff(roi="pet_weekly_buff_area"),
+            self._pet_pack(tmp_path),
+            State.FIND_COOP,
+        )
 
 
 class TestVerifyAbortOnMatchEnd:

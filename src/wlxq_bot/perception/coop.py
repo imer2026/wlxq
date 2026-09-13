@@ -47,6 +47,7 @@ from wlxq_bot.perception.locator import (
     ratio_to_pixel_roi,
 )
 from wlxq_bot.perception.mode_tab import ModeTabRow, read_mode_tab_rows
+from wlxq_bot.perception.ocr import tight_text_rows
 from wlxq_bot.perception.pet_difficulty import read_difficulty_rows
 from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
@@ -165,6 +166,7 @@ class CoopPerception:
         mode_select_title_roi: str | None = None,
         mode_card_roi: str | None = None,
         challenge_roi: str | None = None,
+        weekly_buff_roi: str | None = None,
         mode_select_min_confidence: float = 0.5,
         skill_refresh_enabled: bool = False,
     ) -> None:
@@ -231,6 +233,9 @@ class CoopPerception:
         self._mode_select_title_roi = mode_select_title_roi
         self._mode_card_roi = mode_card_roi
         self._challenge_roi = challenge_roi
+        # 挑战页每周弹窗按钮识别区（保卫宠物=本周Buff【知道了】）；按模式
+        # 档案传入，None = 本模式无此弹窗，不读
+        self._weekly_buff_roi = weekly_buff_roi
         self._mode_select_min_confidence = mode_select_min_confidence
         # 局内技能页「刷新」按钮识别开关（RunConfig.skill_refresh_enabled）：
         # 关闭时跳过模板匹配，任务层也不会收到该标志
@@ -354,8 +359,11 @@ class CoopPerception:
             self._detect_mode_select_title(ctx, frame, raw_data)
             self._detect_mode_card_rows(ctx, frame, raw_data)
         elif observation_mode == "challenge_page":
-            # 领地入口最后一步：OCR 挑战页按钮文字（页面到达锚点）
+            # 领地入口最后一步：OCR 挑战页按钮文字（页面到达锚点）；配置了
+            # 每周弹窗识别区（保卫宠物=本周Buff）时同帧读按钮文字行
             self._detect_challenge_text(ctx, frame, raw_data)
+            if self._weekly_buff_roi:
+                self._detect_weekly_buff_rows(ctx, frame, raw_data)
         elif observation_mode == "transform_button":
             # 变身按钮轮询（任务层变身阶段机，仅 poll/confirm 两阶段请求）：
             # 匹配 locator transform_button；模板缺失时 _match_locator_template
@@ -764,6 +772,23 @@ class CoopPerception:
             "frame=%d 挑战按钮文字=%s", ctx.frame_id, raw_data["challenge_text"]
         )
 
+    def _detect_weekly_buff_rows(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 挑战页每周弹窗按钮文字行，写入 weekly_buff_rows（供任务层关闭弹窗）。
+
+        ROI 名按模式档案 entry.weekly_buff_roi 由 runner 传入；保卫宠物=
+        本周Buff 弹窗【知道了】按钮（每天首次进入弹出）。无弹窗时读空。
+        """
+        rows = self._read_entry_roi_rows(self._weekly_buff_roi, ctx, frame)
+        raw_data["weekly_buff_rows"] = rows
+        logger.debug(
+            "frame=%d 每周弹窗按钮行=%s", ctx.frame_id, [row.text for row in rows]
+        )
+
     def _detect_pet_difficulty_bar_flag(
         self,
         ctx: WindowContext,
@@ -908,7 +933,7 @@ class CoopPerception:
         return []
 
     def _read_title_lines(self, strip: Any) -> list[tuple[str, tuple[int, int]]]:
-        """单列标题 OCR；空图或异常返回空列表，不影响其他列。"""
+        """单张标题带 OCR；空图或异常返回空列表，不影响其他列。"""
         if strip is None or strip.size == 0:
             return []
         try:
@@ -917,6 +942,58 @@ class CoopPerception:
             logger.warning("技能标题 OCR 失败（单列跳过） error=%r", exc)
             return []
 
+    def _read_title_lines_fast(
+        self, strips: list[Any]
+    ) -> list[list[tuple[str, tuple[int, int]]] | None]:
+        """免检测整行识别三列标题（快速路径，三线程并发）。
+
+        每列：条带收紧到文字行 → 整行识别（引擎对宽高比 >8 的图跳过文本
+        检测，见 perception.ocr 模块注释；单条 ~0.5s，三线程并发实测
+        914ms/页，快于拼接整页单读的 1186ms/页——2026-09-13 离线 A/B）。
+
+        逐条门控，返回列表元素语义：
+        - list：接受该列结果（含空列表 = 条带无文字：识别置信度过滤与
+          检测路径同源，检测同样读不出，不再浪费检测；过渡帧三列全空）
+        - None：该列快速结果不可信（读出了名字但按精确或 0.7 模糊都对
+          不上清单——整行误读/多行混杂），调用方只对该列回退检测路径
+        """
+        if self._title_reader is None or self._skill_tiers is None:
+            return [None] * len(strips)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            return list(pool.map(self._read_strip_fast, strips))
+
+    def _read_strip_fast(
+        self, strip: Any
+    ) -> list[tuple[str, tuple[int, int]]] | None:
+        """单列标题的免检测整行识别 + 门控；None 表示需回退检测路径。"""
+        if strip is None or strip.size == 0:
+            return None
+        try:
+            lines = self._title_reader.read_line(tight_text_rows(strip))
+        except Exception as exc:  # noqa: BLE001 - 快速路径失败该列退回检测
+            logger.warning("技能标题快速识别异常，该列退回检测路径 error=%r", exc)
+            return None
+        if not lines:
+            return []
+        name = lines[0][0].strip()
+        if name and self._known_title(name):
+            return lines
+        logger.debug("标题快速识别未能对应清单技能，该列退回检测路径 name=%r", name)
+        return None
+
+    def _known_title(self, name: str) -> bool:
+        """标题能否按精确或模糊对上清单技能（与 _tier_and_description 同口径）。"""
+        if name in self._skill_tiers:
+            return True
+        return find_fuzzy_match(name, self._tier_name_entries) is not None
+
+    def _read_strips_separately(
+        self, strips: list[Any]
+    ) -> list[list[tuple[str, tuple[int, int]]]]:
+        """逐列分别 OCR（检测路径）：三列并发，总耗时≈最慢一列。"""
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            return list(pool.map(self._read_title_lines, strips))
+
     def _read_card_options(
         self,
         ctx: WindowContext,
@@ -924,12 +1001,18 @@ class CoopPerception:
         roi: tuple[int, int, int, int],
         page: str,
     ) -> list[dict[str, Any]]:
-        """按列分别裁标题带 OCR，读出三张卡的技能名并产出档位选项。
+        """读出三张卡的技能名并产出档位选项（免检测整行识别优先）。
 
-        必须逐列裁剪：整条横带一次 OCR 时，检测模型会把同一水平线的三个
-        标题合并成一个文本框（实机 2026-09-05：三连名拼接被误判为新技能），
-        列映射随之失效。未收录的技能 OCR 整卡补描述并记录到 new_skills.yaml，
-        按第 11 档处理。全部列读取失败时返回空，调用方回退图标识别。
+        主路径（2026-09-13 离线 2176 张采集卡验证 + A/B 对比）：三列标题带
+        各自收紧到文字行后走免检测整行识别（引擎对宽高比 >8 的图跳过
+        DBNet 检测——检测会把窄条带按 min_side=736 放大 7.5 倍推理，慢速机
+        ~2.8s/条，是旧行为单帧识别数秒的主因），三线程并发 ~0.9s/页。
+        逐列门控：读出的名字能按精确或 0.7 模糊对上清单才接受；读空视为
+        条带无文字（过渡帧三列全空，直接判空不再付检测）；对不上清单的
+        列回退逐列检测路径，正确性与旧行为一致，只退速度且回退粒度到列。
+
+        未收录的技能 OCR 整卡补描述并记录到 new_skills.yaml，按第 11 档
+        处理。全部列读取失败时返回空，调用方回退图标识别。
         """
         height, width = frame.shape[:2]
         rx, ry, rw, rh = roi
@@ -946,9 +1029,17 @@ class CoopPerception:
             left = int(rx + column * column_width) + inset
             right = int(rx + (column + 1) * column_width) - inset
             strips.append(frame[band_top:band_bottom, max(left, 0) : max(right, 0)])
-        # 三列并发 OCR：总耗时≈最慢一列，而非三列相加
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            column_lines = list(pool.map(self._read_title_lines, strips))
+        column_lines: list[list[tuple[str, tuple[int, int]]] | None] = (
+            self._read_title_lines_fast(strips)
+        )
+        slow_idx = [i for i, lines in enumerate(column_lines) if lines is None]
+        if slow_idx:
+            logger.debug(
+                "标题快速识别 %d 列未确认，仅这些列退回检测路径", len(slow_idx)
+            )
+            slow = self._read_strips_separately([strips[i] for i in slow_idx])
+            for i, lines in zip(slow_idx, slow, strict=True):
+                column_lines[i] = lines
         options: list[dict[str, Any]] = []
         for column, lines in enumerate(column_lines):
             if not lines:

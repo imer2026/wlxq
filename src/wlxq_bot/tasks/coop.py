@@ -82,6 +82,10 @@ _NO_PROGRESS_LIMIT = 8
 # 领地入口确认步骤：连续这么多帧未见目标标识就重点入口按钮（0.3s 轮询
 # 间隔下约 3 秒）；重点次数上限由 mode_select_recognition.entry_max_reclicks 配置
 _ENTRY_RECLICK_MISSES = 10
+# 挑战页每周弹窗的消失宽限：弹窗可能晚于页面到达弹出，连续这么多帧读不到
+# 按钮文字才放行进招募（0.3s 轮询间隔下约 1 秒）；弹窗只在本日首次进入出现，
+# 正常情况（已关/无弹窗）本步骤仅多等这几帧
+_WEEKLY_BUFF_GRACE_MISSES = 2
 # 主C系技能的最高优先级档位（compute_skill_tiers：第 8 档=主C未被显式档覆盖的
 # 技能，主C技能永不落第 11 档）。三张卡最低档 > 该值 = 本组没有任何主C系技能，
 # 是「刷新」分支的触发条件之一
@@ -100,6 +104,9 @@ class _RecruitStep(Enum):
     CONFIRM_MODE_SELECT_OPEN = "confirm_mode_select_open"
     SELECT_MODE_CARD = "select_mode_card"
     CONFIRM_CHALLENGE_PAGE = "confirm_challenge_page"
+    # 挑战页每周弹窗（保卫宠物=本周Buff，每天首次进入弹出）：读到按钮文字
+    # 即点文字框中心关闭；模式档案未配置 weekly_buff_text 时跳过本步骤
+    CLOSE_WEEKLY_BUFF = "close_weekly_buff"
     OPEN_CHALLENGE_CHAT = "open_challenge_chat"
     SELECT_MODE_TAB = "select_mode_tab"
     OPEN_DIFFICULTY_DIALOG = "open_difficulty_dialog"
@@ -245,6 +252,9 @@ class CoopTask(Task):
         self._selected_pet_targets: list[str] = []
         self._pet_difficulty_misses = 0
         self._pet_min_confidence = pet_difficulty_min_confidence
+        # 挑战页每周弹窗（保卫宠物=本周Buff）连续读不到按钮文字的帧计数：
+        # 达 _WEEKLY_BUFF_GRACE_MISSES 放行进招募（弹窗可能晚于页面弹出）
+        self._weekly_buff_misses = 0
 
         self._match_started_at: float | None = None
         self._next_skill_at: float | None = None
@@ -474,8 +484,12 @@ class CoopTask(Task):
         ):
             # 领地入口：OCR 模式选择弹窗标题（开关锚点）+ 本模式卡片文字
             return "mode_select"
-        if self._recruit_step is _RecruitStep.CONFIRM_CHALLENGE_PAGE:
-            # 领地入口收尾：OCR 挑战页按钮文字（到达锚点）
+        if self._recruit_step in (
+            _RecruitStep.CONFIRM_CHALLENGE_PAGE,
+            _RecruitStep.CLOSE_WEEKLY_BUFF,
+        ):
+            # 领地入口收尾：OCR 挑战页按钮文字（到达锚点）；每周弹窗关闭
+            # 步骤复用本模式同帧读弹窗按钮行（weekly_buff_rows）
             return "challenge_page"
         if self._recruit_step is _RecruitStep.SELECT_MODE_TAB and (
             self._mode is not None and self._mode.entry.mode_tab_text
@@ -822,7 +836,13 @@ class CoopTask(Task):
             logger.info(
                 "frame=%d 已到达挑战页（读到「%s」）", observation.frame_id, challenge_text
             )
-            self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
+            # 配置了每周弹窗识别（保卫宠物=本周Buff）先关弹窗再进招募；
+            # 等待 deadline 从进入本步骤起重新起算
+            if self._mode is not None and self._mode.entry.weekly_buff_text:
+                self._recruit_step = _RecruitStep.CLOSE_WEEKLY_BUFF
+                self._start_entry_wait()
+            else:
+                self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
             return (
                 Action(
                     kind="wait",
@@ -864,6 +884,82 @@ class CoopTask(Task):
         return self._entry_wait_action(
             "challenge_page_pending",
             "等待挑战页打开（按钮文字未命中）",
+        )
+
+    def _action_close_weekly_buff(
+        self,
+        observation: Observation,
+    ) -> tuple[Action, State] | None:
+        """关闭挑战页每周弹窗（保卫宠物=本周Buff，每天首次进入弹出）。
+
+        OCR 读按钮文字（模式档案 weekly_buff_text 子串匹配，「知道了」实测
+        被读成「知道」故配两字），命中即点文字框中心（开环，同选卡/难度
+        勾选策略）。弹窗可能晚于页面到达弹出：连续 _WEEKLY_BUFF_GRACE_MISSES
+        帧读不到才放行进招募；点击后弹窗关闭同样经宽限帧确认。持续命中
+        （点击未生效）或持续读不到都受入口等待上限约束，超时保守停止。
+        """
+        buff_text = self._mode.entry.weekly_buff_text if self._mode else None
+        if not buff_text:
+            # 档案未配置（不应到达）：直接放行，保持旧行为
+            self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="weekly_buff_absent",
+                    reason="模式档案未配置每周弹窗识别，跳过关闭步骤",
+                ),
+                State.FIND_COOP,
+            )
+        if self._entry_deadline_exceeded(observation, "挑战页每周弹窗持续可见（点击未生效）"):
+            return None
+        rows = [
+            row
+            for row in (observation.raw_data.get("weekly_buff_rows") or [])
+            if buff_text in row.text
+        ]
+        if rows:
+            best = max(rows, key=lambda row: row.confidence)
+            self._weekly_buff_misses = 0
+            logger.info(
+                "OCR 定位「%s」弹窗按钮 conf=%.2f client=%s",
+                buff_text,
+                best.confidence,
+                best.position,
+            )
+            return (
+                Action(
+                    kind="click",
+                    target=best.position,
+                    duration=0.08,
+                    verification="immediate",
+                    tag="close_weekly_buff",
+                    reason=f"关闭挑战页每周弹窗：点击「{buff_text}」",
+                ),
+                State.FIND_COOP,
+            )
+        self._weekly_buff_misses += 1
+        if self._weekly_buff_misses >= _WEEKLY_BUFF_GRACE_MISSES:
+            logger.info(
+                "frame=%d 挑战页每周弹窗不可见（连续 %d 帧），进招募",
+                observation.frame_id,
+                self._weekly_buff_misses,
+            )
+            self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="weekly_buff_absent",
+                    reason="挑战页每周弹窗不可见（宽限帧已过）",
+                ),
+                State.FIND_COOP,
+            )
+        return self._entry_wait_action(
+            "weekly_buff_pending",
+            "等待挑战页每周弹窗识别（弹窗可能延迟弹出）",
         )
 
     def _action_recruit_entry(
@@ -913,6 +1009,8 @@ class CoopTask(Task):
             return self._action_select_mode_card(observation)
         if self._recruit_step == _RecruitStep.CONFIRM_CHALLENGE_PAGE:
             return self._action_confirm_challenge_page(observation)
+        if self._recruit_step == _RecruitStep.CLOSE_WEEKLY_BUFF:
+            return self._action_close_weekly_buff(observation)
         if self._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT:
             chat_hotspot = self._mode.mode_chat_hotspot if self._mode else "coop_chat"
             return self._hotspot_click(
@@ -1691,7 +1789,10 @@ class CoopTask(Task):
             if refresh_action is not None:
                 return refresh_action, State.SELECT_MAIN_C_SKILLS
             priority_action = self._skill_priority_action(
-                observation, "main_skill_priority", State.SELECT_MAIN_C_SKILLS
+                observation,
+                "main_skill_priority",
+                State.SELECT_MAIN_C_SKILLS,
+                post_delay=self._run_config.skill_click_post_delay_seconds,
             )
             if priority_action is not None:
                 return priority_action
@@ -1700,6 +1801,7 @@ class CoopTask(Task):
                     observation.skill_candidates,
                     "main_skill_candidate",
                     State.SELECT_MAIN_C_SKILLS,
+                    post_delay=self._run_config.skill_click_post_delay_seconds,
                 )
             if not observation.flag("select_skill_button_visible"):
                 # 技能页不在（可能被击杀奖励弹窗打断后关闭）：连续多帧确认后停止
@@ -1739,6 +1841,7 @@ class CoopTask(Task):
                     "main_skill_fallback",
                     State.SELECT_MAIN_C_SKILLS,
                     window_ctx,
+                    post_delay=self._run_config.skill_click_post_delay_seconds,
                 )
             return (
                 Action(
@@ -1806,6 +1909,7 @@ class CoopTask(Task):
             "定时点击选技能按钮",
             State.SELECT_MAIN_C_SKILLS,
             window_ctx,
+            post_delay=self._run_config.skill_click_post_delay_seconds,
         )
         if decision is None:
             return None
@@ -1823,6 +1927,8 @@ class CoopTask(Task):
         candidates: list[SkillCandidate],
         tag: str,
         to_state: State,
+        *,
+        post_delay: float = 0.0,
     ) -> tuple[Action, State]:
         # 简化版：候选都是主C技能图标命中位置，随机选一个（多个时随机点其一）
         candidate = self._rng.choice(candidates)
@@ -1834,6 +1940,7 @@ class CoopTask(Task):
                 verification="next_frame",
                 tag=tag,
                 reason=f"识别到主C技能图标，点击其一（共 {len(candidates)} 个）",
+                post_delay=post_delay,
             ),
             to_state,
         )
@@ -1874,6 +1981,8 @@ class CoopTask(Task):
         observation: Observation,
         tag: str,
         to_state: State,
+        *,
+        post_delay: float = 0.0,
     ) -> tuple[Action, State] | None:
         """按主C优先级档位选卡（感知层标题 OCR 主路径）。
 
@@ -1896,6 +2005,7 @@ class CoopTask(Task):
                 verification="next_frame",
                 tag=tag,
                 reason=f"按优先级第 {best_tier} 档选卡：{chosen['name']}（同档候选：{names}）",
+                post_delay=post_delay,
             ),
             to_state,
         )
@@ -1963,6 +2073,7 @@ class CoopTask(Task):
         window_ctx: WindowContext | None,
         *,
         reason: str = "未识别到主C技能，随便选一个",
+        post_delay: float = 0.0,
     ) -> tuple[Action, State] | None:
         """从技能 ROI 的三列卡片中心随机选一个（未识别到主C图标或天使技能页时使用）。"""
         if self._skill_candidate_roi is None or window_ctx is None:
@@ -1986,6 +2097,7 @@ class CoopTask(Task):
                 verification="next_frame",
                 tag=tag,
                 reason=reason,
+                post_delay=post_delay,
             ),
             to_state,
         )

@@ -1415,32 +1415,38 @@ def _frame() -> np.ndarray:
     return np.zeros((1723, 923, 3), dtype=np.uint8)
 
 
-def _build_entry_perception(tmp_path, reader) -> CoopPerception:
+def _build_entry_perception(tmp_path, reader, weekly_buff_roi: str | None = None) -> CoopPerception:
     """构造带领地入口 ROI 的 CoopPerception（模板包指向临时目录）。"""
     from wlxq_bot.assets import TemplatePack
 
     pack_root = tmp_path / "3000x2000"
     pack_root.mkdir(parents=True, exist_ok=True)
     pack = TemplatePack(client_size=(3000, 2000), root=pack_root)
-    tasks_cfg = TasksConfig(
-        rois={
-            "territory_nav_area": {
-                "relative_to": "client", "x_ratio": 0.64,
-                "y_ratio": 0.96, "width_ratio": 0.11, "height_ratio": 0.04,
-            },
-            "mode_select_title_area": {
-                "relative_to": "client", "x_ratio": 0.25,
-                "y_ratio": 0.16, "width_ratio": 0.49, "height_ratio": 0.06,
-            },
-            "pet_mode_label_area": {
-                "relative_to": "client", "x_ratio": 0.60,
-                "y_ratio": 0.65, "width_ratio": 0.16, "height_ratio": 0.06,
-            },
-            "pet_challenge_start_area": {
-                "relative_to": "client", "x_ratio": 0.43,
-                "y_ratio": 0.90, "width_ratio": 0.17, "height_ratio": 0.05,
-            },
+    rois = {
+        "territory_nav_area": {
+            "relative_to": "client", "x_ratio": 0.64,
+            "y_ratio": 0.96, "width_ratio": 0.11, "height_ratio": 0.04,
         },
+        "mode_select_title_area": {
+            "relative_to": "client", "x_ratio": 0.25,
+            "y_ratio": 0.16, "width_ratio": 0.49, "height_ratio": 0.06,
+        },
+        "pet_mode_label_area": {
+            "relative_to": "client", "x_ratio": 0.60,
+            "y_ratio": 0.65, "width_ratio": 0.16, "height_ratio": 0.06,
+        },
+        "pet_challenge_start_area": {
+            "relative_to": "client", "x_ratio": 0.43,
+            "y_ratio": 0.90, "width_ratio": 0.17, "height_ratio": 0.05,
+        },
+    }
+    if weekly_buff_roi:
+        rois[weekly_buff_roi] = {
+            "relative_to": "client", "x_ratio": 0.39,
+            "y_ratio": 0.73, "width_ratio": 0.22, "height_ratio": 0.05,
+        }
+    tasks_cfg = TasksConfig(
+        rois=rois,
         mode_select_recognition={
             "title_roi": "mode_select_title_area",
             "title_text": "模式选择",
@@ -1458,6 +1464,7 @@ def _build_entry_perception(tmp_path, reader) -> CoopPerception:
         mode_select_title_roi="mode_select_title_area",
         mode_card_roi="pet_mode_label_area",
         challenge_roi="pet_challenge_start_area",
+        weekly_buff_roi=weekly_buff_roi,
         mode_select_min_confidence=0.5,
     )
 
@@ -1515,6 +1522,56 @@ class TestTerritoryEntryDetection:
         raw: dict = {}
         perception._detect_challenge_text(_make_window_ctx(), _frame(), raw)
         assert raw["challenge_text"] == "开始挑战"
+
+    def test_weekly_buff_rows_written_with_roi_offset(self, tmp_path):
+        """每周弹窗按钮行：置信度过滤 + 文字框中心带 ROI 偏移（同模式卡行）。"""
+        perception = _build_entry_perception(
+            tmp_path,
+            _FakeRowsReader([("知道", 0.665, (40, 25)), ("噪声", 0.2, (50, 60))]),
+            weekly_buff_roi="pet_weekly_buff_area",
+        )
+        raw: dict = {}
+        perception._detect_weekly_buff_rows(_make_window_ctx(), _frame(), raw)
+        rows = raw["weekly_buff_rows"]
+        assert [row.text for row in rows] == ["知道"]
+        # 文字框中心 = ROI 左上角偏移（0.39*923=359, 0.73*1723=1257）+ 行内坐标
+        assert rows[0].position == (359 + 40, 1257 + 25)
+
+    def test_challenge_page_mode_reads_weekly_buff_when_configured(self, tmp_path):
+        """observe 分发：challenge_page 模式在配置了识别区时同帧读弹窗按钮行。"""
+        class _SequenceRowsReader:
+            """按调用次序返回预设行：第 1 次读挑战按钮，第 2 次读弹窗按钮。"""
+
+            def __init__(self, responses):
+                self.responses = list(responses)
+
+            def read_with_confidence(self, image):
+                return self.responses.pop(0) if self.responses else []
+
+        perception = _build_entry_perception(
+            tmp_path,
+            _SequenceRowsReader([
+                [("挑战", 0.665, (60, 30))],
+                [("知道", 0.665, (40, 25))],
+            ]),
+            weekly_buff_roi="pet_weekly_buff_area",
+        )
+        obs = perception.observe(
+            _make_window_ctx(), _frame(), observation_mode="challenge_page"
+        )
+        assert obs.raw_data["challenge_text"] == "挑战"
+        assert [row.text for row in obs.raw_data["weekly_buff_rows"]] == ["知道"]
+
+    def test_challenge_page_mode_skips_weekly_buff_when_not_configured(self, tmp_path):
+        """未配置识别区（合作模式）：不读弹窗行，不写 weekly_buff_rows。"""
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("开始挑战", 0.798, (60, 30))])
+        )
+        obs = perception.observe(
+            _make_window_ctx(), _frame(), observation_mode="challenge_page"
+        )
+        assert obs.raw_data["challenge_text"] == "开始挑战"
+        assert "weekly_buff_rows" not in obs.raw_data
 
     def test_uncalibrated_roi_degrades_to_empty(self, tmp_path):
         """ROI 未标定（0x0）：OCR 必须限域，退化为读空而不是全图识别。"""
