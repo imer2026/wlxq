@@ -270,7 +270,7 @@ main_c_profiles:
   assault:
     display_name: 强袭
     hero_template_dir: heroes/assault
-    hero_classifier_model: outputs/hero_classifier/assault-helper/hero_classifier.onnx
+    hero_classifier_model: outputs/hero_classifier/assault-helper-v5/hero_classifier.onnx
     # 简化版技能识别：强袭技能卡上的英雄图标（同一英雄所有技能卡共用此图）
     skill_icon_templates:
       - skills/qiang_xi.png
