@@ -93,6 +93,9 @@ run:
   # 识别；主C（强袭）对与3星对不进批次，仍走原单动作策略；拖动未生效的
   # 对在批末归因记入失败记忆，本局内跳过
   batch_merge_enabled: true
+  # 通配合并英雄（赖子）：幻天使可与任意同星级英雄合并；同类项对优先、
+  # 棋盘占满才使用（2026-09-13 定案，spec 2026-09-13-angel-phantom-split）
+  wildcard_merge_heroes: [angel_phantom]
   # 召唤点击后棋盘始终未变化（多为金币不足）时的重试等待（秒）：等待后重新
   # 尝试召唤；回补阶段的召唤失败不等待，直接放弃回补回选技能
   summon_retry_delay_seconds: 15.0
@@ -333,6 +336,9 @@ hero_classifier:
   # labeled/<英雄>/star1~star4 标注目录。切换 lineup 时改这里即可。
   # 必须是 main_c_profiles 中已定义的英雄标识。
   lineup_others: [angel, snow, death_knight]
+  # 阵容英雄的棋盘形态变体：幻天使是天使的形态而非新英雄，不建 main_c_profiles
+  # 档案、永不作为主 C；仅放行识别白名单（否则被拒为 hero_not_in_lineup → unknown）
+  lineup_variants: [angel_phantom]
 
 # 组队对局模式档案（方案 A）：存 configs/tasks.yaml 里的 hotspot/locator 名与
 # 流程开关；素材本体在 tasks.yaml。详见 docs/superpowers/specs/2026-09-06-pet-defend-mode-design.md
