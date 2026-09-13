@@ -142,6 +142,8 @@ Runtime Context
 - `death_knight`：死骑。
 - `fox`：狐狸。
 
+幻天使（`angel_phantom`）不是独立主 C 英雄：它是天使的棋盘形态变体（`hero_classifier.lineup_variants` 白名单放行识别），仅 star1~3，作为通配合并英雄（`run.wildcard_merge_heroes`）参与合成决策，永不作为主 C。
+
 格子模型的运行配置结构如下：
 
 ```yaml

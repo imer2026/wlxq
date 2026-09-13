@@ -63,6 +63,7 @@ helper/
       assault/star1/
       assault/star2/
       angel/star1/
+      angel_phantom/star1/
       empty/plain/
       empty/effect/
       unavailable/plain/
