@@ -268,3 +268,153 @@ class TestFindMergeCandidates:
         # main_c 不是 assault → is_main_c=False
         candidates = snapshot.find_merge_candidates(main_c="monkey")
         assert candidates[0].is_main_c is False
+
+
+class TestFindMergeCandidatesWildcard:
+    """幻天使（通配英雄）配对规则（2026-09-13 定案，spec §4.4）。"""
+
+    def test_wildcard_pairs_with_any_same_star(self) -> None:
+        """幻天使可与任意同星级英雄配对（标记 is_wildcard）。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel_phantom", 1, 100, 100),
+                _hero("snow", 1, 200, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=2),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert len(candidates) == 1
+        assert candidates[0].is_wildcard is True
+        assert candidates[0].is_main_c is False
+        assert {candidates[0].hero_a.hero_type, candidates[0].hero_b.hero_type} == {
+            "angel_phantom",
+            "snow",
+        }
+
+    def test_wildcard_star_must_match(self) -> None:
+        """通配也要求同星级。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel_phantom", 1, 100, 100),
+                _hero("snow", 2, 200, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=2),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert candidates == []
+
+    def test_wildcard_pairs_with_wildcard(self) -> None:
+        """幻天使可与另一幻天使配对。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel_phantom", 2, 100, 100),
+                _hero("angel_phantom", 2, 200, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=2),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert len(candidates) == 1
+        assert candidates[0].is_wildcard is True
+
+    def test_same_type_preferred_over_wildcard(self) -> None:
+        """同类项对优先：两个正常天使先配对，幻天使插不进去。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel", 1, 100, 100),
+                _hero("angel", 1, 200, 100),
+                _hero("angel_phantom", 1, 300, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=3),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert len(candidates) == 1
+        assert candidates[0].is_wildcard is False
+        assert {candidates[0].hero_a.hero_type, candidates[0].hero_b.hero_type} == {"angel"}
+
+    def test_wildcard_prefers_non_wildcard_partner(self) -> None:
+        """幻天使优先与非幻英雄配对，第二个幻天使留作后备。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel_phantom", 1, 100, 100),
+                _hero("snow", 1, 200, 100),
+                _hero("angel_phantom", 1, 300, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=3),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert len(candidates) == 1
+        pair = candidates[0]
+        assert "snow" in {pair.hero_a.hero_type, pair.hero_b.hero_type}
+
+    def test_wildcard_with_main_c_marks_main_c(self) -> None:
+        """幻天使+主C → is_main_c=True（受 avoid_main_c_merge 保护）。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel_phantom", 1, 100, 100),
+                _hero("assault", 1, 200, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=2),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert len(candidates) == 1
+        assert candidates[0].is_main_c is True
+        assert candidates[0].is_wildcard is True
+
+    def test_wildcard_order_after_same_type(self) -> None:
+        """候选顺序：非主C同类项 → 非主C通配 → 主C。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("assault", 1, 100, 100),
+                _hero("assault", 1, 200, 100),
+                _hero("snow", 1, 300, 100),
+                _hero("snow", 1, 400, 100),
+                _hero("angel_phantom", 1, 500, 100),
+                _hero("death_knight", 1, 600, 100),
+            ],
+            capacity=BoardCapacity(total_slots=8, occupied=6),
+        )
+        candidates = snapshot.find_merge_candidates(
+            main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
+        )
+        assert len(candidates) == 3
+        assert candidates[0].hero_a.hero_type == "snow"
+        assert candidates[0].is_wildcard is False
+        assert candidates[1].is_wildcard is True
+        assert candidates[2].is_main_c is True
+
+    def test_default_no_wildcard_behavior_unchanged(self) -> None:
+        """不传 wildcard_heroes 时行为与现状一致：幻天使按普通类型参与同类项配对，
+        只与另一个幻天使配对（不与 snow 跨类型配对），且不带 is_wildcard 标记。"""
+        snapshot = BoardSnapshot(
+            frame_id=1,
+            heroes=[
+                _hero("angel_phantom", 1, 100, 100),
+                _hero("snow", 1, 200, 100),
+                _hero("angel_phantom", 1, 300, 100),
+            ],
+            capacity=BoardCapacity(total_slots=6, occupied=3),
+        )
+        candidates = snapshot.find_merge_candidates(main_c="assault")
+        assert len(candidates) == 1
+        pair = candidates[0]
+        assert {pair.hero_a.hero_type, pair.hero_b.hero_type} == {"angel_phantom"}
+        assert pair.is_wildcard is False

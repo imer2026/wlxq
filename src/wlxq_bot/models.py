@@ -295,19 +295,23 @@ class BoardCapacity:
 
 @dataclass(frozen=True)
 class MergeCandidate:
-    """合法合成对：同类型同星级的两个英雄。
+    """合法合成对：同类型同星级的两个英雄，或通配英雄与任意同星级英雄。
 
-    game-rules.md 合成规则：只有英雄类型相同且星级相同的两个英雄才能合成。
+    game-rules.md 合成规则：英雄类型相同且星级相同的两个英雄能合成；
+    通配英雄（幻天使，2026-09-13 确认）还可与任意同星级英雄合成，
+    合并产物随机。对中任一英雄是主 C 即视为涉及主 C（数量保护）。
 
     Attributes:
         hero_a: 第一个英雄
         hero_b: 第二个英雄
-        is_main_c: 是否涉及主 C（影响合成优先级，非主 C 优先合成）
+        is_main_c: 是否涉及主 C（影响合成优先级与数量保护，非主 C 优先合成）
+        is_wildcard: 对中含通配英雄（幻天使类赖子；合成产物随机）
     """
 
     hero_a: BoardHero
     hero_b: BoardHero
     is_main_c: bool = False
+    is_wildcard: bool = False
 
 
 @dataclass(frozen=True)
@@ -331,40 +335,86 @@ class BoardSnapshot:
     captured_at: float = 0.0
     source_frame_ids: tuple[int, ...] = field(default_factory=tuple)
 
-    def find_merge_candidates(self, main_c: str) -> list[MergeCandidate]:
-        """找合法合成对：同类型同星级。
+    def find_merge_candidates(
+        self,
+        main_c: str,
+        wildcard_heroes: frozenset[str] = frozenset(),
+    ) -> list[MergeCandidate]:
+        """找合法合成对：同类项同星级，通配英雄可与任意同星级英雄配对。
 
-        每个英雄最多参与一次配对。多个候选同时存在时，非主 C 优先
-        （game-rules.md：优先合成非主 C 合法对）。
+        两阶段配对（2026-09-13 幻天使定案，spec §4.4）：先排非通配英雄
+        之间的同类项对，再为每个未配对的通配英雄找同星搭档（优先非通配，
+        其次另一个通配）。每个英雄最多参与一次配对。多个候选同时存在时
+        非主 C 优先（game-rules.md：优先合成非主 C 合法对），同为非主 C
+        时同类项对排在通配对前。
 
         Args:
             main_c: 当前主 C 的 hero_type，如 ``"assault"``
+            wildcard_heroes: 通配合并英雄集合（如 ``frozenset({"angel_phantom"})``）；
+                空集合 = 仅同类项配对，行为与未引入通配前完全一致。
 
         Returns:
             合法合成对列表，非主 C 对排前面。
         """
         candidates: list[MergeCandidate] = []
         used: set[int] = set()
+
+        def _is_main_c_pair(a: BoardHero, b: BoardHero) -> bool:
+            return a.hero_type == main_c or b.hero_type == main_c
+
+        # 阶段 1：非通配英雄之间的同类项对
         for i, hero_a in enumerate(self.heroes):
-            if i in used:
+            if i in used or hero_a.hero_type in wildcard_heroes:
                 continue
             for j in range(i + 1, len(self.heroes)):
                 if j in used:
                     continue
                 hero_b = self.heroes[j]
+                if hero_b.hero_type in wildcard_heroes:
+                    continue
                 if hero_a.hero_type == hero_b.hero_type and hero_a.star_level == hero_b.star_level:
-                    is_mc = hero_a.hero_type == main_c
                     candidates.append(
                         MergeCandidate(
                             hero_a=hero_a,
                             hero_b=hero_b,
-                            is_main_c=is_mc,
+                            is_main_c=_is_main_c_pair(hero_a, hero_b),
                         )
                     )
                     used.add(i)
                     used.add(j)
                     break
-        # 非主 C 优先（is_main_c=False 排前面）
+
+        # 阶段 2：通配英雄与任意同星搭档（优先非通配搭档）
+        for i, hero_a in enumerate(self.heroes):
+            if i in used or hero_a.hero_type not in wildcard_heroes:
+                continue
+            partner_index: int | None = None
+            for prefer_wildcard in (False, True):
+                for j, hero_b in enumerate(self.heroes):
+                    if j == i or j in used:
+                        continue
+                    if (hero_b.hero_type in wildcard_heroes) != prefer_wildcard:
+                        continue
+                    if hero_b.star_level == hero_a.star_level:
+                        partner_index = j
+                        break
+                if partner_index is not None:
+                    break
+            if partner_index is None:
+                continue
+            hero_b = self.heroes[partner_index]
+            candidates.append(
+                MergeCandidate(
+                    hero_a=hero_a,
+                    hero_b=hero_b,
+                    is_main_c=_is_main_c_pair(hero_a, hero_b),
+                    is_wildcard=True,
+                )
+            )
+            used.add(i)
+            used.add(partner_index)
+
+        # 非主 C 优先（is_main_c=False 排前面）；稳定排序保持同类项在前、通配在后
         candidates.sort(key=lambda c: c.is_main_c)
         return candidates
 
