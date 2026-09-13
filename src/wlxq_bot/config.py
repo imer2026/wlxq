@@ -218,6 +218,20 @@ class SkillCollectionConfig(BaseModel):
     min_icon_confidence: float = Field(default=0.70, ge=0.0, le=1.0)
 
 
+def _parse_hero_identifier_list(value: Any, label: str) -> list[str]:
+    """把配置中的英雄标识列表规范化；非法标识（非小写英文/数字/下划线）报错。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        items = [str(item).strip() for item in value if str(item).strip()]
+    for item in items:
+        if re.fullmatch(r"[a-z][a-z0-9_]*", item) is None:
+            raise ValueError(f"{label} 含非法英雄标识: {item!r}")
+    return items
+
+
 class RunConfig(BaseModel):
     max_rounds: int = 20
     # Runner 的单局最终保险。每当返回验证成功、round_count 增加时重置，
@@ -234,6 +248,16 @@ class RunConfig(BaseModel):
     # 识别；主C对与3星对不进批次（仍走单动作策略），拖动未生效的对在批末
     # 按位置签名归因记入失败记忆
     batch_merge_enabled: bool = True
+    # 通配合并英雄（赖子，如幻天使）：可与任意同星级英雄合并；合成优先级
+    # 同类项对在前、通配对棋盘占满才用（2026-09-13 用户定案，spec
+    # docs/superpowers/specs/2026-09-13-angel-phantom-split-design.md）
+    wildcard_merge_heroes: list[str] = Field(default_factory=list)
+
+    @field_validator("wildcard_merge_heroes", mode="before")
+    @classmethod
+    def _validate_wildcard_merge_heroes(cls, value: Any) -> list[str]:
+        return _parse_hero_identifier_list(value, "wildcard_merge_heroes")
+
     initial_board_capacity: int = 7
     target_star_level: int = 2
     summon_recognition_delay_min: float = Field(default=1.0, ge=0.0, le=10.0)
@@ -428,23 +452,24 @@ class HeroClassifierConfig(BaseModel):
 
     lineup_others 列出主 C 之外、本局固定携带的队友英雄标识；离线裁剪时
     据此与 main_c 一起预建 labeled/<英雄>/star1~4 标注目录，省去人工建目录。
+
+    lineup_variants 列出阵容英雄的棋盘形态变体（如幻天使 angel_phantom）：
+    不是独立英雄、不建主 C 档案、永不作为主 C；仅用于放行识别白名单
+    （_restrict_prediction），让变体预测结果不被拒为 hero_not_in_lineup。
     """
 
     lineup_others: list[str] = Field(default_factory=list)
+    lineup_variants: list[str] = Field(default_factory=list)
 
     @field_validator("lineup_others", mode="before")
     @classmethod
     def _validate_lineup_others(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            items = [item.strip() for item in value.split(",") if item.strip()]
-        else:
-            items = [str(item).strip() for item in value if str(item).strip()]
-        for item in items:
-            if re.fullmatch(r"[a-z][a-z0-9_]*", item) is None:
-                raise ValueError(f"lineup_others 含非法英雄标识: {item!r}")
-        return items
+        return _parse_hero_identifier_list(value, "lineup_others")
+
+    @field_validator("lineup_variants", mode="before")
+    @classmethod
+    def _validate_lineup_variants(cls, value: Any) -> list[str]:
+        return _parse_hero_identifier_list(value, "lineup_variants")
 
 
 class DefaultConfig(BaseModel):

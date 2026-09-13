@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from wlxq_bot.config import (
     DefaultConfig,
+    HeroClassifierConfig,
     Hotspot,
     MainCProfile,
     ModeProfile,
@@ -545,3 +546,35 @@ class TestTransformConfig:
         cfg = load_default_config(Path("configs/default.yaml"))
         assert cfg.run.transform_enabled is True
         assert cfg.run.transform_settle_seconds == 4.0
+
+
+class TestWildcardMergeAndVariants:
+    """幻天使通配合并配置键（2026-09-13 spec §4.3）。"""
+
+    def test_lineup_variants_default_and_parse(self) -> None:
+        cfg = HeroClassifierConfig()
+        assert cfg.lineup_variants == []
+        cfg = HeroClassifierConfig(lineup_variants=["angel_phantom"])
+        assert cfg.lineup_variants == ["angel_phantom"]
+
+    def test_lineup_variants_reject_invalid(self) -> None:
+        with pytest.raises(ValidationError, match="非法英雄标识"):
+            HeroClassifierConfig(lineup_variants=["Angel-Phantom"])
+
+    def test_variants_do_not_require_main_c_profile(self) -> None:
+        """变体不是主 C 英雄：不在 main_c_profiles 也能通过 lineup 子集校验。"""
+        cfg = DefaultConfig(
+            main_c_profiles={
+                "snow": MainCProfile(display_name="雪姬", hero_template_dir="heroes/snow")
+            },
+            hero_classifier=HeroClassifierConfig(
+                lineup_others=["snow"], lineup_variants=["angel_phantom"]
+            ),
+        )
+        assert "angel_phantom" not in cfg.main_c_profiles
+
+    def test_wildcard_merge_heroes_parse_and_reject(self) -> None:
+        run = RunConfig(wildcard_merge_heroes=["angel_phantom"])
+        assert run.wildcard_merge_heroes == ["angel_phantom"]
+        with pytest.raises(ValidationError, match="非法英雄标识"):
+            RunConfig(wildcard_merge_heroes=["9bad"])
