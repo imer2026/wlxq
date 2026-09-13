@@ -154,6 +154,8 @@ class CoopTask(Task):
         # 主C培养策略（合成/门禁/数量回补）：纯决策对象，状态机只负责调度；
         # 模式档案经 Runner 的 resolve_main_c_profile 应用覆盖后传入 profile
         self._strategy = build_strategy(mode_profile, ctx.main_c, run_config, main_c_profile)
+        # 通配合并英雄（幻天使）：来自 run.wildcard_merge_heroes，传给候选生成
+        self._wildcard_heroes = frozenset(run_config.wildcard_merge_heroes)
         self._remaining_difficulties = set(coop_difficulties or self._run_config.coop_difficulties)
         self._difficulty_selection_only = difficulty_selection_only
         # 游戏本次会话已手动选过难度：首局招募跳过难度弹窗三步直接抢合作
@@ -2410,7 +2412,9 @@ class CoopTask(Task):
                 observation.frame_id,
             )
             return self._batch_summon_action(observation, window_ctx)
-        candidates = board.find_merge_candidates(self.ctx.main_c)
+        candidates = board.find_merge_candidates(
+            self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+        )
         # 回补阶段（2026-09-07 用户策略）：棋盘有空位时直接召唤不合成——
         # 合成要拖动加验证耗时，先召唤占满空位更快；棋盘占满且数量未达标
         # 才合成腾格子。批次合成遵循同一优先级
@@ -2418,7 +2422,9 @@ class CoopTask(Task):
         if self._run_config.batch_merge_enabled and not topup_fill_first:
             # 批末归因：上一批中仍原样存在的对记入失败记忆（拖动未生效）
             self._attribute_merge_batch(candidates)
-            batch = self._strategy.select_merge_batch(candidates, self._failed_merge_pairs)
+            batch = self._strategy.select_merge_batch(
+                candidates, self._failed_merge_pairs, board
+            )
             if batch:
                 return self._plan_merge_batch(batch, observation.frame_id)
         # 批次关闭或无可批对：走原有单动作策略
@@ -2473,7 +2479,9 @@ class CoopTask(Task):
         board = observation.board
         if board is None:
             return None
-        candidates = board.find_merge_candidates(self.ctx.main_c)
+        candidates = board.find_merge_candidates(
+            self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+        )
         pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
         if pair is None:
             return None

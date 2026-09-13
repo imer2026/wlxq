@@ -153,14 +153,17 @@ class CultivationStrategy:
     ) -> MergeCandidate | None:
         """从合法合成对中选择本次要拖的一对；None 表示本次不合并（应召唤）。
 
-        规则（按顺序）：
+        决策层级（2026-09-13 幻天使定案，spec §4.5）：
         1. 跳过本轮内已拖动失败的对（英雄被弹回原位的对反复拖没有意义）；
         2. 非主 C 对优先（原有通用规则）；
         3. 只剩主 C 对且档案开启了 avoid_main_c_merge、棋盘有空位时
            不合并主C（保数量），召唤新英雄；棋盘占满时合并主C对腾格子；
-        4. 3 星对（合成 4 星会弹赠送技能页）最后手段（2026-08-21 用户策略）：
-           有 1/2 星对时优先合并低星对；只剩 3 星对且棋盘有空位时召唤新英雄
-           避开；棋盘占满且无低星对才被迫合并 3 星对（随后进入赠送页确认流程）。
+        4. 同类项 1/2 星对：立即合并（候选顺序同类项在前）；
+        5. 通配 1/2 星对（幻天使）：棋盘有空位时不合并、召唤新英雄
+           （保留幻天使作最难凑的兜底）；棋盘占满才合并；
+        6. 3 星对（含通配 3 星，合成 4 星会弹赠送技能页）最后手段
+           （2026-08-21 用户策略）：棋盘有空位时召唤避开；占满才被迫合并。
+        棋盘占满时通配 1/2 星对先于 3 星对（前者不触发赠送技能页）。
         """
         if not candidates:
             return None
@@ -171,14 +174,25 @@ class CultivationStrategy:
             return None
         pool = non_main_pairs if non_main_pairs else candidates
         unfailed = [c for c in pool if self.pair_signature(c) not in failed_pairs]
-        low_pairs = [c for c in unfailed if c.hero_a.star_level < 3]
-        if low_pairs:
-            return low_pairs[0]
+        same_type_low = [c for c in unfailed if c.hero_a.star_level < 3 and not c.is_wildcard]
+        if same_type_low:
+            return same_type_low[0]
         if unfailed and not self._board_full(board):
-            logger.info(
-                "合成对仅剩3星（合成4星将弹赠送技能页）且棋盘有空位，召唤新英雄避开"
-            )
+            wildcard_pending = [
+                c for c in unfailed if c.is_wildcard and c.hero_a.star_level < 3
+            ]
+            if wildcard_pending:
+                logger.info("棋盘有空位，保留幻天使不合并（留作最难凑兜底），召唤新英雄")
+            else:
+                logger.info(
+                    "合成对仅剩3星（合成4星将弹赠送技能页）且棋盘有空位，召唤新英雄避开"
+                )
             return None
+        forced_wildcard_low = [
+            c for c in unfailed if c.is_wildcard and c.hero_a.star_level < 3
+        ]
+        if forced_wildcard_low:
+            return forced_wildcard_low[0]
         pair = unfailed[0] if unfailed else None
         if pair is None:
             logger.info(
@@ -191,23 +205,29 @@ class CultivationStrategy:
         self,
         candidates: list[MergeCandidate],
         failed_pairs: FailedMergePairs,
+        board: BoardSnapshot,
     ) -> list[MergeCandidate]:
-        """批次合成规划（2026-09-10 用户策略）：把当前快照上能合的对一次排完。
+        """批次合成规划（2026-09-10 用户策略 + 2026-09-13 幻天使定案）。
 
-        与单次 select_merge 的取舍不同，批次只做无争议的合并：
+        把当前快照上能合的对一次排完，只做无争议的合并：
         1. 绝不动主C（主C强袭保留，数量保护；主C对仍由单动作策略在棋盘
            占满等最后手段场景处理）；
         2. 只排 1/2 星对（3星对合成4星会弹赠送技能页，可能中途遮挡棋盘）；
-        3. 跳过失败记忆中的对（本局内已确认拖不动的对不反复排）；
-        4. 对与对之间格子互不相交（find_merge_candidates 已按英雄去重配对，
+        3. 通配对（幻天使）纳入批次，但棋盘未满时排除——有空位先召唤、
+           占满才花幻天使，与单动作策略同一决策层级；
+        4. 跳过失败记忆中的对（本局内已确认拖不动的对不反复排）；
+        5. 对与对之间格子互不相交（find_merge_candidates 已按英雄去重配对，
            此处按位置再防御性过滤），合并互不冲突，可连续拖完再统一识别。
         """
+        board_full = board.capacity.occupied >= board.capacity.total_slots
         selected: list[MergeCandidate] = []
         used: set[tuple[int, int]] = set()
         for candidate in candidates:
             if candidate.is_main_c:
                 continue
             if max(candidate.hero_a.star_level, candidate.hero_b.star_level) >= 3:
+                continue
+            if candidate.is_wildcard and not board_full:
                 continue
             if self.pair_signature(candidate) in failed_pairs:
                 continue
