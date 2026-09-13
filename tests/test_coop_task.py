@@ -3598,6 +3598,114 @@ class TestBatchSummon:
         assert decision[0].tag == "summon_gold_wait"
         assert task._batch_summon_remaining == 3
 
+    def test_gold_wait_after_batch_merges_first(self):
+        """批次发完金币转红走培养门控（2026-09-13 实机）：等待期先合成。
+
+        实机日志：批次最后一次召唤买空金币，下一轮批次已归零、落入培养
+        金币门控，棋盘占满且有可合对时原实现只会干等金币恢复。
+        """
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 0
+        board = make_full_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "merge_heroes"
+        assert action.kind == "drag"
+        assert action.verification == "next_frame"
+        assert "召唤金币不足" in action.reason
+        assert "等待恢复期间合成" in action.reason
+
+    def test_gold_wait_with_empty_slots_merges_first(self):
+        """棋盘未满但金币不足（非回补）：不再等金币召唤，先合成。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 0
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "merge_heroes"
+
+    def test_gold_wait_skips_merge_when_board_ready(self):
+        """棋盘已达标时等待期不合成：金币恢复后直接转选技能，别再动棋盘。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 0
+        board = make_full_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+                make_hero("snow", star=1, pos=(300, 300)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "summon_gold_wait"
+
+    def test_gold_wait_topup_with_empty_slots_keeps_waiting(self):
+        """回补阶段有空位时培养门控等待期不合成：合成减少数量，与回补策略冲突。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 0
+        task._topup_active = True
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "summon_gold_wait"
+
+    def test_batch_gold_wait_topup_with_empty_slots_keeps_waiting(self):
+        """回补阶段批内金币不足同样不合成（原实现会合成，与回补策略冲突）。"""
+        task = self._task_after_forced_phase()
+        task._batch_summon_remaining = 3
+        task._topup_active = True
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "summon_gold_wait"
+        assert task._batch_summon_remaining == 3
+
     def test_board_watch_resumes_after_batch_finishes(self):
         task = self._task_after_forced_phase()
         task._batch_summon_remaining = 1

@@ -2284,10 +2284,11 @@ class CoopTask(Task):
             )
         self._empty_board_count = 0
 
-        # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足时原地等待金币
-        # 恢复（击杀回金），一直等到够或对局自然结束——不设上限、不放弃回补
-        # （2026-09-05 定案）。放在无进展检查之前：等待本身不算停滞，重置
-        # 无进展计数，避免等待期间误触保守停止。
+        # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足时优先在等待
+        # 空档合成（见下方分支），无对可合再原地等待金币恢复（击杀回金），
+        # 一直等到够或对局自然结束——不设上限、不放弃回补（2026-09-05 定案）。
+        # 放在无进展检查之前：等待本身不算停滞，重置无进展计数，避免等待
+        # 期间误触保守停止。
         # 金币信息缺失（未读取/OCR 失败）时不拦截，保持原有行为。
         gold = observation.raw_data.get("gold")
         if gold is not None and not self._can_afford(gold, "summon"):
@@ -2297,6 +2298,20 @@ class CoopTask(Task):
                 detail = "召唤费用红色（游戏判买不起）"
             else:
                 detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
+            # 等金币恢复的空档同样优先合成（2026-09-13 用户策略，与批次
+            # 召唤等待期同一策略）：批次最后一次召唤发完后金币转红会落到
+            # 这里，棋盘占满时正应合成腾格子而不是干等。两个例外不合成：
+            # 棋盘已达标（金币恢复后直接转选技能，别再动棋盘）；回补阶段
+            # 有空位（合成减少英雄数量，与「有空位先召唤占位」冲突）。
+            # 无合法对再原地等待。
+            if not self._strategy.main_c_ready(
+                board, require_hero_count=self._topup_active
+            ) and not (
+                self._topup_active and board.capacity.available > 0
+            ):
+                merge = self._gold_wait_merge_action(observation, "召唤金币不足")
+                if merge is not None:
+                    return merge
             return (
                 Action(
                     kind="wait",
@@ -2468,13 +2483,16 @@ class CoopTask(Task):
     def _gold_wait_merge_action(
         self,
         observation: Observation,
+        context: str,
     ) -> tuple[Action, State] | None:
-        """批次召唤金币等待期的合成动作（2026-09-13 用户策略）。
+        """金币等待期的合成动作（2026-09-13 用户策略）。
 
         合成不花金币，正好利用等金币恢复的空档：用与培养阶段相同的策略
         选合法对（非主C优先、主C数量保护、3星规避等规则全部生效），以
         单动作合成发出（next_frame 验证，拖动失败对记忆照常生效）。棋盘
-        快照缺失或无可合对返回 None，调用方退回原地等待。
+        快照缺失或无可合对返回 None，调用方退回原地等待。context 为来源
+        描述（如「批次召唤金币不足（本批剩余 2 次）」），用于日志与
+        动作原因。
         """
         board = observation.board
         if board is None:
@@ -2485,16 +2503,10 @@ class CoopTask(Task):
         pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
         if pair is None:
             return None
-        logger.info(
-            "批次召唤金币不足，等待恢复期间优先合成（本批剩余 %d 次）",
-            self._batch_summon_remaining,
-        )
+        logger.info("%s，等待恢复期间优先合成", context)
         return self._merge_drag_action(
             pair,
-            reason=(
-                f"批次召唤金币不足，等待恢复期间合成"
-                f"（本批剩余 {self._batch_summon_remaining} 次）"
-            ),
+            reason=f"{context}，等待恢复期间合成",
         )
 
     def _merge_drag_action(
@@ -2792,10 +2804,20 @@ class CoopTask(Task):
             else:
                 detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
             # 等金币恢复的空档优先合成（2026-09-13 用户策略）：合成不花
-            # 金币，正好利用等待时间；无合法对再原地等待
-            merge = self._gold_wait_merge_action(observation)
-            if merge is not None:
-                return merge
+            # 金币，正好利用等待时间；但回补阶段棋盘有空位时不合成——
+            # 合成减少英雄数量，与「有空位先召唤占位」的回补策略冲突；
+            # 无合法对再原地等待
+            board = observation.board
+            topup_fill_first = self._topup_active and (
+                board is not None and board.capacity.available > 0
+            )
+            if not topup_fill_first:
+                merge = self._gold_wait_merge_action(
+                    observation,
+                    f"批次召唤金币不足（本批剩余 {self._batch_summon_remaining} 次）",
+                )
+                if merge is not None:
+                    return merge
             return (
                 Action(
                     kind="wait",
