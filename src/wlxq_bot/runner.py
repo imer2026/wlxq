@@ -295,7 +295,11 @@ class Runner:
             skill_icon_templates=self.default_config.main_c_profiles[mc].skill_icon_templates,
             teammate_skill_icon_templates=run_config.teammate_skill_icon_templates,
             hero_cell_classifier=hero_cell_classifier,
-            allowed_heroes={mc, *self.default_config.hero_classifier.lineup_others},
+            allowed_heroes={
+                mc,
+                *self.default_config.hero_classifier.lineup_others,
+                *self.default_config.hero_classifier.lineup_variants,
+            },
             skill_collector=skill_collector,
             title_reader=title_reader,
             skill_tiers=skill_tiers,
@@ -1214,9 +1218,17 @@ class Runner:
             CoopRole.HELPER,
             main_c,
             hero_cell_classifier=self._load_hero_cell_classifier(main_c),
-            allowed_heroes={main_c, *self.default_config.hero_classifier.lineup_others},
+            allowed_heroes={
+                main_c,
+                *self.default_config.hero_classifier.lineup_others,
+                *self.default_config.hero_classifier.lineup_variants,
+            },
         )
-        required = {main_c, *self.default_config.hero_classifier.lineup_others}
+        required = {
+            main_c,
+            *self.default_config.hero_classifier.lineup_others,
+            *self.default_config.hero_classifier.lineup_variants,
+        }
         missing = sorted(required - set(perception.available_heroes))
         if missing:
             raise RuntimeError("英雄格模型缺少本局阵容类别: " + ", ".join(missing))
