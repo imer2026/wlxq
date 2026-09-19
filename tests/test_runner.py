@@ -572,7 +572,8 @@ class TestLoopStopConditions:
                 settlement={"like_chest": True, "return_button": "return_button"},
             ),
         )
-        # 一帧推进一步的领地入口链：导航直接读「返回」跳过点领地
+        # 一帧推进一步的领地入口链：导航直接读「返回」跳过点领地。档案未
+        # 配置页签文字：聊天生效确认步骤 1 帧跳过（无专项 OCR）
         perception = FakePerception(
             Observation(
                 frame_id=1,
@@ -592,20 +593,22 @@ class TestLoopStopConditions:
             task,
             SafetyGuard(max_failures=3, frame_ttl_ms=5000),
             1,
-            max_steps=8,
+            max_steps=9,
         )
 
         # 打开难度弹窗后先进入打开确认步骤：只用标题图轻量识别（difficulty_dialog），
         # 候选识别（coop_difficulty）要到确认打开后的勾选步骤才启用；
-        # 领地入口各步只 OCR 对应小区域（territory_nav/mode_select/challenge_page）
+        # 领地入口各步只 OCR 对应小区域（territory_nav/mode_select/challenge_page）；
+        # 聊天生效确认（档案未配置页签文字）与页签步骤一样无专项 OCR
         assert perception.observation_modes == [
             "territory_nav",
             "mode_select",
             "mode_select",
             "mode_select",
             "challenge_page",
-            None,
-            None,
+            None,  # 挑战页聊天点击
+            None,  # 聊天生效确认：档案未配置页签文字 → 1 帧跳过
+            None,  # 页签未配置 → 打开难度弹窗
             "difficulty_dialog",
         ]
 
@@ -1141,6 +1144,82 @@ class TestStaleDecision:
             1 for r in caplog.records if "原地继续识别" in r.getMessage()
         )
         assert recoveries == 3
+
+    def test_slow_machine_relaxes_ttl_and_keeps_running(self, caplog):
+        """回归（2026-09-14 实机）：机器持续慢（决策超龄）时自适应放宽时效
+        继续执行动作，而不是无进展停止——机器慢只降低节奏。"""
+        import logging
+
+        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.models import CoopRole
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import CoopTask
+
+        ctx = TaskContext(main_c="assault", max_rounds=10)
+        ctx.current_state = State.BUILD_MAIN_C
+        task = CoopTask(
+            ctx, RunConfig(), CoopRole.HELPER, {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)}
+        )
+        executor = FakeExecutor()
+        screen = FakeScreen(make_window_ctx(), stale_age=10.0)
+        safety = SafetyGuard(max_failures=3, frame_ttl_ms=3000, frame_ttl_max_ms=30000)
+
+        with caplog.at_level(logging.WARNING, logger="wlxq_bot.runner"):
+            final = make_runner()._run_loop(
+                screen,
+                FakePerception(Observation(frame_id=1)),
+                executor,
+                task,
+                safety,
+                1,
+                max_steps=5,
+            )
+
+        assert final == State.BUILD_MAIN_C
+        # 每轮决策超龄 10s：第 1 轮 3->6ms 仍超龄丢弃，第 2 轮 6->12s 后
+        # 在时效内执行，之后维持 12s 时效连续执行，任务不停止
+        assert len(executor.actions) == 4
+        assert safety.frame_ttl_ms == 12000  # 机器未恢复，放宽值保持
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "自适应放宽" in messages
+        assert "原地继续识别" not in messages
+        assert "无法在时效内完成" not in messages
+
+    def test_frame_ttl_falls_back_when_machine_recovers(self, caplog):
+        """机器恢复快（决策重新在基础时效内新鲜）后，放宽的时效自动回落。"""
+        import logging
+
+        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.models import CoopRole
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import CoopTask
+
+        ctx = TaskContext(main_c="assault", max_rounds=10)
+        ctx.current_state = State.BUILD_MAIN_C
+        task = CoopTask(
+            ctx, RunConfig(), CoopRole.HELPER, {"add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96)}
+        )
+        executor = FakeExecutor()
+        # 前 3 轮超龄 10s（模拟识别慢），之后恢复新鲜
+        screen = _StaleThenFreshScreen(make_window_ctx(), stale_frames=3)
+        safety = SafetyGuard(max_failures=3, frame_ttl_ms=3000, frame_ttl_max_ms=30000)
+
+        with caplog.at_level(logging.WARNING, logger="wlxq_bot.runner"):
+            final = make_runner()._run_loop(
+                screen,
+                FakePerception(Observation(frame_id=1)),
+                executor,
+                task,
+                safety,
+                1,
+                max_steps=6,
+            )
+
+        assert final == State.BUILD_MAIN_C
+        assert len(executor.actions) == 5  # 第 1 轮丢弃，其余 5 轮执行
+        assert safety.frame_ttl_ms == 3000  # 恢复后回落到基础时效
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "自适应放宽" in messages
 
 
 # ---------------------------------------------------------------------------

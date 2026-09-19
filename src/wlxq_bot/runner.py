@@ -58,9 +58,10 @@ TEMPLATES_ROOT = Path("assets/templates")
 
 # 窗口非前台/最小化时的检查间隔（秒）；日志每 _FG_LOG_EVERY_CHECKS 次提示一次
 # 击杀/结算弹窗的关闭动作标签：这些动作的验证只需要弹窗标志（单帧轻量
-# 识别），不需要多帧棋盘投票——投票单次十几秒，会让每次关弹窗都卡顿
+# 识别），不需要多帧棋盘投票——投票单次十几秒，会让每次关弹窗都卡顿。
+# close_grab_popup 为 FIND_COOP 兜底关全屏弹窗（2026-09-14 实机），同理
 _POPUP_CLOSE_TAGS = frozenset(
-    {"close_popup", "close_double_reward", "close_bonus_popup"}
+    {"close_popup", "close_double_reward", "close_bonus_popup", "close_grab_popup"}
 )
 
 # 局内付费选技能与合成赠送页的选卡标签：一组一选，选完页面收起、下一组
@@ -76,9 +77,10 @@ _FG_LOG_EVERY_CHECKS = 20  # 20 × 0.5s = 每 10 秒一条
 # 自动切回前台失败后的重试间隔（秒），避免高频反复激活
 _REFOCUS_RETRY_SECONDS = 5.0
 # 连续多少轮「识别决策耗时超过截图时效」后触发原地恢复（丢弃超龄决策重新
-# 识别，连续恢复有独立预算上限）。识别慢通常是机器负载、省电模式等临时状况；
-# 持续超龄说明本机无法在时效内完成识别->动作。3 帧 ≈ 25 秒内即触发恢复，
-# 不必苦等 10 帧（实机 2026-09-05 定案：10 次太久）
+# 识别，连续恢复有独立预算上限）。时效先经慢机自适应放宽（翻倍、封顶
+# safety.frame_ttl_max_ms），放宽后本帧仍超龄才计入本计数；连续计满说明
+# 本机连上限时效都无法满足。3 帧 ≈ 25 秒内即触发恢复，不必苦等 10 帧
+# （实机 2026-09-05 定案：10 次太久）
 _MAX_STALE_DECISIONS = 3
 
 
@@ -349,6 +351,7 @@ class Runner:
         safety = SafetyGuard(
             max_failures=self.default_config.safety.max_failures,
             frame_ttl_ms=self.default_config.safety.frame_ttl_ms,
+            frame_ttl_max_ms=self.default_config.safety.frame_ttl_max_ms,
         )
         input_ctrl = InputController()
         executor = ActionExecutor(
@@ -403,6 +406,9 @@ class Runner:
             ),
             entry_max_reclicks=int(
                 self.tasks_config.mode_select_recognition.get("entry_max_reclicks", 3)
+            ),
+            chat_open_max_reclicks=int(
+                self.tasks_config.mode_select_recognition.get("chat_open_max_reclicks", 10)
             ),
             transform_button_locator=transform_button_locator,
         )
@@ -557,6 +563,7 @@ class Runner:
         safety = SafetyGuard(
             max_failures=self.default_config.safety.max_failures,
             frame_ttl_ms=self.default_config.safety.frame_ttl_ms,
+            frame_ttl_max_ms=self.default_config.safety.frame_ttl_max_ms,
         )
         executor = ActionExecutor(
             safety,
@@ -1020,34 +1027,69 @@ class Runner:
 
             # 6. 执行前校验截图时效：识别和决策本身可能耗时（多模板匹配、
             # 机器负载高/省电模式等），决策所依据的画面超过 frame_ttl 后
-            # 不能再执行输入。丢弃本轮重新截图重试——难度弹窗等静态界面
-            # 晚几秒重试仍然有效，这不算动作失败，不消耗安全失败预算；
-            # 连续多轮超龄（本机持续无法在时效内完成识别->动作）才保守停止。
+            # 不能再执行输入。但机器慢不等于故障：先按 SafetyGuard 的
+            # 慢机自适应把生效时效翻倍放宽（封顶 frame_ttl_max_ms），
+            # 放宽后本帧决策仍新鲜就继续执行——慢机上动作只是变慢
+            # （2026-09-14 实机：领地入口单帧识别 19~61s，15s 时效把全部
+            # 决策拒之门外导致无进展停止）。放宽也无济于事（识别比上限
+            # 还慢）才丢弃本轮重新截图重试——难度弹窗等静态界面晚几秒
+            # 重试仍然有效，这不算动作失败，不消耗安全失败预算；连续多轮
+            # 超上限才保守停止。
             age_seconds = time.time() - ctx.captured_at
-            if age_seconds * 1000 > safety._frame_ttl_ms:
-                stale_decisions += 1
+            if age_seconds * 1000 > safety.frame_ttl_ms:
+                relaxed_fresh = (
+                    safety.relax_frame_ttl()
+                    and age_seconds * 1000 <= safety.frame_ttl_ms
+                )
+                if not relaxed_fresh:
+                    stale_decisions += 1
+                    logger.warning(
+                        "frame=%d 截图至动作执行耗时 %.2fs 超过 frame_ttl_ms=%dms，"
+                        "丢弃本轮决策重新截图（截图 %.0fms + 识别 %.0fms）（%d/%d）",
+                        ctx.frame_id,
+                        age_seconds,
+                        safety.frame_ttl_ms,
+                        capture_ms,
+                        observe_ms,
+                        stale_decisions,
+                        _MAX_STALE_DECISIONS,
+                    )
+                    if stale_decisions >= _MAX_STALE_DECISIONS:
+                        logger.error(
+                            "连续 %d 轮识别决策超过截图时效（已放宽至上限 %dms 仍不足），"
+                            "本机无法在时效内完成识别到动作；可检查电脑负载/电源模式，"
+                            "或调大 safety.frame_ttl_ms / safety.frame_ttl_max_ms",
+                            stale_decisions,
+                            safety.frame_ttl_max_ms,
+                        )
+                        if not _recover_or_stop("连续多轮识别决策超过截图时效"):
+                            break
+                        continue
+                    continue
                 logger.warning(
-                    "frame=%d 截图至动作执行耗时 %.2fs 超过 frame_ttl_ms=%dms，"
-                    "丢弃本轮决策重新截图（截图 %.0fms + 识别 %.0fms）（%d/%d）",
+                    "frame=%d 识别决策耗时 %.2fs 超过基础时效 %dms，本机识别慢："
+                    "截图时效自适应放宽至 %dms 继续执行（放宽上限 %dms，"
+                    "机器恢复后自动回落）（截图 %.0fms + 识别 %.0fms）",
                     ctx.frame_id,
                     age_seconds,
-                    safety._frame_ttl_ms,
+                    safety.frame_ttl_base_ms,
+                    safety.frame_ttl_ms,
+                    safety.frame_ttl_max_ms,
                     capture_ms,
                     observe_ms,
-                    stale_decisions,
-                    _MAX_STALE_DECISIONS,
                 )
-                if stale_decisions >= _MAX_STALE_DECISIONS:
-                    logger.error(
-                        "连续 %d 轮识别决策超过截图时效，本机无法在时效内完成"
-                        "识别到动作；可检查电脑负载/电源模式，或调大 safety.frame_ttl_ms",
-                        stale_decisions,
-                    )
-                    if not _recover_or_stop("连续多轮识别决策超过截图时效"):
-                        break
-                    continue
-                continue
             stale_decisions = 0
+            # 机器识别耗时回到基础时效内（决策重新新鲜）：生效时效回落。
+            # 滞回设计——放宽期间超基础时效的决策不清零放宽值，避免负载
+            # 在阈值附近抖动时反复放宽/回落
+            if age_seconds * 1000 <= safety.frame_ttl_base_ms:
+                if safety.frame_ttl_ms != safety.frame_ttl_base_ms:
+                    logger.debug(
+                        "frame=%d 决策在基础时效内新鲜，截图时效回落至 %dms",
+                        ctx.frame_id,
+                        safety.frame_ttl_base_ms,
+                    )
+                safety.reset_frame_ttl()
 
             # 结算截图：动作显式声明 save_frame_before 且保存器就位时，
             # 在执行前把决策依据的当前帧存档（一局结束、点击返回前的画面）。
@@ -1236,6 +1278,7 @@ class Runner:
         safety = SafetyGuard(
             max_failures=self.default_config.safety.max_failures,
             frame_ttl_ms=self.default_config.safety.frame_ttl_ms,
+            frame_ttl_max_ms=self.default_config.safety.frame_ttl_max_ms,
         )
         esc_listener_started = safety.start_esc_listener()
         if esc_listener_started:

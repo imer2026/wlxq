@@ -86,6 +86,13 @@ _ENTRY_RECLICK_MISSES = 10
 # 按钮文字才放行进招募（0.3s 轮询间隔下约 1 秒）；弹窗只在本日首次进入出现，
 # 正常情况（已关/无弹窗）本步骤仅多等这几帧
 _WEEKLY_BUFF_GRACE_MISSES = 2
+# 聊天点击生效确认：页签行（mode_tab OCR）连续这么多帧读到本模式页签才算
+# 已进入招募（吸收 OCR 单帧漏读与页面过渡残影）；连续这么多帧读不到说明
+# 点击未生效（被道具卡等弹窗吃掉），重点聊天按钮。注意不能用「挑战页
+# 锚点消失」判定——招募频道页底部同样有「开始挑战」按钮，锚点两页皆可读
+# （2026-09-17 实机：9 次重点全部点空直到超时）
+_CHAT_OPEN_ADVANCE_MISSES = 2
+_CHAT_OPEN_RECLICK_MISSES = 4
 # 主C系技能的最高优先级档位（compute_skill_tiers：第 8 档=主C未被显式档覆盖的
 # 技能，主C技能永不落第 11 档）。三张卡最低档 > 该值 = 本组没有任何主C系技能，
 # 是「刷新」分支的触发条件之一
@@ -108,6 +115,10 @@ class _RecruitStep(Enum):
     # 即点文字框中心关闭；模式档案未配置 weekly_buff_text 时跳过本步骤
     CLOSE_WEEKLY_BUFF = "close_weekly_buff"
     OPEN_CHALLENGE_CHAT = "open_challenge_chat"
+    # 聊天点击生效确认：挑战页锚点（challenge_text）消失才算进入招募；
+    # 仍读到锚点说明点击被道具卡等弹窗吃掉，重点聊天（预算
+    # mode_select_recognition.chat_open_max_reclicks）
+    CONFIRM_CHAT_OPEN = "confirm_chat_open"
     SELECT_MODE_TAB = "select_mode_tab"
     OPEN_DIFFICULTY_DIALOG = "open_difficulty_dialog"
     CONFIRM_DIFFICULTY_OPEN = "confirm_difficulty_open"
@@ -141,6 +152,7 @@ class CoopTask(Task):
         mode_tab_miss_limit: int = 8,
         entry_wait_timeout_seconds: float = 60.0,
         entry_max_reclicks: int = 3,
+        chat_open_max_reclicks: int = 10,
         main_c_profile: MainCProfile | None = None,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
@@ -175,6 +187,14 @@ class CoopTask(Task):
         self._entry_max_reclicks = max(0, entry_max_reclicks)
         self._entry_reclicks = 0
         self._entry_misses = 0
+        # 聊天点击生效确认的重点预算（2026-09-16 实机：结算返回后挑战页盖着
+        # 金币道具说明卡，聊天点击只关掉弹窗未进招募）；页签行连续
+        # _CHAT_OPEN_RECLICK_MISSES 帧读不到本模式页签即重点，用尽仍不成功
+        # 才保守停止
+        self._chat_open_max_reclicks = max(0, chat_open_max_reclicks)
+        self._chat_open_reclicks = 0
+        self._chat_open_tab_hits = 0
+        self._chat_open_tab_misses = 0
         # 当前入口等待步骤的 deadline 起点；None = 尚未开始计时
         self._entry_wait_started_at: float | None = None
         self._clock = clock
@@ -493,10 +513,14 @@ class CoopTask(Task):
             # 领地入口收尾：OCR 挑战页按钮文字（到达锚点）；每周弹窗关闭
             # 步骤复用本模式同帧读弹窗按钮行（weekly_buff_rows）
             return "challenge_page"
-        if self._recruit_step is _RecruitStep.SELECT_MODE_TAB and (
-            self._mode is not None and self._mode.entry.mode_tab_text
-        ):
-            # 点页签前 OCR 页签行定位文字：三个页签共用一条识别区
+        if self._recruit_step in (
+            _RecruitStep.CONFIRM_CHAT_OPEN,
+            _RecruitStep.SELECT_MODE_TAB,
+        ) and (self._mode is not None and self._mode.entry.mode_tab_text):
+            # 聊天点击生效确认与页签选择共用页签行 OCR：确认以「读到本
+            # 模式页签」为生效判据——挑战页该区域是「拥有：」等无关文字，
+            # 且招募页底部同样有「开始挑战」按钮、锚点无法区分两页
+            # （2026-09-17 实机）。仅进招募后的一两帧识别，不在高频循环内
             return "mode_tab"
         if self._recruit_step is _RecruitStep.SELECT_DIFFICULTIES:
             # 勾选难度需要识别候选列表（16 个难度模板）
@@ -524,6 +548,23 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         if self._recruit_step != _RecruitStep.JOIN_COOP:
             return self._action_recruit_entry(observation, window_ctx)
+        # 兜底：带着全屏弹窗回到 FIND_COOP（如抢合作保守停止后重进）时先关闭，
+        # 否则弹窗挡住 join_coop 会形成「弹窗不关、抢不停」的循环（实机
+        # 2026-09-14：连点误点自己头像弹出「个人信息」）。× 为跨弹窗皮肤
+        # 一致的标准关闭按钮；模板未采集的分辨率包识别不到，行为同旧版
+        popup = self._flag_match(observation, "close_button_match")
+        if popup is not None:
+            return (
+                Action(
+                    kind="click",
+                    target=popup.position,
+                    duration=0.08,
+                    verification="next_frame",
+                    tag="close_grab_popup",
+                    reason="识别到全屏弹窗关闭按钮，先关闭再抢合作",
+                ),
+                State.FIND_COOP,
+            )
         # JOIN_COOP：抢合作由 Runner 的双线程协调器执行（连点 join + 并行识别
         # 准备按钮）。任务只发出信号动作；发现准备按钮后回到主循环，由
         # _action_ready 单线程点击准备。
@@ -546,7 +587,10 @@ class CoopTask(Task):
         命中即点文字框中心（开环，同难度勾选策略；页签点击幂等，后续步骤
         自有门禁）。识别不到时不盲点固定坐标：先等待下一帧重试（进入招募
         可能有动画），连续 miss 达上限报错停止——页签行读不到文字大概率
-        不在招募页，此时任何点击都不安全。
+        不在招募页，此时任何点击都不安全。等待帧返回显式 wait 动作而不是
+        None：None 会被 Runner 计入无进展预算（error_restart_max_consecutive=3
+        小于 miss_limit=8），合法的页面切换等待会被提前保守停止（2026-09-16
+        实机）。
         """
         rows = [
             row
@@ -567,7 +611,10 @@ class CoopTask(Task):
                 self._mode_tab_misses,
                 self._mode_tab_miss_limit,
             )
-            return None
+            return self._entry_wait_action(
+                "mode_tab_pending",
+                f"未识别到「{tab_text}」页签文字，等待下一帧复识",
+            )
         best = max(rows, key=lambda row: row.confidence)
         self._mode_tab_misses = 0
         logger.info(
@@ -591,6 +638,18 @@ class CoopTask(Task):
     def _start_entry_wait(self) -> None:
         """重置领地入口等待的 deadline 起点（每进入一个等待步骤时调用）。"""
         self._entry_wait_started_at = self._clock()
+
+    def _enter_chat_open_confirm(self) -> None:
+        """聊天点击已发送：进入生效确认步骤，重点预算与连续帧计数从零起算。
+
+        入口等待 deadline 同步重新起算（整个确认步骤共用一个秒级上限，
+        重点不重置——防止 OCR 抖动下重点预算与超时叠加拖太久）。
+        """
+        self._recruit_step = _RecruitStep.CONFIRM_CHAT_OPEN
+        self._chat_open_reclicks = 0
+        self._chat_open_tab_hits = 0
+        self._chat_open_tab_misses = 0
+        self._start_entry_wait()
 
     def _entry_deadline_exceeded(self, observation: Observation, what: str) -> bool:
         """领地入口等待是否已达秒级上限；达到时打 ERROR（调用方保守停止）。
@@ -964,6 +1023,106 @@ class CoopTask(Task):
             "等待挑战页每周弹窗识别（弹窗可能延迟弹出）",
         )
 
+    def _action_confirm_chat_open(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """聊天点击生效确认：页签行读到本模式页签才算进入招募。
+
+        2026-09-16 实机：结算返回后挑战页盖着金币道具说明卡，固定坐标的
+        聊天点击被弹窗吃掉（只关掉弹窗、页面未切换），页签 OCR 永远读不
+        到而被无进展预算保守停止。2026-09-17 实机修正生效判据：不能用
+        「挑战页锚点（challenge_text）消失」——招募频道页底部同样有
+        「开始挑战」按钮，锚点两页皆可读，导致确认永不推进、重点全部
+        点空直到超时。改为 OCR 页签行（与 SELECT_MODE_TAB 同一识别区）：
+        连续 ``_CHAT_OPEN_ADVANCE_MISSES`` 帧读到本模式页签 = 已进入招募
+        （挑战页该区域读到的是「拥有：」等无关文字）；连续
+        ``_CHAT_OPEN_RECLICK_MISSES`` 帧读不到 = 点击未生效（大概率被
+        弹窗遮挡），重点聊天按钮——重点会顺带关掉挡路的道具卡，预算
+        ``chat_open_max_reclicks`` 用尽或入口等待超时才保守停止。页签单帧
+        漏读由连续帧计数吸收；档案未配置 ``mode_tab_text`` 时无法验证，
+        保持旧行为直接进页签步骤。
+        """
+        tab_text = self._mode.entry.mode_tab_text if self._mode else None
+        if not tab_text:
+            # 档案未配置页签文字：页签行验证无从谈起（锚点又不能区分两页），
+            # 保持旧行为直接进页签步骤
+            self._recruit_step = _RecruitStep.SELECT_MODE_TAB
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="chat_open_unverified",
+                    reason="模式档案未配置页签文字，跳过聊天点击确认",
+                ),
+                State.FIND_COOP,
+            )
+        rows = [
+            row
+            for row in (observation.raw_data.get("mode_tab_rows") or [])
+            if tab_text in row.text
+        ]
+        if rows:
+            self._chat_open_tab_misses = 0
+            self._chat_open_tab_hits += 1
+            if self._chat_open_tab_hits < _CHAT_OPEN_ADVANCE_MISSES:
+                return self._entry_wait_action(
+                    "chat_open_pending",
+                    "页签行已读到本模式页签，等待下一帧确认",
+                )
+            logger.info(
+                "frame=%d 聊天点击已生效（连续 %d 帧读到「%s」页签），进页签选择",
+                observation.frame_id,
+                self._chat_open_tab_hits,
+                tab_text,
+            )
+            self._recruit_step = _RecruitStep.SELECT_MODE_TAB
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="chat_open_confirmed",
+                    reason="聊天点击生效（页签行已可读），进页签选择",
+                ),
+                State.FIND_COOP,
+            )
+        self._chat_open_tab_hits = 0
+        self._chat_open_tab_misses += 1
+        if self._entry_deadline_exceeded(observation, "聊天点击后页签行持续不可读"):
+            return None
+        if self._chat_open_tab_misses < _CHAT_OPEN_RECLICK_MISSES:
+            return self._entry_wait_action(
+                "chat_open_pending",
+                "聊天点击后未读到页签，等待页面切换",
+            )
+        if self._chat_open_reclicks >= self._chat_open_max_reclicks:
+            logger.error(
+                "frame=%d 重点聊天 %d 次后页签行仍读不到「%s」，保守停止",
+                observation.frame_id,
+                self._chat_open_reclicks,
+                tab_text,
+            )
+            return None
+        self._chat_open_reclicks += 1
+        self._chat_open_tab_misses = 0
+        chat_hotspot = self._mode.mode_chat_hotspot if self._mode else "coop_chat"
+        logger.warning(
+            "frame=%d 聊天点击未生效（页签行读不到，可能被弹窗遮挡），重点聊天（第 %d/%d 次）",
+            observation.frame_id,
+            self._chat_open_reclicks,
+            self._chat_open_max_reclicks,
+        )
+        return self._hotspot_click(
+            chat_hotspot,
+            "chat_reclick",
+            f"聊天点击未生效，重点聊天（第 {self._chat_open_reclicks} 次）",
+            State.FIND_COOP,
+            window_ctx,
+        )
+
     def _action_recruit_entry(
         self,
         observation: Observation,
@@ -1013,6 +1172,8 @@ class CoopTask(Task):
             return self._action_confirm_challenge_page(observation)
         if self._recruit_step == _RecruitStep.CLOSE_WEEKLY_BUFF:
             return self._action_close_weekly_buff(observation)
+        if self._recruit_step == _RecruitStep.CONFIRM_CHAT_OPEN:
+            return self._action_confirm_chat_open(observation, window_ctx)
         if self._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT:
             chat_hotspot = self._mode.mode_chat_hotspot if self._mode else "coop_chat"
             return self._hotspot_click(
@@ -2363,10 +2524,12 @@ class CoopTask(Task):
                 State.SELECT_MAIN_C_SKILLS,
             )
 
-        # ---- 变身触发（设计文档 §4.1：无达标主C + 次数未满 + 3星非主C）----
-        # 免费且可能直接达标，优先于批次召唤/合成；locator 未接线（模板缺失
-        # 降级）或开关关闭时整分支跳过；放弃记忆未解除（棋盘签名未演化）时
-        # 抑制触发，防止「放弃 → 立刻再触发」死循环
+        # ---- 变身触发（设计文档 §4.1：次数未满 + 3星非主C）----
+        # 免费且可能直接提星/凑数量，优先于批次召唤/合成；2026-09-17 用户
+        # 变更：不再要求「无达标主C」——主C已达标（含回补阶段）时，2星对
+        # 合并产出3星非主C的下一轮棋盘识别即检查触发；locator 未接线（模板
+        # 缺失降级）或开关关闭时整分支跳过；放弃记忆未解除（棋盘签名未演化）
+        # 时抑制触发，防止「放弃 → 立刻再触发」死循环
         if (
             self._transform_skip_signature is not None
             and self._board_signature(board) != self._transform_skip_signature
@@ -2959,6 +3122,9 @@ class CoopTask(Task):
         if action.tag == "close_double_reward":
             # 以双倍奖励弹窗标识消失确认已取消
             return not after.flag("double_reward_dialog_visible")
+        if action.tag == "close_grab_popup":
+            # 以全屏弹窗关闭按钮消失确认已关闭
+            return not after.flag("close_button_visible")
         if action.tag == "summon_hero":
             return self._boards_changed(before.board, after.board)
         if action.tag == "merge_heroes":
@@ -3088,9 +3254,10 @@ class CoopTask(Task):
             self._recruit_step = _RecruitStep.CONFIRM_CHALLENGE_PAGE
             self._start_entry_wait()
         elif tag == "open_challenge_chat":
-            # 首局经挑战页聊天进入招募：页签后进难度弹窗（区别于次局刷新）
+            # 首局经挑战页聊天进入招募：页签后进难度弹窗（区别于次局刷新）；
+            # 先确认真的离开挑战页（点击可能被道具卡等弹窗吃掉）
             self._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
-            self._recruit_step = _RecruitStep.SELECT_MODE_TAB
+            self._enter_chat_open_confirm()
         elif tag == "open_mode_tab":
             self._recruit_step = self._after_tab_step
         elif tag in {"open_difficulty_dialog", "open_refresh_difficulty_dialog"}:
@@ -3156,8 +3323,9 @@ class CoopTask(Task):
         elif tag == "pet_difficulty_miss":
             self._pet_difficulty_misses += 1
         elif tag == "open_coop_chat":
+            # 下一局经合作页聊天刷新邀请：同样先确认离开挑战页再选页签
             self._after_tab_step = _RecruitStep.OPEN_REFRESH_DIFFICULTY_DIALOG
-            self._recruit_step = _RecruitStep.SELECT_MODE_TAB
+            self._enter_chat_open_confirm()
         elif tag in {"close_difficulty_dialog", "close_refresh_difficulty_dialog"}:
             # 点击已发送但弹窗未必关住：留在本步骤，等弹窗标识连续不可见才推进
             self._difficulty_close_attempts += 1

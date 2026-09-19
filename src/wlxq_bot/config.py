@@ -70,6 +70,10 @@ class SafetyConfig(BaseModel):
     stop_hotkey: str = "esc"
     max_failures: int = 5
     frame_ttl_ms: int = 3000
+    # 慢机自适应上限：识别耗时持续超过 frame_ttl_ms 时，生效时效翻倍放宽、
+    # 封顶该值——机器慢只降低节奏，不触发保守停止；决策重新在基础时效内
+    # 新鲜后自动回落。识别比该上限还慢才走「超龄丢弃 → 连续超龄保守停止」
+    frame_ttl_max_ms: int = 90000
     no_progress_timeout: int = 30
 
 
@@ -280,6 +284,15 @@ class RunConfig(BaseModel):
     find_coop_check_interval_seconds: float = Field(default=1.0, gt=0.0, le=30.0)
     # 整段抢合作的最长时长（秒），超时未抢到则保守停止，防止无限循环
     find_coop_max_duration_seconds: float = Field(default=300.0, gt=0.0, le=3600.0)
+    # 抢合作弹窗关闭辅助（2026-09-14 实机标定）：连点误点自己头像会弹出
+    # 「个人信息」等全屏弹窗，标准关闭按钮（右上角 ×）跨弹窗皮肤一致
+    # （三主题实测 0.99+，普通界面负例 ≤0.67）。modal_edge_brightness 为
+    # 全屏模态判定阈值：弹窗打开时游戏把画面两侧边缘压暗（实测 23~31），
+    # 普通界面 ≥64；招募页本身也是暗的，故未知弹窗告警仅在已越过招募
+    # 阶段（见过亮屏/准备按钮/关闭按钮）后由 grab_unknown_popup_confirmations
+    # 连续拍数确认才触发，避免正常抢的过程中误报
+    modal_edge_brightness: float = Field(default=45.0, ge=0.0, le=255.0)
+    grab_unknown_popup_confirmations: int = Field(default=2, ge=1, le=10)
     # 单个目标难度的最大滚动次数（命中或跳过后按需重置）。2026-08-19 起难度
     # 面板每次打开都定位在普通难度区（第1~12层），识别为空=尚未滚入彩虹区，
     # 会直接向更大难度滚动，预算需覆盖滚过普通区进入彩虹区的行程

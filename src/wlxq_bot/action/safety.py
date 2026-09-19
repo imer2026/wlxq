@@ -23,11 +23,54 @@ from wlxq_bot.models import Action, WindowContext
 class SafetyGuard:
     """安全检查器。"""
 
-    def __init__(self, max_failures: int = 5, frame_ttl_ms: int = 500) -> None:
+    def __init__(
+        self,
+        max_failures: int = 5,
+        frame_ttl_ms: int = 500,
+        frame_ttl_max_ms: int | None = None,
+    ) -> None:
         self._max_failures = max_failures
+        self._frame_ttl_base_ms = frame_ttl_ms
+        # 慢机自适应上限：识别持续超过基础时效时生效时效翻倍放宽到该值
+        # （机器慢只是动作变慢，不应因此停止）；None 或小于基础值 = 不放宽
+        self._frame_ttl_max_ms = (
+            frame_ttl_ms
+            if frame_ttl_max_ms is None
+            else max(frame_ttl_max_ms, frame_ttl_ms)
+        )
         self._frame_ttl_ms = frame_ttl_ms
         self._stop_flag = threading.Event()
         self._failure_count = 0
+
+    @property
+    def frame_ttl_ms(self) -> int:
+        """当前生效的截图时效（毫秒），慢机自适应放宽后的值。"""
+        return self._frame_ttl_ms
+
+    @property
+    def frame_ttl_base_ms(self) -> int:
+        """配置的基础截图时效（毫秒），机器恢复后的回落目标。"""
+        return self._frame_ttl_base_ms
+
+    @property
+    def frame_ttl_max_ms(self) -> int:
+        """生效截图时效的放宽上限（毫秒）。"""
+        return self._frame_ttl_max_ms
+
+    def relax_frame_ttl(self) -> bool:
+        """生效时效翻倍（封顶 frame_ttl_max_ms）。
+
+        识别耗时超过当前时效时由调度循环调用。返回是否成功放宽；
+        False 表示已在上限，继续超龄应走丢弃/保守停止路径。
+        """
+        if self._frame_ttl_ms >= self._frame_ttl_max_ms:
+            return False
+        self._frame_ttl_ms = min(self._frame_ttl_ms * 2, self._frame_ttl_max_ms)
+        return True
+
+    def reset_frame_ttl(self) -> None:
+        """生效时效回落到基础值（决策重新在基础时效内新鲜时调用）。"""
+        self._frame_ttl_ms = self._frame_ttl_base_ms
 
     def request_stop(self) -> None:
         """请求停止任务。"""

@@ -125,15 +125,16 @@ class CultivationStrategy:
 
         条件（全部满足才返回目标）：
         1. 本局变身次数未用完（used_count < max_count）；
-        2. 尚无达标主 C（复用 has_target_main_c）；
-        3. 棋盘存在星级不低于 run.transform_min_star_level 的非主 C 英雄。
+        2. 棋盘存在星级不低于 run.transform_min_star_level 的非主 C 英雄。
+
+        2026-09-17 用户变更：不再要求「尚无达标主 C」——主 C 已达标（含
+        回补阶段）时，2 星对合并产出 3 星非主 C 的下一轮识别同样变身碰
+        主 C（免费且可能直接提星/凑数量）。
 
         多个候选取 heroes 列表中的第一个（感知层按棋盘格序构建 heroes，
         即按格位顺序）；返回 None 时调用方落入常规召唤/合成决策。
         """
         if used_count >= max_count:
-            return None
-        if self.has_target_main_c(board):
             return None
         min_star = self._run_config.transform_min_star_level
         for hero in board.heroes:

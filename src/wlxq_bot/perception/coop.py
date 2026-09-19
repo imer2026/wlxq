@@ -78,6 +78,10 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
     ("ready_button", "ready_button_visible", "ready_button_match"),
     ("return_button", "return_button_visible", "return_button_match"),
     ("tan_chuang", "tan_chuang_visible", "tan_chuang_match"),
+    # 全屏弹窗右上角标准关闭按钮（×）：抢合作连点误点自己头像弹出「个人信息」
+    # 等全屏弹窗（皮肤可变，× 为跨皮肤一致的标准控件，2026-09-14 实机）。
+    # 抢合作子步骤识别到即优先关闭；FIND_COOP 回主循环时兜底关闭
+    ("close_button", "close_button_visible", "close_button_match"),
     # 同系列技能选满 3 个触发的赠送技能卡片（点击关闭，见 SELECT_MAIN_C_SKILLS）
     ("zeng_song_ji_neng", "zeng_song_ji_neng_visible", "zeng_song_ji_neng_match"),
     # 进入游戏后的两种开局标识：先「选择技能」再「召唤」，二者互斥，
@@ -502,13 +506,14 @@ class CoopPerception:
         """按状态识别需要的界面标志按钮，结果写入 raw_data（bool）和 matches。
 
         只匹配 _INTERFACE_FLAGS_BY_STATE 中当前状态声明的标志；抢合作子步骤
-        （observation_mode="coop_grab"）额外查准备按钮。识别不到的标志不写入
-        raw_data，任务层 flag() 读取时按 False 处理。
+        （observation_mode="coop_grab"）额外查准备按钮和弹窗关闭按钮（连点
+        误点自己头像会弹出「个人信息」等全屏弹窗，回主循环时需兜底关闭）。
+        识别不到的标志不写入 raw_data，任务层 flag() 读取时按 False 处理。
         """
         locators = self._cfg.locators
         wanted = _INTERFACE_FLAGS_BY_STATE.get(hint_state, frozenset())
         if observation_mode == "coop_grab":
-            wanted = wanted | {"ready_button"}
+            wanted = wanted | {"ready_button", "close_button"}
         if not self._skill_refresh_enabled:
             wanted = wanted - {"skill_refresh_button"}
 
@@ -1183,6 +1188,52 @@ class CoopPerception:
         if not locator:
             return None
         return self._match_locator_template(ctx, frame, locator)
+
+    def match_close_button(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+    ) -> MatchResult | None:
+        """仅匹配全屏弹窗右上角标准关闭按钮（×），供抢合作检查线程周期调用。
+
+        复用 close_button locator 配置（模板/阈值/ROI），与 observe 中
+        close_button 标志同源，避免两处阈值/ROI 漂移。× 是游戏标准控件、
+        跨弹窗皮肤一致（2026-09-14 实机三主题 0.99+）；模板未采集的分辨率
+        包返回 None，调用方按未识别处理。
+        """
+        locator = self._cfg.locators.get(
+            self._locator_aliases.get("close_button", "close_button")
+        )
+        if not locator:
+            return None
+        return self._match_locator_template(ctx, frame, locator)
+
+    def is_modal_frame(self, frame: Any, brightness_threshold: float) -> bool:
+        """全屏模态弹窗检测：弹窗打开时游戏把画面两侧边缘压成近乎纯黑。
+
+        2026-09-14 实机标定：个人信息弹窗三主题左右边缘平均亮度 23~31，
+        普通界面（大厅/对局/结算）≥64。招募页等全屏面板本身也是暗的，
+        因此本方法只说明「有全屏面板」，不区分具体弹窗，调用方需结合
+        阶段信息使用。帧不是有效图像（None/形状异常）时保守返回 False。
+
+        Args:
+            frame: 截图帧（BGR ndarray）
+            brightness_threshold: 边缘平均亮度判定阈值（低于视为有全屏面板）
+        """
+        if frame is None or not hasattr(frame, "shape") or frame.ndim < 2:
+            return False
+        height, width = frame.shape[:2]
+        if height < 200 or width < 60:
+            return False
+        y0, y1 = int(height * 0.17), int(height * 0.81)
+        margin = max(8, int(width * 0.033))
+        left = frame[y0:y1, :margin]
+        right = frame[y0:y1, width - margin :]
+        try:
+            brightness = (float(left.mean()) + float(right.mean())) / 2.0
+        except Exception:
+            return False
+        return brightness < brightness_threshold
 
     def _match_locator_template(
         self,

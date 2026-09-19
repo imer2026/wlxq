@@ -88,6 +88,55 @@ class TestSafetyGuard:
         assert not safety_guard.record_failure()
 
 
+class TestAdaptiveFrameTtl:
+    """慢机自适应时效：识别持续超龄时翻倍放宽（封顶）、恢复后回落。"""
+
+    def test_relax_doubles_and_caps(self) -> None:
+        guard = SafetyGuard(frame_ttl_ms=1000, frame_ttl_max_ms=3500)
+        assert guard.frame_ttl_base_ms == 1000
+        assert guard.relax_frame_ttl() is True
+        assert guard.frame_ttl_ms == 2000
+        assert guard.relax_frame_ttl() is True
+        assert guard.frame_ttl_ms == 3500  # 4000 封顶到 3500
+        assert guard.relax_frame_ttl() is False  # 已在上限
+        assert guard.frame_ttl_ms == 3500
+
+    def test_reset_returns_to_base(self) -> None:
+        guard = SafetyGuard(frame_ttl_ms=1000, frame_ttl_max_ms=8000)
+        guard.relax_frame_ttl()
+        guard.relax_frame_ttl()
+        assert guard.frame_ttl_ms == 4000
+        guard.reset_frame_ttl()
+        assert guard.frame_ttl_ms == 1000
+
+    def test_no_max_means_fixed_ttl(self) -> None:
+        # 不传上限（如独立 exec 命令）保持固定时效，不放宽
+        guard = SafetyGuard(frame_ttl_ms=1000)
+        assert guard.frame_ttl_max_ms == 1000
+        assert guard.relax_frame_ttl() is False
+        assert guard.frame_ttl_ms == 1000
+
+    def test_max_below_base_clamped_to_base(self) -> None:
+        guard = SafetyGuard(frame_ttl_ms=5000, frame_ttl_max_ms=1000)
+        assert guard.frame_ttl_max_ms == 5000
+        assert guard.relax_frame_ttl() is False
+
+    def test_check_action_uses_relaxed_ttl(self) -> None:
+        # 放宽后 check_action（执行器路径）接受原本超龄的上下文
+        guard = SafetyGuard(frame_ttl_ms=1000, frame_ttl_max_ms=4000)
+        ctx = _make_ctx(captured_at=time.time() - 3)
+        action = Action(kind="click", target=(100, 100))
+        ok, reason = guard.check_action(ctx, action, time.time())
+        assert not ok
+        assert "超时" in reason
+        guard.relax_frame_ttl()  # 1000 -> 2000，3s 仍超龄
+        ok, _ = guard.check_action(ctx, action, time.time())
+        assert not ok
+        guard.relax_frame_ttl()  # 2000 -> 4000，3s 在时效内
+        ok, _ = guard.check_action(ctx, action, time.time())
+        assert ok
+
+
 class TestActionExecutor:
     def test_revalidates_window_context_before_input(self) -> None:
         input_ctrl = FakeInput()

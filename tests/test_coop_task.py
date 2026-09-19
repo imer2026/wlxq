@@ -249,7 +249,12 @@ def territory_entry_observations(frame_id: int = 1) -> list[Observation]:
 
 
 def advance_territory_entry_to_recruit(task: CoopTask, frame_id: int = 1) -> None:
-    """驱动领地入口链到 SELECT_MODE_TAB（挑战页聊天点击已验证）。"""
+    """驱动领地入口链到 SELECT_MODE_TAB（聊天点击已确认生效或按档案跳过）。
+
+    配置了页签文字的档案：连续 2 帧读到本模式页签（chat_open_pending →
+    chat_open_confirmed）才算进入招募页；未配置的档案无法验证，1 帧跳过
+    （chat_open_unverified）。
+    """
     for observation in territory_entry_observations(frame_id):
         decision = task.decide_action(observation, make_window_ctx())
         assert decision is not None
@@ -257,12 +262,31 @@ def advance_territory_entry_to_recruit(task: CoopTask, frame_id: int = 1) -> Non
     decision = task.decide_action(Observation(frame_id=frame_id + 6), make_window_ctx())
     assert decision is not None and decision[0].tag == "open_challenge_chat"
     task.on_action_verified(*decision)
+    for offset in (7, 8):
+        confirm = task.decide_action(
+            Observation(
+                frame_id=frame_id + offset,
+                raw_data={
+                    # 与实机 OCR 一致的三个页签行，档案按各自 mode_tab_text 子串命中
+                    "mode_tab_rows": [
+                        ModeTabRow("合作模式", 0.8, (314, 1535)),
+                        ModeTabRow("保卫宠物", 0.8, (523, 1535)),
+                        ModeTabRow("共战灭尊", 0.8, (733, 1535)),
+                    ]
+                },
+            ),
+            make_window_ctx(),
+        )
+        assert confirm is not None and confirm[0].kind == "wait"
+        task.on_action_verified(*confirm)
+        if confirm[0].tag == "chat_open_unverified":
+            break
 
 
 def advance_entry_to_difficulty_dialog(task: CoopTask, frame_id: int = 1) -> None:
     """驱动领地入口链到 CONFIRM_DIFFICULTY_OPEN（打开难度弹窗点击已验证）。"""
     advance_territory_entry_to_recruit(task, frame_id=frame_id)
-    decision = task.decide_action(Observation(frame_id=frame_id + 7), make_window_ctx())
+    decision = task.decide_action(Observation(frame_id=frame_id + 9), make_window_ctx())
     assert decision is not None and decision[0].tag == "open_difficulty_dialog"
     task.on_action_verified(*decision)
 
@@ -270,11 +294,11 @@ def advance_entry_to_difficulty_dialog(task: CoopTask, frame_id: int = 1) -> Non
 def advance_initial_entry_to_join(task: CoopTask) -> None:
     advance_territory_entry_to_recruit(task, frame_id=1)
     # 页签（默认档案未配置 → 跳过）后打开难度弹窗
-    decision = task.decide_action(Observation(frame_id=8), make_window_ctx())
+    decision = task.decide_action(Observation(frame_id=10), make_window_ctx())
     assert decision is not None and decision[0].tag == "open_difficulty_dialog"
     task.on_action_verified(*decision)
     # 打开确认：settle → 连续 2 次命中标题 → 确认打开进入勾选
-    advance_confirm_difficulty_open(task, 2, 1, frame_id=8)
+    advance_confirm_difficulty_open(task, 2, 1, frame_id=10)
     # 勾选 1、2 后进入关闭步骤
     for frame_id in (10, 11):
         decision = task.decide_action(
@@ -351,19 +375,20 @@ class TestFindCoopAction:
         task.ctx.current_state = State.FIND_COOP
         tags = []
         entry_observations = territory_entry_observations(frame_id=1) + [
-            Observation(frame_id=7),  # 挑战页聊天 → SELECT_MODE_TAB → 打开难度弹窗
-            Observation(frame_id=8),  # 打开确认：固定等待（settle）
-            difficulty_observation(2, 1, frame_id=9),  # 命中 1
-            difficulty_observation(2, 1, frame_id=10),  # 命中 2
-            difficulty_observation(2, 1, frame_id=11),  # 确认打开 → 进入勾选
-            difficulty_observation(2, 1, frame_id=12),
-            difficulty_observation(2, 1, frame_id=13),
+            Observation(frame_id=7),  # 挑战页聊天
+            Observation(frame_id=8),  # 聊天生效确认：档案未配置页签文字 → 跳过
+            Observation(frame_id=9),  # 页签未配置 → 打开难度弹窗
+            Observation(frame_id=10),  # 打开确认：固定等待（settle）
+            difficulty_observation(2, 1, frame_id=11),  # 命中 1
+            difficulty_observation(2, 1, frame_id=12),  # 命中 2
+            difficulty_observation(2, 1, frame_id=13),  # 确认打开 → 进入勾选
             difficulty_observation(2, 1, frame_id=14),
-            # 弹窗仍打开 → 点击关闭；之后连续 2 次复核不可见 → 确认关闭
             difficulty_observation(2, 1, frame_id=15),
-            Observation(frame_id=16),
+            # 弹窗仍打开 → 点击关闭；之后连续 2 次复核不可见 → 确认关闭
+            difficulty_observation(2, 1, frame_id=16),
             Observation(frame_id=17),
             Observation(frame_id=18),
+            Observation(frame_id=19),
         ]
         for observation in entry_observations:
             decision = task.decide_action(observation, make_window_ctx())
@@ -382,6 +407,7 @@ class TestFindCoopAction:
             "mode_card_selected",
             "challenge_page_confirmed",
             "open_challenge_chat",
+            "chat_open_unverified",
             "open_difficulty_dialog",
             "difficulty_open_settle",
             "difficulty_open_hit",
@@ -395,7 +421,7 @@ class TestFindCoopAction:
             "difficulty_dialog_closed",
         ]
         # 进入 JOIN_COOP 后发出抢合作信号动作（由 Runner 双线程协调器执行）
-        grab_decision = task.decide_action(Observation(frame_id=19), make_window_ctx())
+        grab_decision = task.decide_action(Observation(frame_id=20), make_window_ctx())
         assert grab_decision is not None
         assert grab_decision[0].kind == "grab_coop"
         assert grab_decision[0].tag == "find_coop_grab"
@@ -407,17 +433,18 @@ class TestFindCoopAction:
         tags = []
         # 跳过模式：打开确认通过后直接进关闭步骤，不进入 SELECT_DIFFICULTIES
         for observation in territory_entry_observations(frame_id=1) + [
-            Observation(frame_id=7),  # 挑战页聊天 → SELECT_MODE_TAB → 打开难度弹窗
-            Observation(frame_id=8),  # settle
-            difficulty_observation(10, frame_id=9),
-            difficulty_observation(10, frame_id=10),
-            difficulty_observation(10, frame_id=11),  # 确认打开
+            Observation(frame_id=7),  # 挑战页聊天
+            Observation(frame_id=8),  # 聊天生效确认：档案未配置页签文字 → 跳过
+            Observation(frame_id=9),  # 页签未配置 → 打开难度弹窗
+            Observation(frame_id=10),  # settle
+            difficulty_observation(10, frame_id=11),
             difficulty_observation(10, frame_id=12),
+            difficulty_observation(10, frame_id=13),  # 确认打开
             # 弹窗仍打开 → 点击关闭；之后连续 2 次复核不可见 → 确认关闭
-            difficulty_observation(10, frame_id=13),
-            Observation(frame_id=14),
+            difficulty_observation(10, frame_id=14),
             Observation(frame_id=15),
             Observation(frame_id=16),
+            Observation(frame_id=17),
         ]:
             decision = task.decide_action(observation, make_window_ctx())
             assert decision is not None
@@ -435,6 +462,7 @@ class TestFindCoopAction:
             "mode_card_selected",
             "challenge_page_confirmed",
             "open_challenge_chat",
+            "chat_open_unverified",
             "open_difficulty_dialog",
             "difficulty_open_settle",
             "difficulty_open_hit",
@@ -445,7 +473,7 @@ class TestFindCoopAction:
             "difficulty_close_miss_check",
             "difficulty_dialog_closed",
         ]
-        grab_decision = task.decide_action(Observation(frame_id=17), make_window_ctx())
+        grab_decision = task.decide_action(Observation(frame_id=18), make_window_ctx())
         assert grab_decision is not None
         assert grab_decision[0].kind == "grab_coop"
         assert grab_decision[0].tag == "find_coop_grab"
@@ -473,7 +501,12 @@ class TestFindCoopAction:
         assert chat_decision[0].tag == "open_coop_chat"
         task.on_action_verified(*chat_decision)
 
-        open_refresh_decision = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        # 聊天点击生效确认：档案未配置页签文字，1 帧跳过
+        unverified = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert unverified is not None and unverified[0].kind == "wait"
+        task.on_action_verified(*unverified)
+
+        open_refresh_decision = task.decide_action(Observation(frame_id=4), make_window_ctx())
         assert open_refresh_decision is not None
         assert open_refresh_decision[0].tag == "open_refresh_difficulty_dialog"
         task.on_action_verified(*open_refresh_decision)
@@ -519,6 +552,41 @@ class TestFindCoopAction:
         assert decision is not None
         assert decision[0].kind == "grab_coop"
         assert decision[0].tag == "find_coop_grab"
+
+    def test_join_step_closes_visible_popup_before_grabbing(self):
+        # 兜底：带着全屏弹窗回到 FIND_COOP 时先关闭再抢，否则弹窗挡住
+        # join_coop 会形成「弹窗不关、抢不停」的循环（实机 2026-09-14）
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        advance_initial_entry_to_join(task)
+
+        match = MatchResult("buttons/x.png", (858, 190), 0.99)
+        obs = Observation(
+            frame_id=1,
+            raw_data={"close_button_visible": True, "close_button_match": match},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.kind == "click"
+        assert action.tag == "close_grab_popup"
+        assert action.target == (858, 190)
+        assert action.verification == "next_frame"
+        # 关闭后留在 FIND_COOP，下一拍重新决策（弹窗已关则发抢合作信号）
+        assert to_state == State.FIND_COOP
+        task.on_action_verified(action, to_state)
+        next_decision = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert next_decision is not None
+        assert next_decision[0].kind == "grab_coop"
+
+    def test_close_grab_popup_verified_by_button_disappearance(self):
+        task = make_task()
+        action = Action(kind="click", tag="close_grab_popup", target=(858, 190))
+        before = Observation(frame_id=1, raw_data={"close_button_visible": True})
+        after = Observation(frame_id=2)  # 关闭按钮已消失
+        assert task.verify_action(action, before, after)
+        still_visible = Observation(frame_id=2, raw_data={"close_button_visible": True})
+        assert not task.verify_action(action, before, still_visible)
 
     def test_missing_entry_hotspot_stops_without_skipping_to_join(self):
         # 领地确认后缺 open_mode_select hotspot：无可用动作 → decide 返回 None
@@ -971,7 +1039,8 @@ class TestOtherStates:
             )
         ) + [
             (Observation(frame_id=7), "open_challenge_chat"),
-            (Observation(frame_id=8), "open_difficulty_dialog"),
+            (Observation(frame_id=8), "chat_open_unverified"),
+            (Observation(frame_id=9), "open_difficulty_dialog"),
         ]:
             decision = task.decide_action(observation, make_window_ctx())
             assert decision is not None
@@ -2467,7 +2536,12 @@ class TestOtherStates:
         assert next_decision[0].tag == "open_coop_chat"
         task.on_action_verified(*next_decision)
 
-        open_refresh_decision = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        # 聊天点击生效确认：档案未配置页签文字，1 帧跳过
+        unverified = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert unverified is not None and unverified[0].kind == "wait"
+        task.on_action_verified(*unverified)
+
+        open_refresh_decision = task.decide_action(Observation(frame_id=4), make_window_ctx())
         assert open_refresh_decision is not None
         assert open_refresh_decision[0].tag == "open_refresh_difficulty_dialog"
         task.on_action_verified(*open_refresh_decision)
@@ -2809,12 +2883,13 @@ class TestModeProfileDispatch:
         tags = []
         for observation in territory_entry_observations(frame_id=1) + [
             Observation(frame_id=7),   # open_challenge_chat（挑战页聊天）
-            Observation(frame_id=8),   # open_mode_tab（页签 hotspot 路径）
-            Observation(frame_id=9),   # open_difficulty_dialog
-            Observation(frame_id=10),  # settle
-            difficulty_observation(2, 1, frame_id=11),
+            Observation(frame_id=8),   # chat_open_unverified（档案未配置页签文字，跳过确认）
+            Observation(frame_id=9),   # open_mode_tab（页签 hotspot 路径）
+            Observation(frame_id=10),  # open_difficulty_dialog
+            Observation(frame_id=11),  # settle
             difficulty_observation(2, 1, frame_id=12),
             difficulty_observation(2, 1, frame_id=13),
+            difficulty_observation(2, 1, frame_id=14),
         ]:
             decision = task.decide_action(observation, make_window_ctx())
             assert decision is not None
@@ -2829,6 +2904,7 @@ class TestModeProfileDispatch:
             "mode_card_selected",
             "challenge_page_confirmed",
             "open_challenge_chat",
+            "chat_open_unverified",
             "open_mode_tab",
             "open_difficulty_dialog",
             "difficulty_open_settle",
@@ -2905,9 +2981,14 @@ class TestModeProfileDispatch:
             make_mode_profile(mode_tab_text="保卫宠物"),
         )
         task._mode_tab_miss_limit = 3
-        # 未识别到页签文字：不盲点固定坐标，返回 None 等待下一帧
+        # 未识别到页签文字：不盲点固定坐标，返回等待动作重试下一帧
+        # （显式 wait 而不是 None——None 会被 Runner 计入无进展预算
+        #   （error_restart_max_consecutive=3 < miss_limit=8），2026-09-16 实机）
         for frame_id in (3, 4):
-            assert task.decide_action(Observation(frame_id=frame_id), make_window_ctx()) is None
+            decision = task.decide_action(Observation(frame_id=frame_id), make_window_ctx())
+            assert decision is not None
+            assert decision[0].tag == "mode_tab_pending"
+            assert decision[0].kind == "wait"
         # 连续 miss 达上限：报错停止（大概率不在招募页，任何点击都不安全）
         with pytest.raises(RuntimeError, match="保卫宠物"):
             task.decide_action(Observation(frame_id=5), make_window_ctx())
@@ -2918,7 +2999,8 @@ class TestModeProfileDispatch:
         )
         task._mode_tab_miss_limit = 2
         miss = Observation(frame_id=3, raw_data={"mode_tab_rows": []})
-        assert task.decide_action(miss, make_window_ctx()) is None
+        miss_decision = task.decide_action(miss, make_window_ctx())
+        assert miss_decision is not None and miss_decision[0].tag == "mode_tab_pending"
         hit = Observation(
             frame_id=4,
             raw_data={
@@ -2966,10 +3048,14 @@ class TestModeProfileDispatch:
         chat = task.decide_action(Observation(frame_id=2), make_window_ctx())
         assert chat is not None and chat[0].tag == "open_coop_chat"
         task.on_action_verified(*chat)
-        tab = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        # 聊天点击生效确认：档案未配置页签文字，1 帧跳过
+        unverified = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert unverified is not None and unverified[0].kind == "wait"
+        task.on_action_verified(*unverified)
+        tab = task.decide_action(Observation(frame_id=4), make_window_ctx())
         assert tab is not None and tab[0].tag == "open_mode_tab"
         task.on_action_verified(*tab)
-        dialog = task.decide_action(Observation(frame_id=4), make_window_ctx())
+        dialog = task.decide_action(Observation(frame_id=5), make_window_ctx())
         assert dialog is not None and dialog[0].tag == "open_refresh_difficulty_dialog"
 
     def test_return_action_requests_settlement_screenshot(self):
@@ -3246,12 +3332,151 @@ class TestTerritoryEntry:
         assert decision is not None and decision[0].tag == "challenge_page_confirmed"
         task.on_action_verified(*decision)
         assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
-        # 聊天点击验证后进页签步骤，且页签去向是首局难度弹窗
+        # 聊天点击先进生效确认（档案未配置页签文字 → 1 帧跳过），再进页签
+        # 步骤；页签去向是首局难度弹窗
         chat = task.decide_action(Observation(frame_id=2), make_window_ctx())
         assert chat is not None and chat[0].tag == "open_challenge_chat"
         task.on_action_verified(*chat)
+        assert task._recruit_step == _RecruitStep.CONFIRM_CHAT_OPEN
+        unverified = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert unverified is not None and unverified[0].tag == "chat_open_unverified"
+        task.on_action_verified(*unverified)
         assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
         assert task._after_tab_step == _RecruitStep.OPEN_DIFFICULTY_DIALOG
+
+
+class TestChatOpenConfirm:
+    """聊天点击生效确认：页签行读到本模式页签才算进入招募，读不到则重点。
+
+    2026-09-16 实机回归：结算返回后挑战页盖着金币道具说明卡，聊天点击
+    只关掉弹窗、页面未切换，页签 OCR 读不到被无进展预算保守停止。生效
+    判据用页签行（2026-09-17 实机修正）：挑战页锚点「开始挑战」在招募
+    频道页同样可见，锚点无法区分两页——首版锚点判据导致确认永不推进、
+    9 次重点全部点在招募页空白处直到超时。
+    """
+
+    def _task_on_confirm(self, **kwargs) -> CoopTask:
+        task = make_task(
+            mode_profile=make_mode_profile(mode_tab_text="合作模式"),
+            **kwargs,
+        )
+        task.ctx.current_state = State.FIND_COOP
+        task._after_tab_step = _RecruitStep.OPEN_DIFFICULTY_DIALOG
+        task._enter_chat_open_confirm()
+        assert task._recruit_step == _RecruitStep.CONFIRM_CHAT_OPEN
+        return task
+
+    @staticmethod
+    def _obs(frame_id: int, tab_visible: bool) -> Observation:
+        # 挑战页的页签行区域读到的是「拥有：」等无关文字（2026-09-16 实机）
+        row = (
+            ModeTabRow("合作模式", 0.8, (314, 1535))
+            if tab_visible
+            else ModeTabRow("拥有：", 0.7, (314, 1535))
+        )
+        return Observation(frame_id=frame_id, raw_data={"mode_tab_rows": [row]})
+
+    def test_observation_mode_reads_tab_row(self):
+        task = self._task_on_confirm()
+        assert task.observation_mode() == "mode_tab"
+
+    def test_reclick_when_tab_missing_then_confirm_after_reclick(self):
+        """事故回放：首次点击被弹窗吃掉（页签读不到）→ 重点 → 页面切换成功。"""
+        task = self._task_on_confirm()
+        ctx = make_window_ctx()
+
+        # 首次点击未生效：页签行连续 4 帧读不到 → 前 3 帧等待，第 4 帧重点聊天
+        for frame_id in (1, 2, 3):
+            decision = task.decide_action(self._obs(frame_id, False), ctx)
+            assert decision is not None and decision[0].tag == "chat_open_pending"
+        reclick = task.decide_action(self._obs(4, False), ctx)
+        assert reclick is not None
+        assert reclick[0].tag == "chat_reclick"
+        assert reclick[0].kind == "click"
+        # 重点坐标 = 模式聊天按钮（coop_chat hotspot 换算的客户区像素）
+        assert reclick[0].target == (int(0.5 * 923), int(0.6 * 1723))
+        task.on_action_verified(*reclick)
+        assert task._recruit_step == _RecruitStep.CONFIRM_CHAT_OPEN
+
+        # 重点生效（关掉了挡路的弹窗并真的点到聊天）：页签连续 2 帧可读
+        pending = task.decide_action(self._obs(5, True), ctx)
+        assert pending is not None and pending[0].tag == "chat_open_pending"
+        confirmed = task.decide_action(self._obs(6, True), ctx)
+        assert confirmed is not None and confirmed[0].tag == "chat_open_confirmed"
+        task.on_action_verified(*confirmed)
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
+
+    def test_budget_exhausted_stops_conservatively(self):
+        """重点预算用尽仍读不到页签：decide 返回 None（调度层保守停止）。"""
+        task = self._task_on_confirm()
+        task._chat_open_max_reclicks = 2
+        ctx = make_window_ctx()
+
+        frame_id = 0
+        for _ in range(2):
+            for _ in range(3):
+                frame_id += 1
+                decision = task.decide_action(self._obs(frame_id, False), ctx)
+                assert decision is not None and decision[0].tag == "chat_open_pending"
+            frame_id += 1
+            reclick = task.decide_action(self._obs(frame_id, False), ctx)
+            assert reclick is not None and reclick[0].tag == "chat_reclick"
+            task.on_action_verified(*reclick)
+
+        # 预算用尽后再读满连续帧：页签仍读不到 → 无可用动作（保守停止）
+        for _ in range(3):
+            frame_id += 1
+            decision = task.decide_action(self._obs(frame_id, False), ctx)
+            assert decision is not None and decision[0].tag == "chat_open_pending"
+        frame_id += 1
+        assert task.decide_action(self._obs(frame_id, False), ctx) is None
+
+    def test_single_tab_hit_does_not_advance(self):
+        """页签单帧读到不推进（连续 2 帧才算生效），读不到后计数清零。"""
+        task = self._task_on_confirm()
+        ctx = make_window_ctx()
+
+        decision = task.decide_action(self._obs(1, True), ctx)
+        assert decision is not None and decision[0].tag == "chat_open_pending"
+        assert task._recruit_step == _RecruitStep.CONFIRM_CHAT_OPEN
+
+        decision = task.decide_action(self._obs(2, False), ctx)
+        assert decision is not None and decision[0].tag == "chat_open_pending"
+        assert task._chat_open_tab_hits == 0
+
+    def test_recruit_page_anchor_text_does_not_block_confirm(self):
+        """2026-09-17 实机回归：招募页底部同样有「开始挑战」，确认不得依赖
+        锚点消失——只要页签行可读就推进（锚点文字同时存在也不影响）。"""
+        task = self._task_on_confirm()
+        ctx = make_window_ctx()
+        obs = Observation(
+            frame_id=1,
+            raw_data={
+                # 同帧两者都可读：页签行 + 挑战页锚点文字（招募页实况）
+                "mode_tab_rows": [ModeTabRow("合作模式", 0.8, (314, 1535))],
+                "challenge_text": "开始挑战",
+            },
+        )
+        decision = task.decide_action(obs, ctx)
+        assert decision is not None and decision[0].tag == "chat_open_pending"
+        confirmed = task.decide_action(
+            Observation(frame_id=2, raw_data=dict(obs.raw_data)), ctx
+        )
+        assert confirmed is not None and confirmed[0].tag == "chat_open_confirmed"
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
+
+    def test_profile_without_tab_text_skips_confirm(self):
+        """档案未配置页签文字：页签行验证无从谈起，保持旧行为直接选页签。"""
+        task = make_task(mode_profile=make_mode_profile(mode_tab_text=None))
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
+        chat = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert chat is not None and chat[0].tag == "open_challenge_chat"
+        task.on_action_verified(*chat)
+        assert task._recruit_step == _RecruitStep.CONFIRM_CHAT_OPEN
+        decision = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert decision is not None and decision[0].tag == "chat_open_unverified"
+        assert task._recruit_step == _RecruitStep.SELECT_MODE_TAB
 
     def test_weekly_buff_full_path_click_then_advance(self):
         """配置了每周弹窗识别：挑战页确认先进关闭步骤，命中点文字框中心，
@@ -4190,7 +4415,8 @@ class TestSelectTransform:
         assert target.hero_type == "angel"
         assert target.star_level == 3
 
-    def test_none_when_main_c_target_reached(self):
+    def test_triggers_even_when_main_c_target_reached(self):
+        """2026-09-17 变更：主C达标不再抑制变身——3星非主C同样返回目标。"""
         task = make_task()
         board = make_board(
             [
@@ -4198,7 +4424,10 @@ class TestSelectTransform:
                 make_hero("snow", star=3, pos=(300, 300)),
             ]
         )
-        assert task._strategy.select_transform(board, 0, 2) is None
+        target = task._strategy.select_transform(board, 0, 2)
+        assert target is not None
+        assert target.hero_type == "snow"
+        assert target.star_level == 3
 
     def test_none_when_charges_exhausted(self):
         task = make_task()
@@ -4267,6 +4496,11 @@ class TestTransformSequence:
         assert task._transform_stage is None
 
     def test_no_trigger_when_main_c_ready(self):
+        """非回补阶段主C达标：优先转选技能（触发点位于 main_c_ready 之后）。
+
+        2026-09-17 变更只放宽 select_transform 的条件；回补阶段数量未达标
+        时的触发见下方 test_triggers_in_topup_with_target_main_c。
+        """
         task = self._ready_task()
         board = make_board(
             [
@@ -4278,6 +4512,40 @@ class TestTransformSequence:
         assert decision is not None
         assert decision[0].tag == "main_c_ready"
         assert task._transform_stage is None
+
+    def test_triggers_in_topup_with_target_main_c(self):
+        """回补阶段主C星级达标但数量未达标：合并产出3星非主C后下一轮触发变身。
+
+        实机日志（2026-09-17）：主C强袭2星在场（target_star_level=2 已
+        达标）、处于补数量阶段，棋盘出现 angel3星——旧策略因「无达标主C」
+        抑制不变身，只继续召唤/合成。
+        """
+        task = make_task(
+            main_c_profile=MainCProfile(
+                display_name="强袭",
+                hero_template_dir="heroes/assault",
+                topup_after_skill_selections=4,
+                topup_hero_count=4,
+            ),
+            transform_button_locator=TRANSFORM_LOCATOR,
+        )
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("angel", star=3, pos=(300, 300)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "transform_click_hero"
+        assert decision[0].target == (300, 300)
+        assert task._transform_stage == "poll"
+        assert task._transform_target is not None
+        assert task._transform_target.hero_type == "angel"
 
     def test_no_trigger_when_charges_exhausted(self):
         task = self._ready_task()

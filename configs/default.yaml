@@ -62,6 +62,11 @@ safety:
   # 8000 会导致"识别成功但点击被丢弃"的循环；技能页为静态弹窗，稍旧的
   # 画面点击风险低，且有动作后验证兜底
   frame_ttl_ms: 15000
+  # 慢机自适应上限（毫秒）：识别耗时持续超过 frame_ttl_ms 时生效时效翻倍
+  # 放宽、封顶该值，机器恢复后自动回落；识别比该上限还慢才保守停止。
+  # 2026-09-14 实机：机器高负载时领地入口单帧识别 19~61 秒，15 秒时效
+  # 把全部决策拒之门外导致无进展停止——机器慢应慢跑而不是退出
+  frame_ttl_max_ms: 90000
   # 无进展超时（秒），界面长时间不变化时暂停
   no_progress_timeout: 30
 
@@ -122,6 +127,15 @@ run:
   find_coop_check_interval_seconds: 1.0
   # 整段抢合作的最长时长（秒），超时未抢到则保守停止
   find_coop_max_duration_seconds: 3600
+  # 抢合作弹窗关闭（2026-09-14 实机）：连点误点自己头像会弹出「个人信息」等
+  # 全屏弹窗，检查线程识别右上角标准关闭按钮（×）后由抢线程点击关闭；
+  # 重试上限复用 close_popup_max_retries。modal_edge_brightness 为全屏模态
+  # 判定阈值（画面两侧边缘平均亮度低于此值视为有全屏面板；弹窗打开实测
+  # 23~31，普通界面 ≥64）；grab_unknown_popup_confirmations 为「已越过招募
+  # 阶段后边缘持续变暗且识别不到标准关闭按钮」的连续确认拍数，达到后保守
+  # 停止并留证（招募页本身边缘也是暗的，未越过招募阶段不判未知弹窗）
+  modal_edge_brightness: 45.0
+  grab_unknown_popup_confirmations: 2
   # 单个目标难度识别不到时最多滚动重试次数（命中后重置；从没见过彩虹行的
   # 跳过不重置，后续目标直接级联跳过）；用尽则记录并跳过该目标，不影响
   # 后续抢合作。2026-08-19 起难度面板每次打开都定位在普通难度区（第1~12层），
@@ -270,7 +284,10 @@ main_c_profiles:
   assault:
     display_name: 强袭
     hero_template_dir: heroes/assault
-    hero_classifier_model: outputs/hero_classifier/assault-helper-v5/hero_classifier.onnx
+    # 2026-09-18 游戏更新更换强袭立绘，v5 在新立绘上大量漏识别；v6 用
+    # helper-newart 数据组重训（新立绘强袭 + 旧目录其他英雄），test 上强袭
+    # star1~4 准确率 95.8%~99.0%
+    hero_classifier_model: outputs/hero_classifier/assault-helper-v6/hero_classifier.onnx
     # 简化版技能识别：强袭技能卡上的英雄图标（同一英雄所有技能卡共用此图）
     skill_icon_templates:
       - skills/qiang_xi.png

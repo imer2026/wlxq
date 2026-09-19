@@ -518,6 +518,7 @@ _FLAG_LOCATOR_FILES = {
     "merge_gift_skill_title": "4_xing_e_wai_ji_neng.png",
     "summon_button": "zhao_huan.png",
     "skill_refresh_button": "shua_xin.png",
+    "close_button": "x.png",
 }
 
 
@@ -565,8 +566,8 @@ class TestInterfaceFlagGating:
         assert vision.template_calls == []
         assert raw == {}
 
-    def test_grab_mode_matches_only_ready_button(self, tmp_path):
-        """抢合作子步骤：额外查准备按钮，其余标志仍不查。"""
+    def test_grab_mode_matches_ready_and_close_buttons(self, tmp_path):
+        """抢合作子步骤：额外查准备按钮和弹窗关闭按钮，其余标志仍不查。"""
         from wlxq_bot.models import State
 
         match = MatchResult("zhun_bei.png", (500, 1000), 0.9)
@@ -584,7 +585,7 @@ class TestInterfaceFlagGating:
             observation_mode="coop_grab",
         )
 
-        assert vision.template_calls == ["zhun_bei.png"]
+        assert sorted(vision.template_calls) == ["x.png", "zhun_bei.png"]
         assert raw["ready_button_visible"] is True
         assert raw["ready_button_match"] == match
 
@@ -668,7 +669,7 @@ class TestInterfaceFlagGating:
             _make_window_ctx(), None, hint_state=State.FIND_COOP, observation_mode="coop_grab"
         )
 
-        assert vision.template_calls == ["zhun_bei.png"]
+        assert sorted(vision.template_calls) == ["x.png", "zhun_bei.png"]
         assert observation.flag("ready_button_visible") is True
 
     def test_dialog_flag_false_when_marker_missed(self, tmp_path):
@@ -1645,3 +1646,28 @@ class TestTransformButtonObservation:
 
         assert observation.flag("transform_button_visible") is False
         assert "transform_button_match" not in observation.raw_data
+
+
+class TestModalFrameDetection:
+    """is_modal_frame：全屏模态弹窗打开时画面两侧边缘被压暗（2026-09-14 实机）。"""
+
+    def test_bright_edges_reported_as_not_modal(self, tmp_path):
+        import numpy as np
+
+        perception = _flag_gated_perception(tmp_path, _RecordingVision())
+        frame = np.full((1727, 927, 3), 200, dtype=np.uint8)
+        assert perception.is_modal_frame(frame, 45.0) is False
+
+    def test_dark_edges_reported_as_modal(self, tmp_path):
+        import numpy as np
+
+        perception = _flag_gated_perception(tmp_path, _RecordingVision())
+        frame = np.full((1727, 927, 3), 200, dtype=np.uint8)
+        frame[:, :30] = 20
+        frame[:, -30:] = 20
+        assert perception.is_modal_frame(frame, 45.0) is True
+
+    def test_invalid_frame_conservatively_not_modal(self, tmp_path):
+        perception = _flag_gated_perception(tmp_path, _RecordingVision())
+        assert perception.is_modal_frame(None, 45.0) is False
+        assert perception.is_modal_frame("not-a-frame", 45.0) is False

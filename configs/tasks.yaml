@@ -201,6 +201,17 @@ locators:
     roi: tan_chuang_area
     action_point:
       source: match_center
+  # 全屏弹窗右上角标准关闭按钮（×）：抢合作连点误点自己头像弹出「个人信息」
+  # 等全屏弹窗时挡住准备按钮，识别到即点击关闭。皮肤随玩家装扮变化，但 ×
+  # 按钮为游戏标准控件跨皮肤一致（2026-09-14 实机三主题 0.99+，普通界面
+  # 负例 ≤0.67）。ROI 限右上角：全图搜索会在画面中部误中相似图案。
+  close_button:
+    strategy: template
+    template: buttons/x.png
+    threshold: 0.85
+    roi: close_button_area
+    action_point:
+      source: match_center
   # 【选技能】图：技能选择页面（3 张技能卡）的标识。开局免费自动弹出或局内点「选择技能」
   # 按钮（花金币）后都会出现该页面。开局时它遮住召唤按钮，必须选完消失后才能召唤。
   # 只用于识别页面状态（开局流程不点击它），与 summon_button 按「先选技能、再召唤」识别开局类型。
@@ -367,6 +378,14 @@ rois:
     y_ratio: 0.8888
     width_ratio: 0.4056
     height_ratio: 0.0955
+  # 全屏弹窗右上角标准关闭按钮（×）搜索区，2026-09-14 实机标定自
+  # screenshot_20260914_233038/234442/234459（按钮实测中心约 0.906/0.11~0.14）
+  close_button_area:
+    relative_to: client
+    x_ratio: 0.75
+    y_ratio: 0.03
+    width_ratio: 0.25
+    height_ratio: 0.22
   # 双倍奖励弹窗标识 ROI，2026-09-05 实机标定
   double_reward_dialog_area:
     relative_to: client
@@ -638,7 +657,11 @@ mode_tab_recognition:
 # 模板匹配置信度不同，不得混用；entry_wait_timeout_seconds 是入口链每个
 # 等待步骤（领地变返回/弹窗出现/挑战页出现）的秒级上限；entry_max_reclicks
 # 是「点击未生效」时的重点预算（领地未打开重点领地、弹窗仍开重点选卡），
-# 每次重点重新起算等待上限，用尽仍不成功才保守停止
+# 每次重点重新起算等待上限，用尽仍不成功才保守停止；chat_open_max_reclicks
+# 是聊天点击生效确认（挑战页锚点消失）的重点预算：点击被道具卡等弹窗
+# 吃掉、页面未切换时重点聊天按钮（重点会顺带关掉挡路弹窗），整个确认
+# 步骤共用一个 entry_wait_timeout_seconds 上限，用尽仍停留在挑战页才
+# 保守停止（2026-09-16 实机：结算返回后金币说明卡盖住聊天按钮）
 mode_select_recognition:
   title_roi: mode_select_title_area
   title_text: 模式选择
@@ -649,6 +672,7 @@ mode_select_recognition:
   min_confidence: 0.5
   entry_wait_timeout_seconds: 60
   entry_max_reclicks: 3
+  chat_open_max_reclicks: 10
 
 # 棋盘格子坐标模型
 # 由 wlxq-bot pick --rect 量测排1/排2 格子后计算得出（见 docs/game-rules.md）

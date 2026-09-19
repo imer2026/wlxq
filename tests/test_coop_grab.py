@@ -79,17 +79,28 @@ class FakeScreen:
 
 
 class FakePerception:
-    """假识别：按预设序列返回准备按钮匹配结果。"""
+    """假识别：按预设序列返回准备按钮匹配结果。
+
+    close_matches 为全屏弹窗关闭按钮匹配序列（耗尽后恒 None），
+    modal_plan 为边缘变暗（全屏模态）判定序列（耗尽后沿用最后一个值，
+    缺省恒 False），模拟「弹窗出现→关闭」「边缘亮→暗」等时序。
+    """
 
     def __init__(
         self,
         matches: list[MatchResult | None],
         *,
+        close_matches: list[MatchResult | None] | None = None,
+        modal_plan: list[bool] | None = None,
         raise_on_match: bool = False,
         unexpected_error: bool = False,
     ) -> None:
         self._matches = list(matches)
+        self._close_matches = list(close_matches or [])
+        self._modal_plan = list(modal_plan or [])
         self.calls = 0
+        self.close_calls = 0
+        self.modal_calls = 0
         self._raise_on_match = raise_on_match
         self._unexpected_error = unexpected_error
 
@@ -102,6 +113,18 @@ class FakePerception:
         if self.calls <= len(self._matches):
             return self._matches[self.calls - 1]
         return None
+
+    def match_close_button(self, ctx, frame):
+        self.close_calls += 1
+        if self.close_calls <= len(self._close_matches):
+            return self._close_matches[self.close_calls - 1]
+        return None
+
+    def is_modal_frame(self, frame, brightness_threshold):
+        self.modal_calls += 1
+        if self.modal_calls <= len(self._modal_plan):
+            return self._modal_plan[self.modal_calls - 1]
+        return self._modal_plan[-1] if self._modal_plan else False
 
 
 class FakeExecutor:
@@ -378,3 +401,123 @@ def test_unexpected_worker_error_does_not_wait_until_timeout():
 
     assert not result.found
     assert result.reason == "worker_failed"
+
+
+def test_popup_close_then_ready_button():
+    # 弹窗出现 2 拍（抢线程应点击关闭按钮而不是 join），随后消失、准备按钮
+    # 出现 → 正常抢到。检查间隔放大到 0.05s 保证抢线程来得及读到关闭请求
+    close_match = MatchResult("buttons/x.png", (858, 190), 0.99)
+    perception = FakePerception(
+        [None, None, None, MatchResult("zhun_bei", (500, 900), 0.9)],
+        close_matches=[close_match, close_match],
+    )
+    executor = FakeExecutor()
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        executor,
+        SafetyGuard(),
+        find_coop_check_interval_seconds=0.05,
+    )
+
+    result = coordinator.run()
+
+    assert result.found
+    assert result.reason == "ready_found"
+    close_actions = [a for a in executor.actions if a.tag == "close_grab_popup"]
+    assert close_actions, "弹窗可见期间抢线程应点击关闭按钮"
+    assert all(a.target == (858, 190) for a in close_actions)
+    assert all(a.reason == "抢合作期间识别到弹窗关闭按钮，点击关闭" for a in close_actions)
+
+
+def test_popup_unclosable_after_retries_exhausted():
+    # 关闭按钮一直可见：重试达 close_popup_max_retries 后保守停止
+    close_match = MatchResult("buttons/x.png", (858, 190), 0.99)
+    perception = FakePerception(
+        [None] * 20,
+        close_matches=[close_match] * 20,
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        FakeExecutor(),
+        SafetyGuard(),
+        close_popup_max_retries=3,
+        find_coop_max_duration_seconds=3.0,
+    )
+
+    result = coordinator.run()
+
+    assert not result.found
+    assert result.reason == "popup_unclosable"
+
+
+def test_unknown_popup_stops_after_passing_recruit():
+    # 边缘先亮（组队大厅，越过招募阶段）后持续变暗且无标准关闭按钮：
+    # 连续 2 拍确认后保守停止（无标准关闭按钮的全屏弹窗无法安全关闭）
+    perception = FakePerception(
+        [None] * 20,
+        modal_plan=[False, True, True],
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        FakeExecutor(),
+        SafetyGuard(),
+        grab_unknown_popup_confirmations=2,
+        find_coop_max_duration_seconds=3.0,
+    )
+
+    result = coordinator.run()
+
+    assert not result.found
+    assert result.reason == "unknown_popup"
+
+
+def test_dark_recruit_page_does_not_trigger_unknown_popup():
+    # 招募页本身边缘也是暗的：未越过招募阶段（从没见过亮屏/准备/关闭按钮）
+    # 时持续暗边缘不判未知弹窗，正常抢到超时为止
+    perception = FakePerception(
+        [],
+        modal_plan=[True],
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        FakeExecutor(),
+        SafetyGuard(),
+        grab_unknown_popup_confirmations=2,
+        find_coop_max_duration_seconds=0.15,
+    )
+
+    result = coordinator.run()
+
+    assert not result.found
+    assert result.reason == "timeout"
+
+
+def test_popup_close_state_resets_between_runs():
+    # 协调器实例跨抢合作段复用：上一段的弹窗状态（已越过招募/关闭计数）
+    # 不能泄漏到下一段——第二段在暗边缘招募页应正常跑到超时而不是 unknown_popup
+    close_match = MatchResult("buttons/x.png", (858, 190), 0.99)
+    first = FakePerception(
+        [None] * 20,
+        close_matches=[close_match] * 20,
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        first,
+        FakeExecutor(),
+        SafetyGuard(),
+        close_popup_max_retries=2,
+        find_coop_max_duration_seconds=3.0,
+    )
+    assert coordinator.run().reason == "popup_unclosable"
+
+    second = FakePerception([], modal_plan=[True])
+    coordinator._perception = second
+    coordinator._run_config = make_run_config(
+        grab_unknown_popup_confirmations=2,
+        find_coop_max_duration_seconds=0.15,
+    )
+    assert coordinator.run().reason == "timeout"

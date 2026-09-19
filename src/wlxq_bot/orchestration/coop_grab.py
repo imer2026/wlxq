@@ -13,6 +13,16 @@
   切回（与主循环同策略：系统空闲时自动切回，持续超过 window_foreground_wait_seconds
   才报 window_lost），期间不识别不点击。前台有效截图进入退出帧缓冲，
   抢合作阶段丢失窗口瞬间的画面也能落盘排查。
+- 弹窗关闭（2026-09-14 实机）：连点 join 落在组队大厅会误点自己头像，弹出
+  「个人信息」等全屏弹窗挡住准备按钮。检查线程在准备按钮未命中时顺带匹配
+  全屏弹窗右上角标准关闭按钮（×，跨弹窗皮肤一致），命中后把匹配位置写给
+  抢线程，由抢线程点击关闭——检查线程仍然绝不点击，只是抢线程的点击目标
+  从 join 暂时切换为关闭按钮（弹窗出现即已加入成功，暂停连点无损失，反而
+  消除连点持续落在弹窗上的风险）。点击后由检查线程下一拍验证：弹窗消失则
+  继续找准备按钮；连续多拍仍可见则按 close_popup_max_retries 重试后保守
+  停止（popup_unclosable）。已越过招募阶段（见过亮屏/准备/关闭按钮）后
+  边缘持续变暗却识别不到标准关闭按钮，视为未知弹窗，保守停止并留证
+  （unknown_popup；招募页本身边缘也是暗的，未越过招募阶段不判）。
 - 发现准备按钮后两个线程都退出，回到 Runner 主循环，由正常的单线程流程
   重新截图、识别并点击准备按钮（保证 frame_id 校验；点准备绝不并发）。
 
@@ -27,6 +37,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from wlxq_bot.action.executor import ActionExecutor
 from wlxq_bot.action.safety import SafetyGuard
@@ -88,13 +99,29 @@ class GrabResult:
     Attributes:
         found: 是否识别到准备按钮（True 表示抢到合作，应进入准备流程）
         reason: 结束原因：ready_found / window_lost / timeout / stopped /
-            capture_failed / perception_failed / worker_failed / no_join_hotspot；
+            capture_failed / perception_failed / worker_failed / no_join_hotspot /
+            popup_unclosable / unknown_popup；
             window_lost 为连点执行连续失败（窗口真丢失）或失焦/最小化持续
-            超过 window_foreground_wait_seconds
+            超过 window_foreground_wait_seconds；
+            popup_unclosable 为全屏弹窗关闭按钮重试用尽仍可见；
+            unknown_popup 为已越过招募阶段后检测到无标准关闭按钮的未知全屏弹窗
     """
 
     found: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class _CloseRequest:
+    """检查线程识别到弹窗关闭按钮后写给抢线程的点击请求。
+
+    point 为匹配中心（窗口客户区物理像素，与 join 点击同坐标系）；
+    frame_id 为识别所依据的帧，供日志排查。
+    """
+
+    point: tuple[int, int]
+    frame_id: int
+    confidence: float
 
 
 class CoopGrabCoordinator:
@@ -135,6 +162,16 @@ class CoopGrabCoordinator:
         self._latest_ctx: WindowContext | None = None
         self._ctx_lock = threading.Lock()
         self._finish_lock = threading.Lock()
+        # 弹窗关闭状态（run() 开始时重置，协调器实例跨抢合作段复用）：
+        # _close_request 由检查线程写入、抢线程读取；_popup_close_attempts
+        # 为关闭按钮连续可见拍数；_passed_recruit 表示已越过招募页（招募页
+        # 边缘也是暗的，未越过时不判未知弹窗）；_unknown_popup_streak 为
+        # 「边缘暗且无关闭按钮」连续拍数
+        self._close_lock = threading.Lock()
+        self._close_request: _CloseRequest | None = None
+        self._popup_close_attempts = 0
+        self._passed_recruit = False
+        self._unknown_popup_streak = 0
 
     def run(self) -> GrabResult:
         """运行抢合作阶段，阻塞直到发现准备按钮、超时、窗口失效或停止。"""
@@ -154,6 +191,11 @@ class CoopGrabCoordinator:
             return GrabResult(found=False, reason="capture_failed")
         with self._ctx_lock:
             self._latest_ctx = ctx
+        with self._close_lock:
+            self._close_request = None
+        self._popup_close_attempts = 0
+        self._passed_recruit = False
+        self._unknown_popup_streak = 0
 
         deadline = self._clock() + self._run_config.find_coop_max_duration_seconds
         stop_event = threading.Event()
@@ -233,6 +275,11 @@ class CoopGrabCoordinator:
             holder[0] = result
             stop_event.set()
 
+    def _read_close_request(self) -> _CloseRequest | None:
+        """读取检查线程当前写入的弹窗关闭请求（不清除，由检查线程维护生命周期）。"""
+        with self._close_lock:
+            return self._close_request
+
     def _grab_loop(
         self,
         spot: Hotspot,
@@ -240,7 +287,12 @@ class CoopGrabCoordinator:
         holder: list[GrabResult | None],
         deadline: float,
     ) -> None:
-        """连点 join_coop，不做识别；窗口真丢失（连续执行失败）才报 window_lost。"""
+        """连点 join_coop，不做识别；窗口真丢失（连续执行失败）才报 window_lost。
+
+        检查线程识别到弹窗关闭按钮时，本线程的点击目标暂时从 join 切换为
+        关闭按钮（弹窗出现即已加入成功，暂停连点无损失）；点击成功后等一个
+        检查周期再恢复，由检查线程下一拍确认弹窗是否已关。
+        """
         consecutive_failures = 0
         while not stop_event.is_set():
             if self._safety.stop_requested:
@@ -253,15 +305,26 @@ class CoopGrabCoordinator:
             if ctx is None:
                 self._sleep(0.05)
                 continue
-            point = hotspot_to_client_point(spot, ctx.client_size)
-            action = Action(
-                kind="click",
-                target=point,
-                duration=0.08,
-                verification="immediate",
-                tag="find_coop_click",
-                reason="抢合作连点 join_coop",
-            )
+            close_req = self._read_close_request()
+            if close_req is not None:
+                action = Action(
+                    kind="click",
+                    target=close_req.point,
+                    duration=0.08,
+                    verification="immediate",
+                    tag="close_grab_popup",
+                    reason="抢合作期间识别到弹窗关闭按钮，点击关闭",
+                )
+            else:
+                point = hotspot_to_client_point(spot, ctx.client_size)
+                action = Action(
+                    kind="click",
+                    target=point,
+                    duration=0.08,
+                    verification="immediate",
+                    tag="find_coop_click",
+                    reason="抢合作连点 join_coop",
+                )
             result = self._grab_executor.execute(ctx, action)
             if not result.executed:
                 failure = result.failure_reason or "未知失败"
@@ -286,6 +349,16 @@ class CoopGrabCoordinator:
                 self._sleep(0.1)
                 continue
             consecutive_failures = 0
+            if close_req is not None:
+                logger.info(
+                    "抢合作点击弹窗关闭按钮 frame=%d pos=%s conf=%.3f",
+                    close_req.frame_id,
+                    close_req.point,
+                    close_req.confidence,
+                )
+                # 等检查线程下一拍确认弹窗已关（期间不连点 join、不重复点关闭），
+                # 仍可见则检查线程会刷新请求，本线程自然再点一次
+                stop_event.wait(self._check_interval)
             # 执行器内部已按 find_coop_click_delay_min/max 做了拟人延迟
 
     def _suspend_for_foreground(
@@ -365,6 +438,9 @@ class CoopGrabCoordinator:
     ) -> None:
         """周期截图并匹配准备按钮；识别到即通知停止。绝不点击。
 
+        准备按钮未命中时顺带匹配全屏弹窗关闭按钮（×）：命中则把匹配位置
+        写给抢线程点击关闭，并在后续拍验证关闭结果（详见模块文档）。
+
         窗口失焦/最小化时挂起等待切回（与主循环同策略），期间不识别不点击；
         持续超过 window_foreground_wait_seconds 才报 window_lost。
         """
@@ -431,4 +507,84 @@ class CoopGrabCoordinator:
                 )
                 self._finish(stop_event, holder, GrabResult(True, "ready_found"))
                 return
+            if not self._watch_popup(stop_event, holder, ctx, frame):
+                return
             stop_event.wait(self._check_interval)
+
+    def _watch_popup(
+        self,
+        stop_event: threading.Event,
+        holder: list[GrabResult | None],
+        ctx: WindowContext,
+        frame: Any,
+    ) -> bool:
+        """检查线程的弹窗分支：识别关闭按钮并驱动关闭/未知弹窗保守停止。
+
+        Returns:
+            True: 继续下一拍检查；False: 已写入结论并通知停止。
+        """
+        try:
+            close_match = self._perception.match_close_button(ctx, frame)
+            modal = self._perception.is_modal_frame(
+                frame, self._run_config.modal_edge_brightness
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            # 关闭按钮识别失败不中断抢合作：退化为主流程（只找准备按钮）
+            logger.warning("抢合作弹窗识别异常，本拍跳过弹窗分支: %r", exc)
+            return True
+        if close_match is not None:
+            # 弹窗可见即已离开招募页；连续可见拍数 = 已发出的关闭点击数
+            self._passed_recruit = True
+            self._unknown_popup_streak = 0
+            self._popup_close_attempts += 1
+            # 与 runner 侧同语义：首次点击外再重试 close_popup_max_retries 次
+            max_attempts = self._run_config.close_popup_max_retries + 1
+            if self._popup_close_attempts > max_attempts:
+                logger.error(
+                    "抢合作弹窗关闭按钮连续 %d 拍仍可见（首次点击+%d 次重试），判定"
+                    "弹窗关不住，保守停止；退出帧缓冲已保留最后画面",
+                    self._popup_close_attempts,
+                    self._run_config.close_popup_max_retries,
+                )
+                self._finish(stop_event, holder, GrabResult(False, "popup_unclosable"))
+                return False
+            request = _CloseRequest(
+                point=close_match.position,
+                frame_id=ctx.frame_id,
+                confidence=close_match.confidence,
+            )
+            with self._close_lock:
+                self._close_request = request
+            logger.info(
+                "抢合作识别到弹窗关闭按钮 frame=%d pos=%s conf=%.3f，通知点击关闭 (%d/%d)",
+                ctx.frame_id,
+                close_match.position,
+                close_match.confidence,
+                self._popup_close_attempts,
+                max_attempts,
+            )
+            return True
+        # 关闭按钮不可见：清请求，弹窗已关则抢线程恢复连点
+        with self._close_lock:
+            self._close_request = None
+        self._popup_close_attempts = 0
+        if not modal:
+            # 边缘亮 = 组队大厅/对局画面，已越过招募页
+            self._passed_recruit = True
+            self._unknown_popup_streak = 0
+            return True
+        if not self._passed_recruit:
+            # 招募页等全屏面板边缘也是暗的：正常抢的过程中每拍都会走到这里，
+            # 未越过招募阶段不判未知弹窗
+            return True
+        self._unknown_popup_streak += 1
+        confirmations = self._run_config.grab_unknown_popup_confirmations
+        if self._unknown_popup_streak < confirmations:
+            return True
+        logger.error(
+            "抢合作期间检测到未知全屏弹窗：画面边缘持续变暗（连续 %d 拍）且识别"
+            "不到标准关闭按钮，保守停止；退出帧缓冲已保留最后画面，可据此补充模板",
+            self._unknown_popup_streak,
+        )
+        self._finish(stop_event, holder, GrabResult(False, "unknown_popup"))
+        return False
