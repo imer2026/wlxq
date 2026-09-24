@@ -176,6 +176,7 @@ class Runner:
         skip_difficulty_selection: bool | None = None,
         max_rounds: int | None = None,
         mode: str | None = None,
+        invite: bool = False,
     ) -> State:
         """执行指定任务。
 
@@ -191,6 +192,8 @@ class Runner:
                 难度弹窗仍开/关一次刷新最新合作邀请。
             mode: 组队对局模式（mode_profiles 键，如 coop/pet）；None 使用配置
                 run.mode。决定入口页签、难度识别方式与模式专属素材。
+            invite: 邀请者模式：发起合作等待帮助者加入（角色 INITIATOR、
+                左下棋盘），走 INVITE_* 组队状态；仅 coop 模式支持。
 
         Returns:
             任务结束时的最终状态
@@ -210,6 +213,7 @@ class Runner:
             ) from exc
 
         mc = main_c or self.default_config.run.default_main_c
+        coop_role = CoopRole.INITIATOR if invite else CoopRole.HELPER
         difficulty_levels = (
             parse_coop_difficulties(coop_difficulties)
             if coop_difficulties is not None
@@ -227,18 +231,21 @@ class Runner:
             run_config = run_config.model_copy(update={"max_rounds": max_rounds})
         # 模式解析：CLI --mode 优先，缺省用 run.mode；再应用该模式的主C覆盖
         mode_name, mode_profile = self._resolve_mode_profile(mode)
+        if invite and mode_name != "coop":
+            raise ValueError("邀请者模式（--invite）目前仅支持合作模式（mode=coop）")
         effective_main_c_profile = resolve_main_c_profile(
             self.default_config.main_c_profiles, mode_profile, mc
         )
         self._startup_check(mc, initial_state)
         logger.info(
-            "启动组队任务，模式=%s（%s），主C=%s，合作难度=%s，跳过难度选择=%s，最大局数=%d",
+            "启动组队任务，模式=%s（%s），主C=%s，合作难度=%s，跳过难度选择=%s，最大局数=%d，邀请者=%s",
             mode_name,
             mode_profile.display_name,
             mc,
             difficulty_levels,
             skip_difficulty,
             run_config.max_rounds,
+            invite,
         )
         # 结算截图：一局结束、点击返回前保存当前画面；开关关闭时不构造保存器
         # （也不清理旧数据），与 --debug 无关。放在窗口查找之前：清理是安全
@@ -291,7 +298,7 @@ class Runner:
             vision,
             pack,
             self.tasks_config,
-            CoopRole.HELPER,
+            coop_role,
             mc,
             debug_recorder=debug_recorder,
             skill_icon_templates=self.default_config.main_c_profiles[mc].skill_icon_templates,
@@ -385,13 +392,14 @@ class Runner:
         task = CoopTask(
             ctx,
             run_config,
-            CoopRole.HELPER,
+            coop_role,
             hotspots,
             coop_difficulties=difficulty_levels,
             skill_candidate_roi=skill_candidate_roi,
             skip_difficulty_selection=skip_difficulty,
             main_c_profile=effective_main_c_profile,
             mode_profile=mode_profile,
+            invite_mode=invite,
             pet_difficulty_targets=mode_profile.entry.difficulty.targets or None,
             pet_difficulty_min_confidence=float(
                 self.tasks_config.pet_difficulty_recognition.get("min_confidence", 0.5)

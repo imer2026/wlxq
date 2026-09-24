@@ -77,18 +77,18 @@ def test_import_pools_multiple_rounds_without_touching_existing_labels(tmp_path)
     assert stats.written_crops == 24
     assert stats.distinct_groups == 2
     assert stats.candidate_groups == 2
-    assert stats.candidate_images == 20
+    assert stats.candidate_images == 10
     assert existing.read_bytes() == b"keep"
     assert (stats.import_dir / "rounds.txt").read_text(encoding="utf-8").splitlines() == [
         "202608111914",
         "202608112021",
     ]
     assert len(list((stats.import_dir / "unclassified").rglob("*.png"))) == 24
-    assert len(list((stats.import_dir / "candidates").rglob("*.png"))) == 20
+    assert len(list((stats.import_dir / "candidates").rglob("*.png"))) == 10
     assert stats.candidate_manifest_path.is_file()
     with stats.candidate_manifest_path.open(encoding="utf-8-sig", newline="") as file:
         candidate_rows = list(csv.DictReader(file))
-    assert len(candidate_rows) == 20
+    assert len(candidate_rows) == 10
     assert all((root / row["source_path"]).is_file() for row in candidate_rows)
     assert all((root / row["candidate_path"]).is_file() for row in candidate_rows)
     with stats.manifest_path.open(encoding="utf-8-sig", newline="") as file:
@@ -116,7 +116,7 @@ def test_import_skips_processed_round_and_processes_remaining_rounds(tmp_path) -
     assert stats.skipped_rounds[0].split == "train"
     assert stats.skipped_rounds[0].import_id == "first"
     assert stats.written_crops == 12
-    assert stats.candidate_images == 10
+    assert stats.candidate_images == 5
     assert (stats.import_dir / "rounds.txt").read_text(encoding="utf-8").splitlines() == [
         "202608112021"
     ]

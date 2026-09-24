@@ -225,6 +225,10 @@ wlxq-bot run coop --main-c assault --skip-difficulty-selection
 #  强袭技能一直选到对局结束）；默认模式由 configs/default.yaml 的 run.mode 控制
 wlxq-bot run coop --mode pet
 
+# 邀请者模式：发起合作等待帮助者加入（角色 initiator、左下棋盘），
+# 按 configs/default.yaml invite 段的阈值过滤（关卡 <475 请离、冷却 60s 重邀）
+wlxq-bot run coop --main-c monkey --invite
+
 # 手动打开难度弹窗后，单独验证难度识别、点击和滚动
 wlxq-bot exec select-difficulty --coop-difficulties 1-10
 # 手动打开保卫宠物难度弹窗后，单独验证宠物难度的 OCR 识别与勾选

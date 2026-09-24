@@ -320,8 +320,29 @@ main_c_profiles:
   monkey:
     display_name: 猴子
     hero_template_dir: heroes/monkey
-    hero_classifier_model: outputs/hero_classifier/monkey-helper/hero_classifier.onnx
+    # 种子模型（2026-09-23，两局 1611 张标注、十类全；正式模型待 9 局数据标注后重训）
+    hero_classifier_model: outputs/hero_classifier/monkey-v3/hero_classifier.onnx
     skill_icon_templates: []
+    # ---- 邀请者打法（spec 2026-09-21-initiator-monkey-design.md）----
+    # 主C门禁 1 星即达标；开局召唤 5 个后点「准备完成」，对局内每批 3 个召唤凑阵容
+    target_star_override: 1
+    opening_summons: 5
+    summon_batch_size: 3
+    # 邀请者不合 3 星：产物星级 ≥3 的合并一律不做（棋盘占满也不做）
+    forbid_star3_merge: true
+    # 保留数：天使/雪姬/猴子至少 1 个在场才可合并消耗；死骑 0（可自由合）
+    hero_keep_counts:
+      angel: 1
+      snow: 1
+      death_knight: 0
+    # 阵容门禁：天使 + 雪姬在场（猴子看星级门禁）才转纯选技能
+    required_lineup_heroes: [angel, snow]
+    # 卡住时变身碰辅助：牺牲顺序死骑 → 雪姬（仅数量≥2 时）；天使/猴子永不在列
+    transform_sacrifice_order: [death_knight, snow]
+    # 技能优先级：前两档天使大/雪姬大；3 档以下待用户补充（2026-09-21）
+    skill_priority:
+      1: [神圣契约]
+      2: [冰雪凤鸣]
 
   angel:
     display_name: 天使
@@ -346,6 +367,23 @@ main_c_profiles:
     hero_template_dir: heroes/fox
     hero_classifier_model: outputs/hero_classifier/fox-helper/hero_classifier.onnx
     skill_icon_templates: []
+
+# 邀请者模式（run --invite）：组队等待/过滤/踢人循环参数
+invite:
+  # 帮助者关卡进度阈值：低于请离，不低于留下开局（用户 2026-09-21 定 475）
+  min_stage_progress: 475
+  # 请离后冷却秒数，之后重走邀请点击链
+  kick_cooldown_seconds: 60
+  # 等待无人进房的重发间隔：超时重走 5 步邀请点击链刷新邀请
+  reinvite_after_seconds: 60
+  # 连续空等重发轮数上限，超过保守停止
+  max_empty_reinvites: 30
+  # 连续请离帮助者上限，超过保守停止
+  max_consecutive_kicks: 5
+  # 等待帮助者进房总时长上限（秒）
+  wait_timeout_seconds: 600
+  # 合格帮助者进房后等待其点准备的超时秒数；0 = 一直等
+  ready_timeout_seconds: 60
 
 # 英雄格分类器数据制作配置
 hero_classifier:

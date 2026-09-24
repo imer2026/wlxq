@@ -30,6 +30,7 @@ def _patch_run_env(monkeypatch, captured: dict) -> None:
         skip_difficulty_selection: bool | None = None,
         max_rounds: int | None = None,
         mode: str | None = None,
+        invite: bool = False,
     ) -> State:
         captured["task_name"] = task_name
         captured["main_c"] = main_c
@@ -38,6 +39,7 @@ def _patch_run_env(monkeypatch, captured: dict) -> None:
         captured["skip_difficulty_selection"] = skip_difficulty_selection
         captured["max_rounds"] = max_rounds
         captured["mode"] = mode
+        captured["invite"] = invite
         return State.COMPLETED
 
     monkeypatch.setattr("wlxq_bot.runner.Runner.run", fake_run)
@@ -61,6 +63,7 @@ def test_run_cli_passes_coop_difficulties_override(monkeypatch) -> None:
         "skip_difficulty_selection": None,
         "max_rounds": None,
         "mode": None,
+        "invite": False,
     }
 
 
@@ -82,6 +85,7 @@ def test_run_cli_passes_skip_difficulty_selection(monkeypatch) -> None:
         "skip_difficulty_selection": True,
         "max_rounds": None,
         "mode": None,
+        "invite": False,
     }
 
 
@@ -103,6 +107,7 @@ def test_run_cli_passes_max_rounds_override(monkeypatch) -> None:
         "skip_difficulty_selection": None,
         "max_rounds": 3,
         "mode": None,
+        "invite": False,
     }
 
 

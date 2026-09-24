@@ -17,6 +17,38 @@ tasks:
 # 未实机确认的点保持缺失，任务会保守停止；用 `wlxq-bot pick` 量测后填写。
 # hotspot 名字必须与 tasks/coop.py、orchestration/coop_grab.py 中引用保持一致。
 hotspots:
+  # ---- 邀请者模式（2026-09-21/22 实机标定，spec 2026-09-21-initiator-monkey-design.md）----
+  # 组队大厅【邀请】按钮：点击弹邀请弹窗；等待期该位置「邀请」文字被遮 = 有人进房
+  invite_button:
+    x_ratio: 0.6904
+    y_ratio: 0.6867
+    description: 组队大厅【邀请】按钮（进房判定锚点）
+  # 邀请弹窗【好友】页签
+  invite_friend_tab:
+    x_ratio: 0.8101
+    y_ratio: 0.9450
+    description: 邀请弹窗【好友】页签
+  # 好友页【公会招募】入口
+  invite_guild_recruit:
+    x_ratio: 0.3107
+    y_ratio: 0.8651
+    description: 好友页【公会招募】入口
+  # 【一键邀请】：弹窗层与好友页同坐标，5 步点击链中点两遍（2026-09-23 流程变更）
+  invite_one_click:
+    x_ratio: 0.6904
+    y_ratio: 0.8610
+    description: 【一键邀请】按钮（弹窗层/好友页共用坐标）
+  # 组队大厅【请离】按钮（邀请者踢不合格帮助者；与帮助者退队同位不同文案）
+  invite_kick:
+    x_ratio: 0.6958
+    y_ratio: 0.7788
+    description: 组队大厅【请离】按钮
+  # 局内开局召唤完成后的「准备完成」（固定坐标点击，动作后验证）
+  opening_ready_done:
+    x_ratio: 0.6802
+    y_ratio: 0.3017
+    description: 局内「准备完成」按钮（OCR 定位 2026-09-22，像素 630/521）
+
   # 抢合作：最下面的「加入」按钮（coop_grab 连点此点抢合作）
   join_coop:
     x_ratio: 0.6084
@@ -166,6 +198,32 @@ hotspots:
 # 每个定位器声明策略、ROI 和动作点来源
 # 坐标体系统一使用客户区比例（ratio），运行时按实际客户区尺寸换算为像素
 locators:
+  # ---- 邀请者模式 ----
+  # 组队大厅【请离】按钮：邀请者请离不合格帮助者。与帮助者退队同区域不同文案，
+  # 模板 qing_li.png（2026-09-22 采集），识别区复用退队按钮区 leave_team_area
+  invite_kick_button:
+    strategy: template
+    template: buttons/qing_li.png
+    threshold: 0.82
+    roi: leave_team_area
+    action_point:
+      source: match_center
+  # 组队大厅开局按钮「未准备」态：帮助者尚未点准备，继续等待
+  invite_start_not_ready:
+    strategy: template
+    template: buttons/tiao_zhan_dui_you_wei_zhun_bei.png
+    threshold: 0.82
+    roi: invite_start_button_area
+    action_point:
+      source: none
+  # 组队大厅开局按钮「已准备」态：帮助者已准备，点击该按钮开始对局
+  invite_start_ready:
+    strategy: template
+    template: buttons/tiao_zhan_dui_you_zhun_bei.png
+    threshold: 0.82
+    roi: invite_start_button_area
+    action_point:
+      source: match_center
   # 合作任务启动页的正向识别标志。选取首页右侧信箱按钮（只在首页稳定出现）；
   # 模板已实机采集（home_page_mail.png），识别区域已标定。
   # 阈值 0.85：实机首页全图匹配置信度 1.000（2026-08-15，find 命令验证）；
@@ -356,6 +414,29 @@ locators:
 # 使用比例坐标（ratio），相对于客户区左上角
 # 运行时按实际客户区尺寸换算：pixel_x = x_ratio * client_width
 rois:
+  # ---- 邀请者模式（2026-09-21/22 实机标定）----
+  # 组队大厅【邀请】按钮文字区：等待期 OCR「邀请」子串；被遮（识别不到）= 有人进房
+  invite_text:
+    relative_to: client
+    x_ratio: 0.6009
+    y_ratio: 0.6931
+    width_ratio: 0.1532
+    height_ratio: 0.0515
+  # 帮助者信息弹层内的关卡进度（如「401.雷霆之巅」）：OCR 取点号前整数与阈值比较
+  helper_stage_progress:
+    relative_to: client
+    x_ratio: 0.6365
+    y_ratio: 0.2212
+    width_ratio: 0.2211
+    height_ratio: 0.0376
+  # 组队大厅开局按钮（帮助者未准备/已准备双态模板识别区，2026-09-22 标定）
+  invite_start_button_area:
+    relative_to: client
+    x_ratio: 0.2460
+    y_ratio: 0.8356
+    width_ratio: 0.5167
+    height_ratio: 0.1436
+
   # 首页信箱按钮识别区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
   home_page_mail_area:
     relative_to: client

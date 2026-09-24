@@ -527,6 +527,12 @@ def run(
         "--mode",
         help="组队对局模式：coop（合作）| pet（保卫宠物）；不传时使用配置 run.mode",
     ),
+    invite: bool = typer.Option(
+        False,
+        "--invite",
+        help="邀请者模式：发起合作等待帮助者加入（角色 initiator、左下棋盘），"
+        "按关卡进度过滤（低于阈值请离重邀）；仅 coop 模式支持",
+    ),
     start_state: str = typer.Option(
         "find_coop",
         "--start-state",
@@ -599,6 +605,7 @@ def run(
             skip_difficulty_selection=skip_difficulty_selection,
             max_rounds=max_rounds,
             mode=mode,
+            invite=invite,
         )
     except (ValueError, RuntimeError) as exc:
         logger.error("任务执行失败: %r", exc)

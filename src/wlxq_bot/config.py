@@ -115,6 +115,25 @@ class MainCProfile(BaseModel):
     # 启动时自动计算，配置了会被忽略。未配置时技能选择走原有图标识别流程。
     # 技能名需与 configs/skills.yaml 一致
     skill_priority: dict[int, list[str]] = Field(default_factory=dict)
+    # ---- 邀请者模式（主C猴子）扩展字段；默认值 = 强袭现状行为 ----
+    # 主C门禁星级档案化；0 = 回退 run.target_star_level
+    target_star_override: int = Field(default=0, ge=0, le=4)
+    # 开局召唤次数档案化；0 = 回退 run.minimum_summon_count_before_skills
+    opening_summons: int = Field(default=0, ge=0, le=20)
+    # 凑阵容阶段每批召唤次数
+    summon_batch_size: int = Field(default=3, ge=1, le=10)
+    # 3 星软避让：不执行任何产物为 3 星的合并（2星同类对/2星通配对一律不选，
+    # 棋盘占满也不合——强袭的「占满被迫合并」兜底不生效）
+    forbid_star3_merge: bool = False
+    # 保留数合成：合并后任一输入英雄类型的在场数量不得低于该保留数。
+    # 键为英雄标识（含主C与通配变体），缺失的英雄默认保留 1（主C）/0（其他）。
+    # 空 dict = 不启用该规则（强袭现状）
+    hero_keep_counts: dict[str, int] = Field(default_factory=dict)
+    # 阵容门禁：这些英雄每类在场 ≥1 才允许转选技能；空 = 只看主C星级（强袭现状）
+    required_lineup_heroes: list[str] = Field(default_factory=list)
+    # 变身碰辅助模式：按此顺序选牺牲英雄（取第一个在场数 > 保留数的）赌变出
+    # 缺的辅助；触发条件为阵容不齐 + 棋盘满 + 无安全合成。空 = 强袭的碰主C模式
+    transform_sacrifice_order: list[str] = Field(default_factory=list)
 
 
 class DifficultyProfile(BaseModel):
@@ -485,6 +504,25 @@ class HeroClassifierConfig(BaseModel):
         return _parse_hero_identifier_list(value, "lineup_variants")
 
 
+class InviteConfig(BaseModel):
+    """邀请者模式（run --invite）配置：组队等待/过滤/踢人循环参数。"""
+
+    # 帮助者关卡进度阈值：低于踢掉请离，不低于留下开局
+    min_stage_progress: int = Field(default=475, ge=1)
+    # 请离后冷却秒数，之后重走邀请点击链
+    kick_cooldown_seconds: float = Field(default=60.0, ge=0.0)
+    # 等待无人进房的重发间隔秒数：超时重走邀请点击链刷新邀请
+    reinvite_after_seconds: float = Field(default=60.0, ge=1.0)
+    # 连续「空等→重发」轮数上限（帮助者一直没来），超过保守停止
+    max_empty_reinvites: int = Field(default=30, ge=1)
+    # 连续请离帮助者数量上限（匹配池可能整体不合格），超过保守停止
+    max_consecutive_kicks: int = Field(default=5, ge=1)
+    # 等待帮助者进房的总时长上限（秒），超过保守停止
+    wait_timeout_seconds: float = Field(default=600.0, ge=1.0)
+    # 合格帮助者进房后等待其点准备的超时秒数，超时请离重来；0 = 一直等
+    ready_timeout_seconds: float = Field(default=60.0, ge=0.0)
+
+
 class DefaultConfig(BaseModel):
     """configs/default.yaml 的完整模型。"""
 
@@ -497,6 +535,7 @@ class DefaultConfig(BaseModel):
     main_c_profiles: dict[str, MainCProfile] = Field(default_factory=dict)
     mode_profiles: dict[str, ModeProfile] = Field(default_factory=dict)
     hero_classifier: HeroClassifierConfig = Field(default_factory=HeroClassifierConfig)
+    invite: InviteConfig = Field(default_factory=InviteConfig)
 
     @model_validator(mode="after")
     def _check_lineup_others_subset(self) -> DefaultConfig:

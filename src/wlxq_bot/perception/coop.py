@@ -20,6 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+import re
 
 from wlxq_bot.assets import TemplatePack
 from wlxq_bot.config import TasksConfig
@@ -94,6 +95,10 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
     # 不稳定，实机 2026-08-21）；仅 BUILD 状态识别
     ("merge_gift_skill_title", "merge_gift_skill_page_visible", "merge_gift_skill_title_match"),
     ("summon_button", "summon_button_visible", "summon_button_match"),
+    # 邀请者开局按钮双态（组队大厅）：帮助者「已准备」态出现 → 邀请者点击
+    # 开局；「未准备」态 → 继续等。两态同识别区 invite_start_button_area
+    ("invite_start_ready", "invite_start_ready_visible", "invite_start_ready_match"),
+    ("invite_start_not_ready", "invite_start_not_ready_visible", "invite_start_not_ready_match"),
 )
 
 # 各状态需要识别的全局界面标志。合作只能通过自己点击加入进入，游戏不会主动
@@ -105,6 +110,10 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
 # 出现，也不查。
 _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     State.FIND_COOP: frozenset(),
+    State.INVITE_CLICK: frozenset(),
+    State.INVITE_WAITING: frozenset(),
+    State.INVITE_START: frozenset({"invite_start_ready", "invite_start_not_ready"}),
+    State.INVITE_COOLDOWN: frozenset(),
     State.ENTER_MATCH: frozenset({"ready_button"}),
     State.SELECT_OPENING_SKILLS: frozenset(
         {"select_skill_button", "summon_button", "tan_chuang", "return_button"}
@@ -382,6 +391,12 @@ class CoopPerception:
             if transform_match is not None:
                 matches.append(transform_match)
                 raw_data["transform_button_match"] = transform_match
+        elif observation_mode == "invite_waiting":
+            # 邀请者等待态（spec 2026-09-21 §6）：OCR「邀请」文字（可见=无人
+            # 进房）+ 帮助者信息弹层关卡进度行（有人在房时读取）。两者都限域，
+            # 单帧只做其一由任务层通过两次 observe 完成（先判定后读进度）
+            self._detect_invite_text(ctx, frame, raw_data)
+            self._detect_helper_stage_progress(ctx, frame, raw_data)
 
         # 2. 培养阶段做棋盘英雄识别
         board: BoardSnapshot | None = None
@@ -710,8 +725,56 @@ class CoopPerception:
         ]
         return rows
 
-    def _detect_territory_nav_text(
+    def _detect_invite_text(
         self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 组队大厅【邀请】按钮文字区，写 invite_text_visible。
+
+        可见 = 无人进房（继续等）；不可见 = 有人进房或弹窗遮挡（任务层复检）。
+        """
+        rows = self._read_entry_roi_rows("invite_text", ctx, frame)
+        visible = any("邀请" in row.text for row in rows)
+        raw_data["invite_text_visible"] = visible
+        logger.debug(
+            "frame=%d 邀请文字可见=%s rows=%s",
+            ctx.frame_id,
+            visible,
+            [row.text for row in rows],
+        )
+
+    def _detect_helper_stage_progress(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """OCR 帮助者信息弹层的关卡进度行（如「401.雷霆之巅」）。
+
+        多段结果合并后取点号前整数（2026-09-21 实机 24 图验证：数字
+        24/24 正确；「499.月蚀荒原」可能被拆成两段，合并后不受影响）。
+        解析失败写 helper_stage_progress=None（任务层保守处理）。
+        """
+        rows = self._read_entry_roi_rows("helper_stage_progress", ctx, frame)
+        merged = "".join(row.text for row in rows)
+        progress: int | None = None
+        match = re.search(r"(\d+)", merged)
+        if match:
+            try:
+                progress = int(match.group(1))
+            except ValueError:  # pragma: no cover - \d+ 必为合法整数
+                progress = None
+        raw_data["helper_stage_progress"] = progress
+        logger.debug(
+            "frame=%d 帮助者关卡进度=%s（raw=%r）",
+            ctx.frame_id,
+            progress,
+            merged,
+        )
+
+    def _detect_territory_nav_text(        self,
         ctx: WindowContext,
         frame: Any,
         raw_data: dict[str, Any],

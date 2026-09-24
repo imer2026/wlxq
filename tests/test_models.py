@@ -96,6 +96,10 @@ class TestState:
         expected = {
             "unknown",
             "find_coop",
+            "invite_click",
+            "invite_waiting",
+            "invite_start",
+            "invite_cooldown",
             "enter_match",
             "select_opening_skills",
             "build_main_c",

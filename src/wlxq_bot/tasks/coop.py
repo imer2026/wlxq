@@ -9,7 +9,14 @@ from dataclasses import replace
 from enum import Enum
 from typing import Any, Literal
 
-from wlxq_bot.config import Hotspot, MainCProfile, ModeProfile, RoiConfig, RunConfig
+from wlxq_bot.config import (
+    Hotspot,
+    InviteConfig,
+    MainCProfile,
+    ModeProfile,
+    RoiConfig,
+    RunConfig,
+)
 from wlxq_bot.models import (
     Action,
     BoardHero,
@@ -65,6 +72,16 @@ _MATCH_STATES: frozenset[State] = frozenset(
         State.SELECT_OPENING_SKILLS,
         State.BUILD_MAIN_C,
         State.SELECT_MAIN_C_SKILLS,
+    }
+)
+
+# 邀请者模式组队状态（对局未开始，无弹窗/棋盘/金币识别开销）
+_INVITE_TEAM_STATES: frozenset[State] = frozenset(
+    {
+        State.INVITE_CLICK,
+        State.INVITE_WAITING,
+        State.INVITE_START,
+        State.INVITE_COOLDOWN,
     }
 )
 
@@ -157,11 +174,28 @@ class CoopTask(Task):
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
         transform_button_locator: dict[str, Any] | None = None,
+        invite_mode: bool = False,
+        invite_config: "InviteConfig | None" = None,
     ) -> None:
         super().__init__(ctx)
         self._run_config = run_config
         self._role = role
         self._hotspots = hotspots
+        # 邀请者模式（spec 2026-09-21 §6）：发起合作等待帮助者，走 INVITE_* 状态
+        self._invite_mode = invite_mode
+        self._invite = invite_config or InviteConfig()
+        self._invite_step = 0  # 5 步点击链游标
+        self._invite_wait_since: float | None = None  # 当前等待段起点（clock 秒）
+        self._invite_kick_count = 0  # 连续请离计数
+        self._invite_reinvite_count = 0  # 连续空等重发计数
+        self._invite_cooldown_until: float | None = None
+        # 开局召唤次数档案覆盖（opening_summons>0 时替换 run 级配置）
+        self._main_c_profile = main_c_profile
+        self._profile_opening_summons = (
+            main_c_profile.opening_summons if main_c_profile is not None else 0
+        )
+        # 邀请者「准备完成」已点标记（开局召唤完成后点一次，动作后验证）
+        self._invite_ready_clicked = False
         self._skill_candidate_roi = skill_candidate_roi
         # 主C培养策略（合成/门禁/数量回补）：纯决策对象，状态机只负责调度；
         # 模式档案经 Runner 的 resolve_main_c_profile 应用覆盖后传入 profile
@@ -312,6 +346,9 @@ class CoopTask(Task):
         # 本局主C数量已确认达标（回补补够或首次培养时数量就已够）：数量在选技能
         # 期间不会减少，2026-09-07 用户策略——本局内不再回培养复查数量，一直选技能
         self._topup_done = False
+        # 邀请者模式从 INVITE_CLICK 起步（发起邀请），不走 FIND_COOP 抢合作
+        if self._invite_mode:
+            self.ctx.current_state = State.INVITE_CLICK
 
     @property
     def in_match_states(self) -> bool:
@@ -333,6 +370,12 @@ class CoopTask(Task):
         wait = Action(kind="wait", duration=0.3, verification="immediate", reason="占位动作")
         return [
             Transition("find_coop", State.FIND_COOP, State.ENTER_MATCH, wait),
+            # 邀请者组队链（spec §6）：点击链 → 等待过滤 → 等准备开局；冷却回点击链
+            Transition("invite_click", State.INVITE_CLICK, State.INVITE_WAITING, wait),
+            Transition("invite_filter", State.INVITE_WAITING, State.INVITE_START, wait),
+            Transition("invite_kick", State.INVITE_WAITING, State.INVITE_COOLDOWN, wait),
+            Transition("invite_reentry", State.INVITE_START, State.ENTER_MATCH, wait),
+            Transition("invite_cooldown", State.INVITE_COOLDOWN, State.INVITE_CLICK, wait),
             Transition("ready", State.ENTER_MATCH, State.SELECT_OPENING_SKILLS, wait),
             Transition("select_opening", State.SELECT_OPENING_SKILLS, State.BUILD_MAIN_C, wait),
             Transition("cultivate_loop", State.BUILD_MAIN_C, State.BUILD_MAIN_C, wait),
@@ -354,6 +397,9 @@ class CoopTask(Task):
             return State.HANDLE_RESULT
         if self.ctx.current_state == State.FIND_COOP and observation.flag("ready_button_visible"):
             return State.ENTER_MATCH
+        # 邀请者组队态保持惯性（决策与状态迁移全部在 decide_action 内完成）
+        if self.ctx.current_state in _INVITE_TEAM_STATES:
+            return self.ctx.current_state
         if self.ctx.current_state not in {State.UNKNOWN, State.WINDOW_INVALID}:
             return self.ctx.current_state
         return State.UNKNOWN
@@ -407,6 +453,14 @@ class CoopTask(Task):
             )
         if state == State.FIND_COOP:
             return self._action_find_coop(observation, window_ctx)
+        if state == State.INVITE_CLICK:
+            return self._action_invite_click(observation, window_ctx)
+        if state == State.INVITE_WAITING:
+            return self._action_invite_waiting(observation, window_ctx)
+        if state == State.INVITE_START:
+            return self._action_invite_start(observation, window_ctx)
+        if state == State.INVITE_COOLDOWN:
+            return self._action_invite_cooldown(observation, window_ctx)
         if state == State.ENTER_MATCH:
             return self._action_ready(observation)
         if state == State.SELECT_OPENING_SKILLS:
@@ -481,6 +535,13 @@ class CoopTask(Task):
         return self._summon_count >= self._run_config.minimum_summon_count_before_skills
 
     def observation_mode(self) -> str | None:
+        if self.ctx.current_state in _INVITE_TEAM_STATES:
+            # 邀请者组队态（spec §6）：等待态用限域 OCR 读「邀请」文字与
+            # 帮助者关卡进度；其余组队态无专项识别（开局按钮走全局 locator
+            # 标志，见 perception._INTERFACE_FLAGS_BY_STATE 的 INVITE_START）
+            if self.ctx.current_state == State.INVITE_WAITING:
+                return "invite_waiting"
+            return None
         if self._transform_stage is not None:
             # 变身阶段机接管观察模式（设计 §4.2）：poll/confirm 用按钮专项
             # 模式；verify 恢复默认（无专项模式）。整阶段机拦截而不是只拦
@@ -540,6 +601,373 @@ class CoopTask(Task):
             # 其余入口子步骤不查任何全局标志
             return "coop_grab"
         return None
+
+    # ------------------------------------------------------------------
+    # 邀请者模式组队（spec 2026-09-21-initiator-monkey-design.md §6）
+    # ------------------------------------------------------------------
+
+    def _invite_hotspot_point(
+        self, name: str, window_ctx: WindowContext | None
+    ) -> tuple[int, int] | None:
+        point = self._hotspot_point(name, window_ctx)
+        if point is None:
+            logger.error("邀请者流程缺少 hotspot: %s（configs/tasks.yaml）", name)
+        return point
+
+    def _action_invite_click(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """5 步邀请点击链：邀请 → 一键邀请(弹窗) → 好友 → 公会招募 → 一键邀请(好友页)。
+
+        每步点击后保留固定间隔供界面切换（开环节奏 + 下一步动作后验证）。
+        链完成进入 INVITE_WAITING 并重置重发计数。
+        """
+        steps: tuple[tuple[str, str], ...] = (
+            ("invite_button", "邀请按钮"),
+            ("invite_one_click", "一键邀请（弹窗层）"),
+            ("invite_friend_tab", "好友页签"),
+            ("invite_guild_recruit", "公会招募"),
+            ("invite_one_click", "一键邀请（好友页）"),
+        )
+        if self._invite_step >= len(steps):
+            self._invite_step = 0
+            self._invite_reinvite_count = 0
+            self._invite_wait_since = self._clock()
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.5,
+                    verification="immediate",
+                    tag="invite_wait_entry",
+                    reason="邀请已发出，进入等待帮助者进房",
+                ),
+                State.INVITE_WAITING,
+            )
+        hotspot_name, label = steps[self._invite_step]
+        point = self._invite_hotspot_point(hotspot_name, window_ctx)
+        if point is None:
+            return None
+        action = (
+            Action(
+                kind="click",
+                target=point,
+                duration=0.08,
+                post_delay=0.6,
+                verification="immediate",
+                tag=f"invite_step_{self._invite_step}",
+                reason=f"邀请点击链 {self._invite_step + 1}/5：{label}",
+            ),
+            State.INVITE_CLICK,
+        )
+        self._invite_step += 1
+        return action
+
+    def _action_invite_waiting(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """等待进房 + 帮助者过滤（spec §6 INVITE_WAITING）。
+
+        「邀请」文字可识别 = 无人进房：超 reinvite_after_seconds 重走点击链。
+        识别不到 = 有人进房（复检一次防遮挡误判）：点邀请位置弹帮助者信息，
+        OCR 关卡进度，× 关闭弹层；≥阈值进 INVITE_START，<阈值请离进冷却。
+        """
+        invite_visible = self._invite_text_visible(observation)
+        now = self._clock()
+        if self._invite_wait_since is None:
+            self._invite_wait_since = now
+        if invite_visible:
+            waited = now - self._invite_wait_since
+            if waited >= self._invite.reinvite_after_seconds:
+                self._invite_reinvite_count += 1
+                if self._invite_reinvite_count > self._invite.max_empty_reinvites:
+                    logger.error(
+                        "连续 %d 次空等重发仍无人进房，保守停止", self._invite_reinvite_count
+                    )
+                    return None
+                logger.info(
+                    "等待 %.0f 秒无人进房，重走邀请点击链（第 %d 次重发）",
+                    waited,
+                    self._invite_reinvite_count,
+                )
+                self._invite_step = 0
+                self._invite_wait_since = None
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.2,
+                        verification="immediate",
+                        tag="invite_reinvite",
+                        reason="无人进房超时，重新发起邀请",
+                    ),
+                    State.INVITE_CLICK,
+                )
+            return (
+                Action(
+                    kind="wait",
+                    duration=1.0,
+                    verification="immediate",
+                    tag="invite_waiting",
+                    reason=f"等待帮助者进房（已等 {waited:.0f}s，识别到邀请文字）",
+                ),
+                State.INVITE_WAITING,
+            )
+        # 邀请文字不可见：可能有人进房，也可能是弹窗遮挡。先复检一次：
+        # 连续两帧都不可见才判定进房（计数 ≥1 表示上一帧也不可见）
+        if self._invite_text_missing_frames < 1:
+            self._invite_text_missing_frames += 1
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.8,
+                    verification="immediate",
+                    tag="invite_join_recheck",
+                    reason="邀请文字不可见，复检一次防弹窗遮挡误判",
+                ),
+                State.INVITE_WAITING,
+            )
+        self._invite_text_missing_frames = 0
+        self._invite_wait_since = None
+        return self._invite_open_helper_info(window_ctx)
+
+    _invite_text_missing_frames: int = 0
+
+    def _invite_text_visible(self, observation: Observation) -> bool:
+        """读感知层 OCR 结果：邀请文字可见 = 无人进房。缺失按可见（继续等）。"""
+        value = observation.raw_data.get("invite_text_visible")
+        return True if value is None else bool(value)
+
+    def _invite_open_helper_info(
+        self, window_ctx: WindowContext | None
+    ) -> tuple[Action, State] | None:
+        """有人进房：点邀请位置弹帮助者信息层，下一轮读进度并分流。"""
+        point = self._invite_hotspot_point("invite_button", window_ctx)
+        if point is None:
+            return None
+        return (
+            Action(
+                kind="click",
+                target=point,
+                duration=0.08,
+                post_delay=1.0,
+                verification="next_frame",
+                tag="invite_open_helper_info",
+                reason="有人进房，打开帮助者信息层读取关卡进度",
+            ),
+            State.INVITE_WAITING,
+        )
+
+    def _action_invite_start(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """等帮助者准备：未准备模板 → 继续等；已准备模板 → 点击开局。"""
+        ready_match = self._flag_match(observation, "invite_start_ready_match")
+        if ready_match is not None:
+            return (
+                Action(
+                    kind="click",
+                    target=ready_match.position,
+                    duration=0.08,
+                    verification="next_frame",
+                    tag="invite_start_game",
+                    reason="帮助者已准备，点击开始对局",
+                ),
+                State.ENTER_MATCH,
+            )
+        not_ready = self._flag_match(observation, "invite_start_not_ready_match")
+        if not_ready is not None:
+            return (
+                Action(
+                    kind="wait",
+                    duration=2.0,
+                    verification="immediate",
+                    tag="invite_wait_ready",
+                    reason="帮助者未准备，等待其点准备",
+                ),
+                State.INVITE_START,
+            )
+        # 两个模板都没识别到：帮助者可能已退出（邀请文字重现），回等待态
+        if self._invite_text_visible(observation):
+            logger.info("开局按钮消失且邀请文字重现，帮助者已退出，回到等待")
+            self._invite_wait_since = self._clock()
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.5,
+                    verification="immediate",
+                    tag="invite_helper_left",
+                    reason="帮助者退出房间，继续等待新帮助者",
+                ),
+                State.INVITE_WAITING,
+            )
+        return (
+            Action(
+                kind="wait",
+                duration=1.0,
+                verification="immediate",
+                tag="invite_start_ambiguous",
+                reason="开局按钮未识别（可能界面过渡），稍后重试",
+            ),
+            State.INVITE_START,
+        )
+
+    def _action_invite_cooldown(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """请离后冷却：到时重走 5 步点击链。"""
+        now = self._clock()
+        if self._invite_cooldown_until is None:
+            self._invite_cooldown_until = now + self._invite.kick_cooldown_seconds
+        remaining = self._invite_cooldown_until - now
+        if remaining > 0:
+            return (
+                Action(
+                    kind="wait",
+                    duration=min(remaining, 2.0),
+                    verification="immediate",
+                    tag="invite_cooldown",
+                    reason=f"请离后冷却，{remaining:.0f}s 后重新邀请",
+                ),
+                State.INVITE_COOLDOWN,
+            )
+        self._invite_cooldown_until = None
+        self._invite_step = 0
+        self._invite_wait_since = None
+        return (
+            Action(
+                kind="wait",
+                duration=0.2,
+                verification="immediate",
+                tag="invite_cooldown_done",
+                reason="冷却结束，重新发起邀请",
+            ),
+            State.INVITE_CLICK,
+        )
+
+    # ------------------------------------------------------------------
+    # 邀请者模式局内扩展（spec §5.4/§5.5）
+    # ------------------------------------------------------------------
+
+    def _effective_opening_summons(self) -> int:
+        """开局召唤次数：档案覆盖优先（opening_summons>0），否则 run 配置。"""
+        if self._invite_mode and self._profile_opening_summons > 0:
+            return self._profile_opening_summons
+        return self._run_config.minimum_summon_count_before_skills
+
+    def _effective_batch_size(self) -> int:
+        """凑阵容阶段每批召唤次数（monkey 档案 summon_batch_size，默认 3）。"""
+        if self._invite_mode and self._main_c_profile is not None:
+            return self._main_c_profile.summon_batch_size
+        return 12  # 非 invite：无批限制（原行为=全部空格）
+
+    def _invite_gold_wait_assist(
+        self,
+        board: BoardSnapshot,
+        observation: Observation,
+        why: str,
+    ) -> tuple[Action, State] | None:
+        """邀请者卡住出口（spec §5.3/§5.5）：金币不足且无法行动时的处置。
+
+        阵容不齐 + 棋盘满 + 无安全合成 → 变身碰辅助（次数未耗尽时）；
+        变身也耗尽 → 干等（重置无进展计数，等对局结束）。返回 None 表示
+        没有邀请者特定处置，调用方走原有金币等待。
+        """
+        if not self._invite_mode:
+            return None
+        if not board.capacity.total_slots or board.capacity.available > 0:
+            return None  # 有空位：不存在卡住，走原有召唤等待
+        missing = self._strategy.lineup_missing(board)
+        if not missing:
+            return None  # 阵容已齐：门禁未达只因主C星级，无变身意义
+        if (
+            self._run_config.transform_enabled
+            and self._transform_locator is not None
+            and self._transform_skip_signature is None
+        ):
+            target = self._strategy.select_transform_assist(
+                board,
+                self._transform_used_count,
+                self._run_config.transform_max_per_round,
+            )
+            if target is not None:
+                self._transform_stage = "poll"
+                self._transform_target = target
+                self._transform_button_pos = None
+                self._transform_reclicks = 0
+                self._transform_verify_attempts = 0
+                self._transform_poll_deadline = (
+                    self._clock() + self._run_config.transform_button_appear_timeout_seconds
+                )
+                logger.info(
+                    "卡住变身碰辅助：%s%d星（缺 %s，已用 %d/%d 次）",
+                    target.hero_type,
+                    target.star_level,
+                    "、".join(missing),
+                    self._transform_used_count,
+                    self._run_config.transform_max_per_round,
+                )
+                return (
+                    Action(
+                        kind="click",
+                        target=target.position,
+                        duration=0.08,
+                        post_delay=self._run_config.transform_button_poll_interval_seconds,
+                        verification="immediate",
+                        tag="transform_click_hero",
+                        reason="卡住：点击牺牲英雄变身碰缺的辅助",
+                    ),
+                    State.BUILD_MAIN_C,
+                )
+        # 变身耗尽/未接线：干等（保持现状，用户 2026-09-21 定案）
+        self._no_progress_count = 0
+        self._last_board_signature = None
+        return (
+            Action(
+                kind="wait",
+                duration=self._run_config.gold_red_wait_seconds,
+                verification="immediate",
+                tag="invite_stuck_wait",
+                reason=(
+                    f"{why}：棋盘满、阵容缺 {'、'.join(missing)}、"
+                    "无安全合成且变身不可用，保持现状干等"
+                ),
+            ),
+            State.BUILD_MAIN_C,
+        )
+
+    def _invite_ready_done_action(
+        self, window_ctx: WindowContext | None = None
+    ) -> tuple[Action, State] | None:
+        """邀请者「准备完成」一次性点击。
+
+        Returns:
+            首次调用返回点击动作；已点过（或非邀请模式）返回 None。
+        """
+        if not self._invite_mode or self._invite_ready_clicked:
+            return None
+        point = self._hotspot_point("opening_ready_done", window_ctx)
+        if point is None:
+            return None
+        self._invite_ready_clicked = True
+        return (
+            Action(
+                kind="click",
+                target=point,
+                duration=0.08,
+                post_delay=1.5,
+                verification="next_frame",
+                tag="invite_ready_done",
+                reason="开局召唤完成，点击「准备完成」确认进入培养",
+            ),
+            State.BUILD_MAIN_C,
+        )
 
     def _action_find_coop(
         self,
@@ -2393,7 +2821,7 @@ class CoopTask(Task):
             return self._batch_merge_action()
 
         board = observation.board
-        minimum_summons = self._run_config.minimum_summon_count_before_skills
+        minimum_summons = self._effective_opening_summons()
         if self._summon_count < minimum_summons:
             point = self._hotspot_point("add_hero", window_ctx)
             if point is None:
@@ -2445,6 +2873,14 @@ class CoopTask(Task):
             )
         self._empty_board_count = 0
 
+        # 邀请者「准备完成」（spec §5.4，2026-09-22 用户定案）：开局召唤
+        # 计满后点一次固定坐标确认（与阵容无关），点击后进入常规凑阵容循环
+        if self._invite_mode and not self._invite_ready_clicked:
+            ready_action = self._invite_ready_done_action(window_ctx)
+            if ready_action is None:
+                return None
+            return ready_action
+
         # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足时优先在等待
         # 空档合成（见下方分支），无对可合再原地等待金币恢复（击杀回金），
         # 一直等到够或对局自然结束——不设上限、不放弃回补（2026-09-05 定案）。
@@ -2473,6 +2909,11 @@ class CoopTask(Task):
                 merge = self._gold_wait_merge_action(observation, "召唤金币不足")
                 if merge is not None:
                     return merge
+                # 邀请者出口（spec §5.3）：无安全合成且棋盘满时，变身碰辅助
+                # 优先于干等——否则金币门控循环会吞掉每局 2 次的变身机会
+                assist = self._invite_gold_wait_assist(board, observation, "召唤金币不足")
+                if assist is not None:
+                    return assist
             return (
                 Action(
                     kind="wait",
@@ -2578,14 +3019,24 @@ class CoopTask(Task):
 
         # ---- 批次规划（2026-09-10 用户策略）：识别一次、动作攒批、批后统一识别 ----
         # 先把空格一批召唤填满（每次点击前金币门控），填满后再把互不相交的
-        # 非主C 1/2星对一批拖完；两档都可以按配置关闭，走原有逐动作识别验证
-        if self._run_config.batch_summon_enabled and board.capacity.available > 0:
-            available = board.capacity.available
-            self._batch_summon_remaining = available
+        # 非主C 1/2星对一批拖完；两档都可以按配置关闭，走原有逐动作识别验证。
+        # 邀请者（spec §5.4）：按 summon_batch_size 分批，批间重新识别
+        batch_limit = board.capacity.available
+        if self._invite_mode and self._effective_batch_size() < batch_limit:
+            batch_limit = self._effective_batch_size()
+            logger.info(
+                "邀请者批次召唤限量 %d（本批 %d/%d，空格 %d）",
+                batch_limit,
+                batch_limit,
+                self._effective_batch_size(),
+                board.capacity.available,
+            )
+        if self._run_config.batch_summon_enabled and batch_limit > 0:
+            self._batch_summon_remaining = batch_limit
             logger.info(
                 "规划批次召唤 %d 次（空格 %d/%d，frame=%d）",
-                available,
-                available,
+                batch_limit,
+                board.capacity.available,
                 board.capacity.total_slots,
                 observation.frame_id,
             )
@@ -3094,8 +3545,14 @@ class CoopTask(Task):
         match = self._flag_match(observation, "return_button_match")
         if match is None:
             return None
+        # 下一轮入口：邀请者回 INVITE_CLICK（结算落在合作挑战页，先点开始
+        # 挑战再走邀请链，spec §6）；抢合作回 FIND_COOP
+        if self._invite_mode and self.ctx.round_count + 1 < self.ctx.max_rounds:
+            next_state = State.INVITE_CLICK
+        else:
+            next_state = State.FIND_COOP
         to_state = (
-            State.COMPLETED if self.ctx.round_count + 1 >= self.ctx.max_rounds else State.FIND_COOP
+            State.COMPLETED if self.ctx.round_count + 1 >= self.ctx.max_rounds else next_state
         )
         return (
             Action(

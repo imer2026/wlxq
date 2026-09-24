@@ -66,6 +66,40 @@ flowchart TD
     U -- "是" --> V["保存记录并安全停止"]
 ```
 
+## 邀请者模式组队（run --invite，主C猴子）
+
+邀请者发起合作等待帮助者加入，与「抢合作」互斥；结算返回合作挑战页后重走邀请链。详细设计见 `docs/superpowers/specs/2026-09-21-initiator-monkey-design.md`。
+
+```text
+INVITE_CLICK    5 步邀请点击链（每步动作后验证）：
+                邀请按钮 → 一键邀请(弹窗层) → 好友页签 → 公会招募 → 一键邀请(好友页)
+INVITE_WAITING  轮询「邀请」文字（invite_text ROI，限域 OCR）：
+                可见 = 无人进房；超 reinvite_after_seconds 重走点击链
+                （连续 max_empty_reinvites 次保守停止）
+                不可见 → 复检一次防遮挡误判 → 确认进房：
+                  点邀请位置弹帮助者信息层 → OCR 关卡进度（helper_stage_progress）
+                  → 点 ×（close_button）关闭弹层
+                  ≥ min_stage_progress(475) → INVITE_START
+                  < 阈值 → 点【请离】(invite_kick) → INVITE_COOLDOWN
+                  进度读取失败 → 重试后保守停止（绝不盲踢/盲开局）
+INVITE_START    轮询开局按钮双态模板（invite_start_button_area）：
+                「已准备」→ 点击开局 → ENTER_MATCH（此后与抢合作路径合流）
+                「未准备」→ 继续等（ready_timeout_seconds 超时请离重来，0=一直等）
+                按钮消失且邀请文字重现 → 帮助者退出，回 INVITE_WAITING
+INVITE_COOLDOWN 等 kick_cooldown_seconds → 回 INVITE_CLICK 重发邀请
+```
+
+### 邀请者局内差异（spec §5）
+
+- 门禁：主C ≥1 星（`target_star_override`）且天使、雪姬在场（`required_lineup_heroes`）；
+- 开局召唤 5 次（`opening_summons`）后点「准备完成」（固定坐标，动作后验证）；
+- 凑阵容：每批召唤 `summon_batch_size`(3) 个；棋盘满时安全合成腾格子
+  （保留数 `hero_keep_counts` + 3 星软避让 `forbid_star3_merge`：产物 ≥3 星一律不合，
+  占满也不合）；
+- 卡住（满盘+无安全合成+阵容不齐）：变身碰辅助，牺牲顺序 `transform_sacrifice_order`
+  （死骑→雪姬，受保留数约束）；变身耗尽 → 干等到对局结束（重置无进展计数）。
+```
+
 ## 动作后验证与对局结束信号
 
 严格输入动作（召唤/合成拖动/技能点击/关弹窗等）发出后，调度循环用最多 `action_verify_frames`（5）个后续观察帧确认效果。培养阶段的每个观察帧是一次 10 帧多帧棋盘投票（秒级到十几秒），因此验证循环本身代价不低。

@@ -45,6 +45,90 @@ class CultivationStrategy:
         self._main_c = main_c
         self._run_config = run_config
         self._profile = profile
+        # 通配英雄类型集合（幻天使等）：保留数检查时通配侧不消耗"本类"数量
+        self._wildcard_types = frozenset(run_config.wildcard_merge_heroes)
+
+    # ------------------------------------------------------------------
+    # 邀请者模式扩展（spec 2026-09-21-initiator-monkey-design.md）
+    # ------------------------------------------------------------------
+
+    @property
+    def target_star_level(self) -> int:
+        """主C门禁星级：档案覆盖优先（target_star_override>0），否则 run 配置。"""
+        if self._profile is not None and self._profile.target_star_override > 0:
+            return self._profile.target_star_override
+        return self._run_config.target_star_level
+
+    @property
+    def required_lineup_heroes(self) -> tuple[str, ...]:
+        """阵容门禁英雄（每类在场 ≥1 才可转选技能）；空 = 未启用。"""
+        if self._profile is None:
+            return ()
+        return tuple(self._profile.required_lineup_heroes)
+
+    @property
+    def hero_keep_counts(self) -> dict[str, int]:
+        """保留数表（合并后任一输入类型在场数不得低于该值）；空 = 未启用。"""
+        if self._profile is None:
+            return {}
+        return dict(self._profile.hero_keep_counts)
+
+    @property
+    def forbid_star3_merge(self) -> bool:
+        """3 星软避让是否启用（猴子档案 true：产物星级 ≥3 的合并一律不做）。"""
+        return self._profile is not None and self._profile.forbid_star3_merge
+
+    @property
+    def transform_sacrifice_order(self) -> tuple[str, ...]:
+        """变身碰辅助的牺牲顺序；空 = 强袭的碰主C模式。"""
+        if self._profile is None:
+            return ()
+        return tuple(self._profile.transform_sacrifice_order)
+
+    def lineup_missing(self, board: BoardSnapshot) -> list[str]:
+        """返回阵容门禁尚未在场的英雄（按配置顺序）；空列表 = 阵容已齐。"""
+        present = {hero.hero_type for hero in board.heroes}
+        return [h for h in self.required_lineup_heroes if h not in present]
+
+    def _hero_type_count(self, board: BoardSnapshot, hero_type: str) -> int:
+        return sum(hero.hero_type == hero_type for hero in board.heroes)
+
+    def keep_count_for(self, hero_type: str) -> int:
+        """某英雄的保留数；档案未配置时主C默认 1、其他默认 0。"""
+        keep = self.hero_keep_counts
+        if hero_type in keep:
+            return keep[hero_type]
+        return 1 if hero_type == self._main_c else 0
+
+    def _merge_allowed(self, board: BoardSnapshot, candidate: MergeCandidate) -> bool:
+        """邀请者过滤：3 星避让 + 保留数。强袭（未启用任何新开关）恒 True。
+
+        - 3 星避让：产物星级 = max(输入星级) + 1 ≥ 3 的候选一律拒绝；
+        - 保留数：两输入类型各自的「在场数 − 消耗数」低于保留数则拒绝
+          （同类对消耗该类 2 个；通配对只消耗非通配一侧 1 个）。
+        """
+        if self.forbid_star3_merge:
+            produced_star = max(candidate.hero_a.star_level, candidate.hero_b.star_level) + 1
+            if produced_star >= 3:
+                return False
+        keep = self.hero_keep_counts
+        if not keep:
+            return True
+        a_type, b_type = candidate.hero_a.hero_type, candidate.hero_b.hero_type
+        if a_type == b_type:
+            consumed = {a_type: 2}
+        else:
+            # 通配对（幻天使×其他）：幻天使侧无保留需求，只检查非通配一侧
+            wildcard = self._wildcard_types
+            a_is_wild = a_type in wildcard
+            consumed = {b_type: 1} if a_is_wild else {a_type: 1}
+            if not (a_is_wild or b_type in wildcard):
+                # 非通配的异类对不存在（合成要求同类），防御性放行走原逻辑
+                consumed = {}
+        for hero_type, used in consumed.items():
+            if self._hero_type_count(board, hero_type) - used < self.keep_count_for(hero_type):
+                return False
+        return True
 
     # ------------------------------------------------------------------
     # 培养门禁
@@ -52,7 +136,7 @@ class CultivationStrategy:
 
     def has_target_main_c(self, board: BoardSnapshot) -> bool:
         """棋盘上是否存在达到目标星级的主 C。"""
-        target = self._run_config.target_star_level
+        target = self.target_star_level
         return any(
             hero.hero_type == self._main_c and hero.star_level >= target for hero in board.heroes
         )
@@ -80,8 +164,13 @@ class CultivationStrategy:
         数量回补阶段（选满 N 次技能后回到培养，``require_hero_count=True``）
         还要求主C总数达标（如强袭保证 4 个以上）——首次培养不做数量要求，
         让技能选择尽早开始，数量在回补阶段补足。
+
+        邀请者扩展（spec §5.1）：档案配置 ``required_lineup_heroes`` 时，
+        门禁额外要求每类辅助英雄在场 ≥1（如猴子：天使+雪姬都在场）。
         """
         if not self.has_target_main_c(board):
+            return False
+        if self.required_lineup_heroes and self.lineup_missing(board):
             return False
         if not require_hero_count or not self.topup_enabled:
             return True
@@ -89,7 +178,12 @@ class CultivationStrategy:
 
     def ready_reason(self, board: BoardSnapshot, *, require_hero_count: bool = False) -> str:
         """main_c_ready 动作的日志描述。"""
-        reason = f"达到 {self._run_config.target_star_level} 星主C"
+        missing = self.lineup_missing(board)
+        if missing:
+            return f"达到 {self.target_star_level} 星主C，但阵容缺 {('、'.join(missing))}"
+        reason = f"达到 {self.target_star_level} 星主C"
+        if self.required_lineup_heroes:
+            reason += f" 且阵容齐（{('、'.join(self.required_lineup_heroes))}）"
         if require_hero_count and self.topup_enabled:
             reason += f" 且数量 {self.main_c_count(board)}/{self._profile.topup_hero_count}"  # type: ignore[union-attr]
         return reason
@@ -121,9 +215,10 @@ class CultivationStrategy:
         used_count: int,
         max_count: int,
     ) -> BoardHero | None:
-        """选择本次变身目标；None 表示不变身（设计文档 §4.1）。
+        """选择本次变身目标；None 表示不变身。
 
-        条件（全部满足才返回目标）：
+        强袭模式（默认，``transform_sacrifice_order`` 为空）——设计文档 §4.1：
+        条件全部满足才返回目标：
         1. 本局变身次数未用完（used_count < max_count）；
         2. 棋盘存在星级不低于 run.transform_min_star_level 的非主 C 英雄。
 
@@ -131,15 +226,48 @@ class CultivationStrategy:
         回补阶段）时，2 星对合并产出 3 星非主 C 的下一轮识别同样变身碰
         主 C（免费且可能直接提星/凑数量）。
 
+        邀请者碰辅助模式（spec §5.3，``transform_sacrifice_order`` 非空）：
+        由调用方在「卡住」（阵容不齐+棋盘满+无安全合成）时调用
+        :meth:`select_transform_assist`，本方法不适用（3星避让下不存在
+        3星非主C触发条件，恒返回 None 由调用方落空）。
+
         多个候选取 heroes 列表中的第一个（感知层按棋盘格序构建 heroes，
         即按格位顺序）；返回 None 时调用方落入常规召唤/合成决策。
         """
+        if self.transform_sacrifice_order:
+            return None
         if used_count >= max_count:
             return None
         min_star = self._run_config.transform_min_star_level
         for hero in board.heroes:
             if hero.hero_type != self._main_c and hero.star_level >= min_star:
                 return hero
+        return None
+
+    def select_transform_assist(
+        self,
+        board: BoardSnapshot,
+        used_count: int,
+        max_count: int,
+    ) -> BoardHero | None:
+        """变身碰辅助（邀请者卡住出口，spec §5.3）。
+
+        从牺牲顺序（``transform_sacrifice_order``）取第一个满足
+        「在场数 > 保留数」的英雄变身：类型必变（本局携带 4 种英雄中除自身
+        外随机之一，星级不变），有概率变出阵容缺的辅助。天使/猴子不进
+        牺牲名单即永不被变身；雪姬配置保留数 1 时仅在场 ≥2 才可牺牲。
+
+        Returns:
+            牺牲英雄；次数耗尽 / 无人可牺牲 / 未启用该模式时 None。
+        """
+        order = self.transform_sacrifice_order
+        if not order or used_count >= max_count:
+            return None
+        for hero_type in order:
+            if self._hero_type_count(board, hero_type) > self.keep_count_for(hero_type):
+                for hero in board.heroes:
+                    if hero.hero_type == hero_type:
+                        return hero
         return None
 
     # ------------------------------------------------------------------
@@ -175,6 +303,13 @@ class CultivationStrategy:
             return None
         pool = non_main_pairs if non_main_pairs else candidates
         unfailed = [c for c in pool if self.pair_signature(c) not in failed_pairs]
+        # 邀请者过滤（3星避让+保留数）：猴子档案下强袭的「占满被迫合并」不生效，
+        # 不合法的候选直接出局，走召唤/变身/干等出口
+        allowed = [c for c in unfailed if self._merge_allowed(board, c)]
+        dropped = len(unfailed) - len(allowed)
+        if dropped:
+            logger.debug("邀请者过滤剔除 %d 个候选（3星避让/保留数）", dropped)
+        unfailed = allowed
         same_type_low = [c for c in unfailed if c.hero_a.star_level < 3 and not c.is_wildcard]
         if same_type_low:
             return same_type_low[0]
@@ -231,6 +366,8 @@ class CultivationStrategy:
             if candidate.is_wildcard and not board_full:
                 continue
             if self.pair_signature(candidate) in failed_pairs:
+                continue
+            if not self._merge_allowed(board, candidate):
                 continue
             positions = {candidate.hero_a.position, candidate.hero_b.position}
             if positions & used:
