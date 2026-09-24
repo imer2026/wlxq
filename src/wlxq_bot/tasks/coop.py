@@ -669,7 +669,18 @@ class CoopTask(Task):
                 State.INVITE_WAITING,
             )
         hotspot_name, label = steps[index]
-        point = self._invite_hotspot_point(hotspot_name, window_ctx)
+        # 第 7 步（关邀请弹窗）识别门控：× 模板命中才点（弹窗确实开着）；
+        # 未命中 = 弹窗已被游戏自动关闭，跳过本步——盲点该坐标会点中
+        # 合作页右上角的【概率】（2026-09-24 实机）
+        if hotspot_name == "invite_popup_close":
+            close = self._flag_match(observation, "close_button_match")
+            if close is None:
+                logger.info("邀请弹窗 × 未识别到（弹窗已自动关闭），跳过关弹窗步骤")
+                self._invite_step += 1
+                return self._action_invite_click(observation, window_ctx)
+            point = close.position
+        else:
+            point = self._invite_hotspot_point(hotspot_name, window_ctx)
         if point is None:
             return None
         action = (
@@ -934,6 +945,7 @@ class CoopTask(Task):
     _invite_pending_decision: str | None = None
     _invite_dismiss_checked: bool = False
     _invite_close_wait_frames: int = 0
+    _invite_confirm_pending: bool = False
     _invite_progress_misses: int = 0
     _INVITE_PROGRESS_MAX_MISSES: int = 5
 
@@ -949,14 +961,10 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         """等帮助者准备：未准备模板 → 继续等；已准备模板 → 点击开局。"""
         ready_match = self._flag_match(observation, "invite_start_ready_match")
-        if ready_match is not None:
-            # 邀请者点「已准备」开局：直接进开局选技能（邀请者无"点准备"
-            # 步骤——那是帮助者抢合作路径的 ENTER_MATCH 动作）
-            to_state = (
-                State.SELECT_OPENING_SKILLS
-                if self._invite_mode
-                else State.ENTER_MATCH
-            )
+        if ready_match is not None and not self._invite_confirm_pending:
+            # 第 1 段：点「已准备」→ 游戏到层挑战确认页（彩虹 N 层：队长+
+            # 邀请+挑战，2026-09-24 退出截图确认），尚不对局
+            self._invite_confirm_pending = True
             return (
                 Action(
                     kind="click",
@@ -965,9 +973,28 @@ class CoopTask(Task):
                     post_delay=1.0,
                     verification="next_frame",
                     tag="invite_start_game",
-                    reason="帮助者已准备，点击开始对局",
+                    reason="帮助者已准备，点击开始对局（进层挑战确认页）",
                 ),
-                to_state,
+                State.INVITE_START,
+            )
+        if self._invite_confirm_pending:
+            # 第 2 段：确认页点【挑战】才真正开局（无模板，页面状态由上一
+            # 步验证保证——双态按钮已消失；坐标取实机截图标定）
+            point = self._invite_hotspot_point("invite_stage_challenge", window_ctx)
+            if point is None:
+                return None
+            self._invite_confirm_pending = False
+            return (
+                Action(
+                    kind="click",
+                    target=point,
+                    duration=0.08,
+                    post_delay=1.5,
+                    verification="immediate",
+                    tag="invite_confirm_challenge",
+                    reason="层挑战确认页点【挑战】，正式开局",
+                ),
+                State.SELECT_OPENING_SKILLS,
             )
         not_ready = self._flag_match(observation, "invite_start_not_ready_match")
         if not_ready is not None:
@@ -4123,7 +4150,11 @@ class CoopTask(Task):
     def on_action_failed(self, action: Action) -> None:
         """动作重试耗尽、Runner 放弃该动作时调整内部进度，均不结束任务。"""
         tag = action.tag
-        if tag == "skill_refresh":
+        if tag == "invite_start_game":
+            # 开始点击未生效（验证 5 帧失败）：撤销确认页阶段标记，
+            # 下一帧重新识别双态按钮再点
+            self._invite_confirm_pending = False
+        elif tag == "skill_refresh":
             # 刷新点击未生效（或换出同三张）：本局机会按已用处理，页面仍开时
             # 下一帧直接按优先级选卡——刷新不可用后必须选一张
             self._skill_refresh_used_count += 1

@@ -20,6 +20,7 @@ _INVITE_HOTSPOTS = {
     "invite_kick": Hotspot(x_ratio=0.70, y_ratio=0.78),
     "invite_close_fallback": Hotspot(x_ratio=0.91, y_ratio=0.14),
     "invite_popup_close": Hotspot(x_ratio=0.91, y_ratio=0.14),
+    "invite_stage_challenge": Hotspot(x_ratio=0.50, y_ratio=0.91),
     "opening_ready_done": Hotspot(x_ratio=0.68, y_ratio=0.30),
 }
 
@@ -96,19 +97,36 @@ class TestInviteClickChain:
         task = _make_invite_task()
         assert task.ctx.current_state == State.INVITE_CLICK
 
-    def test_chain_walks_five_steps_then_waits(self) -> None:
+    def test_chain_walks_then_waits(self) -> None:
+        """前 6 步为点击；第 7 步（关弹窗）× 未识别到时自动跳过并收尾。"""
         task = _make_invite_task()
         ctx = _window_ctx()
         visited: list[str] = []
-        for _ in range(7):
+        for _ in range(6):
             action, to_state = task.decide_action(_observation(), ctx)
             assert to_state == State.INVITE_CLICK
             visited.append(str(action.target))
+        assert len(visited) == 6
+        # 第 7 步：× 未识别到（弹窗已被游戏自动关闭）→ 跳过，直接收尾
         action, to_state = task.decide_action(_observation(), ctx)
         assert to_state == State.INVITE_WAITING
         assert action.tag == "invite_wait_entry"
         # 点击链游标重置，供下一轮重发
         assert task._invite_step == 0
+
+    def test_chain_step7_clicks_matched_x(self) -> None:
+        """第 7 步：× 识别到 → 点匹配位置关弹窗。"""
+        task = _make_invite_task()
+        ctx = _window_ctx()
+        for _ in range(6):
+            task.decide_action(_observation(), ctx)
+        close = MatchResult(position=(840, 248), confidence=0.95,
+                            template_name="x", roi_name="close_button_area")
+        action, to_state = task.decide_action(
+            _observation({"close_button_match": close}), ctx
+        )
+        assert to_state == State.INVITE_CLICK
+        assert str(action.target) == str(close.position)
 
 
 class TestInviteWaiting:
@@ -237,3 +255,37 @@ class TestHelperInfoFlow:
         assert stops == task._INVITE_PROGRESS_MAX_MISSES, (
             f"应在第 {task._INVITE_PROGRESS_MAX_MISSES} 次失败后停止，实际第 {stops} 次"
         )
+
+
+class TestInviteStartConfirm:
+    def test_start_then_confirm_challenge(self) -> None:
+        """两段式开局：点已准备（停留等待）→ 下一点确认页【挑战】→ 选技能。"""
+        task = _make_invite_task()
+        task.ctx.current_state = State.INVITE_START
+        ready = MatchResult(position=(500, 1500), confidence=0.95,
+                            template_name="zhun_bei", roi_name="invite_start_button_area")
+        obs = _observation({"invite_start_ready_match": ready})
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_start_game"
+        assert to_state == State.INVITE_START
+        assert task._invite_confirm_pending is True
+        action2, to_state2 = task.decide_action(
+            _observation({"invite_text_visible": False}), _window_ctx()
+        )
+        assert action2.tag == "invite_confirm_challenge"
+        assert to_state2 == State.SELECT_OPENING_SKILLS
+        assert task._invite_confirm_pending is False
+
+    def test_start_failed_resets_confirm_flag(self) -> None:
+        """开始点击验证失败：on_action_failed 撤销确认页标记，可重新点击。"""
+        task = _make_invite_task()
+        task.ctx.current_state = State.INVITE_START
+        ready = MatchResult(position=(500, 1500), confidence=0.95,
+                            template_name="zhun_bei", roi_name="invite_start_button_area")
+        obs = _observation({"invite_start_ready_match": ready})
+        task.decide_action(obs, _window_ctx())
+        assert task._invite_confirm_pending is True
+        from wlxq_bot.models import Action
+
+        task.on_action_failed(Action(kind="click", target=(0, 0), tag="invite_start_game"))
+        assert task._invite_confirm_pending is False

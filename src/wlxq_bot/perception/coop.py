@@ -110,7 +110,8 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
 # 出现，也不查。
 _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     State.FIND_COOP: frozenset(),
-    State.INVITE_CLICK: frozenset(),
+    # 邀请点击链第 7 步关邀请弹窗需要 × 识别门控（盲点坐标会点中【概率】）
+    State.INVITE_CLICK: frozenset({"close_button"}),
     # 邀请者等待态：帮助者信息层打开时需要 × 关闭按钮（close_button）
     State.INVITE_WAITING: frozenset({"close_button"}),
     State.INVITE_START: frozenset({"invite_start_ready", "invite_start_not_ready"}),
