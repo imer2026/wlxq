@@ -619,11 +619,32 @@ class CoopTask(Task):
         observation: Observation,
         window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
-        """5 步邀请点击链：邀请 → 一键邀请(弹窗) → 好友 → 公会招募 → 一键邀请(好友页)。
+        """邀请点击链（spec §6，2026-09-24 流程确认）。
 
-        每步点击后保留固定间隔供界面切换（开环节奏 + 下一步动作后验证）。
-        链完成进入 INVITE_WAITING 并重置重发计数。
+        第 0 步点挑战页【开始挑战】进入邀请页面（复用 coop_challenge_start_area
+        文字框中心，与保卫宠物挑战按钮同款「锚点+点击点二合一」用法）；
+        随后 5 步：邀请 → 一键邀请(弹窗) → 好友 → 公会招募 → 一键邀请(好友页)。
+        每步点击后保留固定间隔供界面切换；链完成进入 INVITE_WAITING 并重置
+        重发计数。
         """
+        if self._invite_step == 0:
+            # 第 0 步：挑战页【开始挑战】（进邀请页面）
+            point = self._invite_hotspot_point("invite_start_challenge", window_ctx)
+            if point is None:
+                return None
+            self._invite_step += 1
+            return (
+                Action(
+                    kind="click",
+                    target=point,
+                    duration=0.08,
+                    post_delay=0.8,
+                    verification="immediate",
+                    tag="invite_step_0",
+                    reason="邀请点击链 1/6：开始挑战（进邀请页面）",
+                ),
+                State.INVITE_CLICK,
+            )
         steps: tuple[tuple[str, str], ...] = (
             ("invite_button", "邀请按钮"),
             ("invite_one_click", "一键邀请（弹窗层）"),
@@ -631,7 +652,8 @@ class CoopTask(Task):
             ("invite_guild_recruit", "公会招募"),
             ("invite_one_click", "一键邀请（好友页）"),
         )
-        if self._invite_step >= len(steps):
+        index = self._invite_step - 1
+        if index >= len(steps):
             self._invite_step = 0
             self._invite_reinvite_count = 0
             self._invite_wait_since = self._clock()
@@ -645,7 +667,7 @@ class CoopTask(Task):
                 ),
                 State.INVITE_WAITING,
             )
-        hotspot_name, label = steps[self._invite_step]
+        hotspot_name, label = steps[index]
         point = self._invite_hotspot_point(hotspot_name, window_ctx)
         if point is None:
             return None
@@ -657,7 +679,7 @@ class CoopTask(Task):
                 post_delay=0.6,
                 verification="immediate",
                 tag=f"invite_step_{self._invite_step}",
-                reason=f"邀请点击链 {self._invite_step + 1}/5：{label}",
+                reason=f"邀请点击链 {self._invite_step + 1}/6：{label}",
             ),
             State.INVITE_CLICK,
         )
@@ -1325,6 +1347,22 @@ class CoopTask(Task):
             logger.info(
                 "frame=%d 已到达挑战页（读到「%s」）", observation.frame_id, challenge_text
             )
+            if self._invite_mode:
+                # 邀请者（spec 2026-09-21 §6）：导航到合作挑战页即止——【邀请】
+                # 按钮就在挑战页上，无难度选择、不进招募频道；INVITE_CLICK
+                # 从【开始挑战】开始走 5 步邀请链
+                self._invite_step = 0
+                self._invite_wait_since = None
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.3,
+                        verification="immediate",
+                        tag="invite_nav_done",
+                        reason="邀请者已到挑战页，开始邀请点击链",
+                    ),
+                    State.INVITE_CLICK,
+                )
             # 配置了每周弹窗识别（保卫宠物=本周Buff）先关弹窗再进招募；
             # 等待 deadline 从进入本步骤起重新起算
             if self._mode is not None and self._mode.entry.weekly_buff_text:

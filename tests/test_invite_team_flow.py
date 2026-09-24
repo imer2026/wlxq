@@ -12,6 +12,7 @@ from wlxq_bot.tasks.base import TaskContext
 from wlxq_bot.tasks.coop import CoopTask
 
 _INVITE_HOTSPOTS = {
+    "invite_start_challenge": Hotspot(x_ratio=0.55, y_ratio=0.95),
     "invite_button": Hotspot(x_ratio=0.69, y_ratio=0.69),
     "invite_friend_tab": Hotspot(x_ratio=0.81, y_ratio=0.95),
     "invite_guild_recruit": Hotspot(x_ratio=0.31, y_ratio=0.87),
@@ -97,7 +98,7 @@ class TestInviteClickChain:
         task = _make_invite_task()
         ctx = _window_ctx()
         visited: list[str] = []
-        for _ in range(5):
+        for _ in range(6):
             action, to_state = task.decide_action(_observation(), ctx)
             assert to_state == State.INVITE_CLICK
             visited.append(str(action.target))
