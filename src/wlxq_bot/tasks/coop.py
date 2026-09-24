@@ -19,6 +19,7 @@ from wlxq_bot.config import (
 )
 from wlxq_bot.models import (
     Action,
+    BoardCapacity,
     BoardHero,
     BoardSnapshot,
     CoopRole,
@@ -264,6 +265,10 @@ class CoopTask(Task):
         self._summon_count = 0
         self._empty_board_count = 0
         self._no_progress_count = 0
+        self._board_capacity_frozen = False
+        self._batch_planned_occupancy = None
+        self._batch_clicks_sent = 0
+        self._batch_no_land_streak = 0
         self._last_board_signature: tuple | None = None
         # 召唤未生效（多为金币不足）后的重试时刻；None 表示无需等待
         self._summon_retry_at: float | None = None
@@ -3123,6 +3128,39 @@ class CoopTask(Task):
                 return None
             return ready_action
 
+        # 召唤落位护栏（2026-09-24）：上一批召唤点击全部发出后占用无增长 =
+        # 打在锁定格/满盘上（识别模型未学过锁定格时 capacity 会虚报空位）。
+        # 连续两批判定后本局冻结召唤（容量按已占用收紧），交由合成/变身/干等
+        if (
+            self._batch_planned_occupancy is not None
+            and self._batch_clicks_sent > 0
+            and board is not None
+        ):
+            if board.capacity.occupied <= self._batch_planned_occupancy:
+                self._batch_no_land_streak += 1
+                if self._batch_no_land_streak >= 2 and not self._board_capacity_frozen:
+                    self._board_capacity_frozen = True
+                    logger.warning(
+                        "frame=%d 连续 %d 批召唤未落位（占用停在 %d），判定余格为"
+                        "锁定格，本局冻结召唤",
+                        observation.frame_id,
+                        self._batch_no_land_streak,
+                        board.capacity.occupied,
+                    )
+            else:
+                self._batch_no_land_streak = 0
+            self._batch_planned_occupancy = None
+            self._batch_clicks_sent = 0
+
+        if self._board_capacity_frozen and board is not None:
+            board = replace(
+                board,
+                capacity=BoardCapacity(
+                    total_slots=board.capacity.occupied,
+                    occupied=board.capacity.occupied,
+                ),
+            )
+
         # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足时优先在等待
         # 空档合成（见下方分支），无对可合再原地等待金币恢复（击杀回金），
         # 一直等到够或对局自然结束——不设上限、不放弃回补（2026-09-05 定案）。
@@ -3275,6 +3313,8 @@ class CoopTask(Task):
             )
         if self._run_config.batch_summon_enabled and batch_limit > 0:
             self._batch_summon_remaining = batch_limit
+            self._batch_planned_occupancy = board.capacity.occupied
+            self._batch_clicks_sent = 0
             logger.info(
                 "规划批次召唤 %d 次（空格 %d/%d，frame=%d）",
                 batch_limit,
@@ -3306,6 +3346,24 @@ class CoopTask(Task):
             pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
         if pair is not None:
             return self._merge_drag_action(pair)
+
+        # 落位护栏冻结中：棋盘无空位，不再盲点召唤——转变身碰辅助或干等
+        if self._board_capacity_frozen and board.capacity.available <= 0:
+            assist = self._invite_gold_wait_assist(
+                board, observation, "棋盘已满（含锁定格兜底）"
+            )
+            if assist is not None:
+                return assist
+            return (
+                Action(
+                    kind="wait",
+                    duration=self._run_config.gold_red_wait_seconds,
+                    verification="immediate",
+                    tag="frozen_board_wait",
+                    reason="召唤已冻结且无安全动作，等待对局推进",
+                ),
+                State.BUILD_MAIN_C,
+            )
 
         point = self._hotspot_point("add_hero", window_ctx)
         if point is None:
@@ -3699,6 +3757,7 @@ class CoopTask(Task):
             )
         else:
             post_delay = self._run_config.forced_summon_interval_seconds
+        self._batch_clicks_sent += 1
         return (
             Action(
                 kind="click",
@@ -4226,6 +4285,13 @@ class CoopTask(Task):
         self._batch_summon_remaining = 0
         self._batch_merge_queue = []
         self._pending_merge_batch_signatures = []
+        # 召唤落位护栏（2026-09-24）：整批召唤点击后占用无增长 = 打在锁定格
+        # /满盘上（识别模型未学过锁定格时 capacity 会虚报空位），连续两批
+        # 判定后本局冻结召唤，交由合成/变身/干等逻辑
+        self._board_capacity_frozen = False
+        self._batch_planned_occupancy: int | None = None
+        self._batch_clicks_sent = 0
+        self._batch_no_land_streak = 0
         self._empty_board_count = 0
         self._no_progress_count = 0
         self._last_board_signature = None
