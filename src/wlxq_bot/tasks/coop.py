@@ -737,8 +737,15 @@ class CoopTask(Task):
                 ),
                 State.INVITE_WAITING,
             )
-        # 邀请文字不可见：可能有人进房，也可能是弹窗遮挡。先复检一次：
-        # 连续两帧都不可见才判定进房（计数 ≥1 表示上一帧也不可见）
+        # 帮助者信息层处理（spec §6 INVITE_WAITING 第 1-3 步）。
+        # 待执行分流决定（帧 3）优先于一切——弹层已关，直接执行 kick/accept；
+        # 弹层已打开 → 跳过复检直接读进度+关层（弹层必然遮着邀请文字，
+        # 再复检只会死循环）；未打开 → 先复检一次防弹窗遮挡误判，确认进房
+        # 后点邀请位置打开信息层
+        if self._invite_pending_decision is not None:
+            return self._invite_process_helper(observation, window_ctx)
+        if self._invite_helper_opened:
+            return self._invite_process_helper(observation, window_ctx)
         if self._invite_text_missing_frames < 1:
             self._invite_text_missing_frames += 1
             return (
@@ -753,34 +760,159 @@ class CoopTask(Task):
             )
         self._invite_text_missing_frames = 0
         self._invite_wait_since = None
-        return self._invite_open_helper_info(window_ctx)
+        return self._invite_process_helper(observation, window_ctx)
+
+    def _invite_process_helper(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """帮助者信息层两帧阶段机（spec §6 INVITE_WAITING 第 1-3 步）。
+
+        帧 1：点 invite_button 打开弹层（_invite_helper_opened=True）。
+        帧 2：弹层已开，读 helper_stage_progress → 点 × 关层，并把分流
+        决定存入 ``_invite_pending_decision``（accept / kick）。
+        帧 3：弹层已关，按决定执行——合格转 INVITE_START；不合格点
+        【请离】转 INVITE_COOLDOWN；进度连读失败达上限保守停止。
+        """
+        progress = observation.raw_data.get("helper_stage_progress")
+        if not self._invite_helper_opened:
+            if self._invite_pending_decision is not None:
+                # 帧 3：弹层已关，执行分流决定
+                decision = self._invite_pending_decision
+                self._invite_pending_decision = None
+                return self._invite_execute_decision(decision, window_ctx)
+            # 帧 1：打开弹层
+            self._invite_helper_opened = True
+            point = self._invite_hotspot_point("invite_button", window_ctx)
+            if point is None:
+                return None
+            return (
+                Action(
+                    kind="click",
+                    target=point,
+                    duration=0.08,
+                    post_delay=1.0,
+                    verification="next_frame",
+                    tag="invite_open_helper_info",
+                    reason="有人进房，打开帮助者信息层读取关卡进度",
+                ),
+                State.INVITE_WAITING,
+            )
+        # 帧 2：弹层已开。× 必然在层上（close_button flag / 兜底点），
+        # 关层与分流决定一起记下，下一帧执行
+        close = self._flag_match(observation, "close_button_match")
+        self._invite_helper_opened = False
+        if close is not None:
+            close_action = Action(
+                kind="click",
+                target=close.position,
+                duration=0.08,
+                post_delay=0.6,
+                verification="next_frame",
+                tag="invite_close_helper_info",
+                reason=f"帮助者进度读取完成（{progress}），点 × 关闭弹层",
+            )
+        else:
+            point = self._invite_hotspot_point("invite_close_fallback", window_ctx)
+            if point is None:
+                return None
+            close_action = Action(
+                kind="click",
+                target=point,
+                duration=0.08,
+                post_delay=0.6,
+                verification="next_frame",
+                tag="invite_close_helper_fallback",
+                reason=f"帮助者进度读取完成（{progress}），×未识别，点兜底位置关闭",
+            )
+        if progress is None:
+            self._invite_progress_misses += 1
+            if self._invite_progress_misses >= self._INVITE_PROGRESS_MAX_MISSES:
+                logger.error(
+                    "帮助者关卡进度连续 %d 次读取失败，保守停止（不盲踢不盲开局）",
+                    self._invite_progress_misses,
+                )
+                return None
+            logger.warning(
+                "帮助者关卡进度第 %d 次读取失败，关层后重试",
+                self._invite_progress_misses,
+            )
+            return close_action, State.INVITE_WAITING
+        self._invite_progress_misses = 0
+        threshold = self._invite.min_stage_progress
+        if progress < threshold:
+            self._invite_kick_count += 1
+            if self._invite_kick_count > self._invite.max_consecutive_kicks:
+                logger.error(
+                    "连续请离 %d 个低进度帮助者（匹配池可能整体不合格），保守停止",
+                    self._invite_kick_count,
+                )
+                return None
+            self._invite_pending_decision = "kick"
+            logger.info(
+                "帮助者关卡进度 %d < %d，关层后请离（第 %d/%d 个）",
+                progress,
+                threshold,
+                self._invite_kick_count,
+                self._invite.max_consecutive_kicks,
+            )
+        else:
+            self._invite_kick_count = 0
+            self._invite_pending_decision = "accept"
+            logger.info("帮助者关卡进度 %d ≥ %d，合格", progress, threshold)
+        return close_action, State.INVITE_WAITING
+
+    def _invite_execute_decision(
+        self,
+        decision: str,
+        window_ctx: WindowContext | None,
+    ) -> tuple[Action, State] | None:
+        """帧 3：执行帧 2 记下的分流决定（弹层已关，界面无遮挡）。"""
+        if decision == "kick":
+            kick = self._invite_hotspot_point("invite_kick", window_ctx)
+            if kick is None:
+                return None
+            logger.info(
+                "请离低进度帮助者（第 %d/%d 个），%ds 冷却后重邀",
+                self._invite_kick_count,
+                self._invite.max_consecutive_kicks,
+                int(self._invite.kick_cooldown_seconds),
+            )
+            return (
+                Action(
+                    kind="click",
+                    target=kick,
+                    duration=0.08,
+                    post_delay=0.5,
+                    verification="next_frame",
+                    tag="invite_kick_helper",
+                    reason="请离低于阈值的帮助者",
+                ),
+                State.INVITE_COOLDOWN,
+            )
+        self._invite_wait_since = self._clock()
+        return (
+            Action(
+                kind="wait",
+                duration=0.3,
+                verification="immediate",
+                tag="invite_helper_accepted",
+                reason="帮助者合格，等待其点准备后开局",
+            ),
+            State.INVITE_START,
+        )
 
     _invite_text_missing_frames: int = 0
+    _invite_helper_opened: bool = False
+    _invite_pending_decision: str | None = None
+    _invite_progress_misses: int = 0
+    _INVITE_PROGRESS_MAX_MISSES: int = 5
 
     def _invite_text_visible(self, observation: Observation) -> bool:
         """读感知层 OCR 结果：邀请文字可见 = 无人进房。缺失按可见（继续等）。"""
         value = observation.raw_data.get("invite_text_visible")
         return True if value is None else bool(value)
-
-    def _invite_open_helper_info(
-        self, window_ctx: WindowContext | None
-    ) -> tuple[Action, State] | None:
-        """有人进房：点邀请位置弹帮助者信息层，下一轮读进度并分流。"""
-        point = self._invite_hotspot_point("invite_button", window_ctx)
-        if point is None:
-            return None
-        return (
-            Action(
-                kind="click",
-                target=point,
-                duration=0.08,
-                post_delay=1.0,
-                verification="next_frame",
-                tag="invite_open_helper_info",
-                reason="有人进房，打开帮助者信息层读取关卡进度",
-            ),
-            State.INVITE_WAITING,
-        )
 
     def _action_invite_start(
         self,

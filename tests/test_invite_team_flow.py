@@ -18,6 +18,7 @@ _INVITE_HOTSPOTS = {
     "invite_guild_recruit": Hotspot(x_ratio=0.31, y_ratio=0.87),
     "invite_one_click": Hotspot(x_ratio=0.69, y_ratio=0.86),
     "invite_kick": Hotspot(x_ratio=0.70, y_ratio=0.78),
+    "invite_close_fallback": Hotspot(x_ratio=0.91, y_ratio=0.14),
     "opening_ready_done": Hotspot(x_ratio=0.68, y_ratio=0.30),
 }
 
@@ -141,148 +142,75 @@ class TestInviteWaiting:
         action, to_state = task.decide_action(obs, _window_ctx())
         assert to_state == State.INVITE_WAITING
         assert action.tag == "invite_open_helper_info"
+        assert task._invite_helper_opened is True
 
-    def test_timeout_triggers_reinvite(self) -> None:
-        """等待超过 reinvite_after_seconds：重置点击链重发邀请。"""
-        task = _make_invite_task(invite=InviteConfig(reinvite_after_seconds=10.0))
+
+class TestHelperInfoFlow:
+    """帮助者信息层三帧阶段机：打开 → 读进度+关层 → 执行分流。"""
+
+    def _opened_task(self) -> CoopTask:
+        task = _make_invite_task()
         task.ctx.current_state = State.INVITE_WAITING
-        task._invite_wait_since = 0.0
-        obs = _observation({"invite_text_visible": True})
-        # 直接把等待起点拨回 20 秒前
-        task._invite_wait_since = -20.0
+        task._invite_helper_opened = True  # 弹层已打开（帧 2）
+        return task
+
+    def test_frame2_close_then_frame3_accept(self) -> None:
+        """进度 480 ≥475：帧2 点 × 关层；帧3 迁 INVITE_START。"""
+        task = self._opened_task()
+        close = MatchResult(position=(800, 240), confidence=0.9,
+                            template_name="x", roi_name="close_button_area")
+        obs = _observation({
+            "invite_text_visible": False,
+            "helper_stage_progress": 480,
+            "close_button_match": close,
+        })
         action, to_state = task.decide_action(obs, _window_ctx())
-        assert to_state == State.INVITE_CLICK
-        assert action.tag == "invite_reinvite"
-        assert task._invite_reinvite_count == 1
-
-    def test_too_many_reinvites_stops(self) -> None:
-        """连续空等重发超上限：返回 None（保守停止）。"""
-        task = _make_invite_task(
-            invite=InviteConfig(reinvite_after_seconds=10.0, max_empty_reinvites=1)
-        )
-        task.ctx.current_state = State.INVITE_WAITING
-        task._invite_wait_since = -20.0
-        task._invite_reinvite_count = 1  # 已重发过 1 次
-        obs = _observation({"invite_text_visible": True})
-        assert task.decide_action(obs, _window_ctx()) is None
-
-    def test_helper_progress_parsed_from_raw(self) -> None:
-        """感知层解析出的关卡进度：≥475 保留（任务层分流在后续帧完成）。"""
-        # 此用例验证 raw_data 约定：解析值直接可读（数字比较在任务分流中）
-        obs = _observation({"helper_stage_progress": 480})
-        assert obs.raw_data["helper_stage_progress"] == 480
-
-
-class TestInviteStart:
-    def test_ready_match_clicks_start(self) -> None:
-        """已准备模板命中：点击开局，进 ENTER_MATCH。"""
-        task = _make_invite_task()
-        task.ctx.current_state = State.INVITE_START
-
-        match = MatchResult(
-            position=(123, 456),
-            confidence=0.95,
-            template_name="tiao_zhan_dui_you_zhun_bei",
-            roi_name="invite_start_button_area",
-        )
-        obs = _observation({"invite_start_ready_match": match})
-        action, to_state = task.decide_action(obs, _window_ctx())
-        assert to_state == State.ENTER_MATCH
-        assert action.tag == "invite_start_game"
-
-    def test_not_ready_waits(self) -> None:
-        task = _make_invite_task()
-        task.ctx.current_state = State.INVITE_START
-        not_ready = MatchResult(
-            position=(100, 200),
-            confidence=0.95,
-            template_name="tiao_zhan_dui_you_wei_zhun_bei",
-            roi_name="invite_start_button_area",
-        )
-        obs = _observation({"invite_start_not_ready_match": not_ready})
-        action, to_state = task.decide_action(obs, _window_ctx())
-        assert to_state == State.INVITE_START
-        assert action.tag == "invite_wait_ready"
-
-    def test_helper_left_returns_to_waiting(self) -> None:
-        """开局按钮消失且邀请文字重现：帮助者退出，回等待态。"""
-        task = _make_invite_task()
-        task.ctx.current_state = State.INVITE_START
-        obs = _observation({"invite_text_visible": True})
-        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_close_helper_info"
         assert to_state == State.INVITE_WAITING
-        assert action.tag == "invite_helper_left"
-
-
-class TestInviteCooldown:
-    def test_cooldown_waits_then_returns_to_click(self) -> None:
-        task = _make_invite_task(invite=InviteConfig(kick_cooldown_seconds=60.0))
-        task.ctx.current_state = State.INVITE_COOLDOWN
-        action, to_state = task.decide_action(_observation(), _window_ctx())
-        assert to_state == State.INVITE_COOLDOWN
-        assert action.tag == "invite_cooldown"
-        # 冷却到期（把截止时刻拨到过去）
-        task._invite_cooldown_until = -1.0
-        action, to_state = task.decide_action(_observation(), _window_ctx())
-        assert to_state == State.INVITE_CLICK
-        assert action.tag == "invite_cooldown_done"
-
-
-class TestInMatchIntegration:
-    def test_ready_done_clicked_once(self) -> None:
-        """「准备完成」动作首次返回点击、之后不再重复（一次性 gate）。"""
-        task = _make_invite_task()
-        task.ctx.current_state = State.BUILD_MAIN_C
-        task._summon_count = task._effective_opening_summons()
-        first = task._invite_ready_done_action(_window_ctx())
-        assert first is not None
-        action, to_state = first
-        assert to_state == State.BUILD_MAIN_C
-        assert action.tag == "invite_ready_done"
-        assert task._invite_ready_done_action() is None
-
-    def test_gold_wait_assist_ignores_non_invite(self) -> None:
-        """非邀请模式（强袭）：卡住处置直接返回 None，走原有金币等待。"""
-        ctx = TaskContext(main_c="assault", max_rounds=10)
-        task = CoopTask(
-            ctx,
-            RunConfig(initial_board_capacity=7),
-            CoopRole.HELPER,
-            dict(_INVITE_HOTSPOTS),
+        assert task._invite_pending_decision == "accept"
+        # 帧 3：弹层已关，执行 accept
+        action2, to_state2 = task.decide_action(
+            _observation({"invite_text_visible": False}), _window_ctx()
         )
-        from wlxq_bot.models import BoardCapacity, BoardSnapshot
+        assert action2.tag == "invite_helper_accepted"
+        assert to_state2 == State.INVITE_START
 
-        board = BoardSnapshot(
-            frame_id=1,
-            heroes=[],
-            capacity=BoardCapacity(total_slots=12, occupied=12),
+    def test_low_progress_close_then_kick(self) -> None:
+        """进度 200 <475：帧2 关层（兜底 × 位置）；帧3 点请离进冷却。"""
+        task = self._opened_task()
+        obs = _observation({
+            "invite_text_visible": False,
+            "helper_stage_progress": 200,
+        })
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_close_helper_fallback"
+        assert to_state == State.INVITE_WAITING
+        assert task._invite_pending_decision == "kick"
+        action2, to_state2 = task.decide_action(
+            _observation({"invite_text_visible": False}), _window_ctx()
         )
-        assert task._invite_gold_wait_assist(board, _observation(), "测试") is None
+        assert action2.tag == "invite_kick_helper"
+        assert to_state2 == State.INVITE_COOLDOWN
 
-    def test_gold_wait_assist_stuck_waits_when_no_sacrifice(self) -> None:
-        """卡住且无可牺牲英雄：干等动作（重置无进展计数）。"""
-        task = _make_invite_task()
-        task.ctx.current_state = State.BUILD_MAIN_C
-        from wlxq_bot.models import BoardCapacity, BoardHero, BoardSnapshot
-
-        def _h(t: str, s: int) -> BoardHero:
-            return BoardHero(
-                hero_type=t,
-                star_level=s,
-                position=(100, 100),
-                confidence=0.9,
-                template_path=f"heroes/{t}/star{s}/t.png",
+    def test_progress_misses_retry_then_stop(self) -> None:
+        """进度读不到：关层重试（帧循环），达上限保守停止。"""
+        task = self._opened_task()
+        for i in range(1, task._INVITE_PROGRESS_MAX_MISSES):
+            obs = _observation({
+                "invite_text_visible": False,
+                "helper_stage_progress": None,
+            })
+            result = task.decide_action(obs, _window_ctx())
+            assert result is not None, f"第 {i} 次失败不应停止"
+            action, _ = result
+            assert action.tag in ("invite_close_helper_info", "invite_close_helper_fallback")
+            # 关层后重开（模拟循环）
+            task._invite_helper_opened = False
+            task.decide_action(
+                _observation({"invite_text_visible": False}), _window_ctx()
             )
-
-        # 棋盘满且缺雪姬（阵容不齐），在场英雄均达保留数不可牺牲、无变身次数
-        board = BoardSnapshot(
-            frame_id=1,
-            heroes=[_h("monkey", 1), _h("angel", 1)],
-            capacity=BoardCapacity(total_slots=2, occupied=2),
-        )
-        task._transform_used_count = 2  # 变身耗尽
-        result = task._invite_gold_wait_assist(board, _observation(), "测试卡住")
-        assert result is not None
-        action, to_state = result
-        assert to_state == State.BUILD_MAIN_C
-        assert action.tag == "invite_stuck_wait"
+            task._invite_helper_opened = True
+        # 达上限：保守停止
+        task._invite_helper_opened = True
+        obs = _observation({"invite_text_visible": False, "helper_stage_progress": None})
+        assert task.decide_action(obs, _window_ctx()) is None

@@ -43,6 +43,12 @@ hotspots:
     x_ratio: 0.6958
     y_ratio: 0.7788
     description: 组队大厅【请离】按钮
+  # 帮助者信息层 × 关闭按钮兜底点击点（×模板识别不到时用；2026-09-22 实机
+  # 截图个人信息弹层右上角 × 中心，pixel (843, 235)）
+  invite_close_fallback:
+    x_ratio: 0.9094
+    y_ratio: 0.1361
+    description: 帮助者信息层 × 兜底关闭点
   # 局内开局召唤完成后的「准备完成」（固定坐标点击，动作后验证）
   opening_ready_done:
     x_ratio: 0.6802
