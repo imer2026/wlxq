@@ -558,6 +558,32 @@ class CoopPerception:
                 matches.append(match)
                 raw_data[match_name] = match
 
+        # 召唤按钮 OCR 兜底（2026-09-24）：帮助者城墙皮肤会改变底栏按钮配色，
+        # 「召唤」文字模板按阈值匹配不上 → 开局类型识别永远等不到召唤标志
+        # 而卡死。模板未命中时对该按钮区域做限域 OCR，读到「召唤」即视为
+        # 按钮可见（点击点=文字框中心，皮肤主题不影响文字本身）
+        if (
+            hint_state in (State.SELECT_OPENING_SKILLS, State.BUILD_MAIN_C)
+            and not raw_data.get("summon_button_visible")
+        ):
+            rows = self._read_entry_roi_rows("summon_button_area", ctx, frame)
+            hit = next((row for row in rows if "召唤" in row.text), None)
+            if hit is not None:
+                raw_data["summon_button_visible"] = True
+                ocr_match = MatchResult(
+                    position=hit.position,
+                    confidence=hit.confidence,
+                    template_name="summon_button_ocr",
+                    roi_name="summon_button_area",
+                )
+                matches.append(ocr_match)
+                raw_data["summon_button_match"] = ocr_match
+                logger.debug(
+                    "frame=%d 召唤按钮模板未命中，OCR 兜底确认（conf=%.2f）",
+                    ctx.frame_id,
+                    hit.confidence,
+                )
+
         # 赠送技能卡片（同系列技能选满 3 个触发）：仅在选技能阶段识别
         if hint_state == State.SELECT_MAIN_C_SKILLS:
             locator = locators.get("zeng_song_ji_neng")
