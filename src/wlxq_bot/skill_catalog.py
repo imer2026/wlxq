@@ -442,13 +442,16 @@ def compute_skill_tiers(
     priority_cfg: dict[int, list[str]],
     name_to_hero: dict[str, str],
     main_c_hero: str,
+    lineup_hero_names: set[str] | None = None,
 ) -> dict[str, int]:
     """按主C的优先级配置计算 {技能名: 档位}。
 
     - 配置里的 1~7/9/10 档为显式数组;第 8、11 档启动时自动计算,配置了也会
       被忽略(打警告)
-    - 第 8 档 = 主C(强袭)清单里未被显式档覆盖的技能——主C技能永不落第 11 档
-    - 第 11 档 = 清单里其余技能
+    - 第 8 档 = 主C清单里未被显式档覆盖的技能——主C技能永不落第 11 档
+    - 第 11 档 = 清单里其余技能。传入 lineup_hero_names（本局阵容英雄的
+      中文名集合）时只收阵容英雄的技能——对局商店只刷本局阵容的技能，
+      非阵容英雄（如猴子局里的强袭）的技能留在清单但不进任何档位
     - 配置里清单查不到的名字保留生效并打警告(防手滑写错字)
     """
     tier_of: dict[str, int] = {}
@@ -469,10 +472,17 @@ def compute_skill_tiers(
             if name not in name_to_hero:
                 logger.warning("skill_priority 中的技能 %r 不在技能清单里,请核对拼写", name)
             tier_of[name] = tier
+
+    def _in_lineup(hero: str) -> bool:
+        return lineup_hero_names is None or hero in lineup_hero_names
+
     for name, hero in name_to_hero.items():
         if name in tier_of:
             continue
-        tier_of[name] = 8 if hero == main_c_hero else 11
+        if hero == main_c_hero:
+            tier_of[name] = 8
+        elif _in_lineup(hero):
+            tier_of[name] = 11
     return tier_of
 
 

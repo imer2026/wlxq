@@ -1391,8 +1391,16 @@ class Runner:
             if not name_to_hero:
                 logger.warning("技能清单 %s 为空，标题识别不可用", catalog_path)
                 return None, None, None
+            # 本局阵容英雄的中文名：对局商店只刷阵容英雄的技能，档位自动
+            # 计算时过滤掉非阵容英雄（如猴子局里的强袭）的技能
+            hc = self.default_config.hero_classifier
+            lineup_names = {
+                self.default_config.main_c_profiles[h].display_name
+                for h in ({mc, *hc.lineup_others} & set(self.default_config.main_c_profiles))
+            }
             skill_tiers = compute_skill_tiers(
-                profile.skill_priority, name_to_hero, profile.display_name
+                profile.skill_priority, name_to_hero, profile.display_name,
+                lineup_hero_names=lineup_names,
             )
             ensure_engine()
             tier8 = sorted(name for name, tier in skill_tiers.items() if tier == 8)
