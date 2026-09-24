@@ -19,6 +19,7 @@ _INVITE_HOTSPOTS = {
     "invite_one_click": Hotspot(x_ratio=0.69, y_ratio=0.86),
     "invite_kick": Hotspot(x_ratio=0.70, y_ratio=0.78),
     "invite_close_fallback": Hotspot(x_ratio=0.91, y_ratio=0.14),
+    "invite_popup_close": Hotspot(x_ratio=0.91, y_ratio=0.14),
     "opening_ready_done": Hotspot(x_ratio=0.68, y_ratio=0.30),
 }
 
@@ -99,7 +100,7 @@ class TestInviteClickChain:
         task = _make_invite_task()
         ctx = _window_ctx()
         visited: list[str] = []
-        for _ in range(6):
+        for _ in range(7):
             action, to_state = task.decide_action(_observation(), ctx)
             assert to_state == State.INVITE_CLICK
             visited.append(str(action.target))

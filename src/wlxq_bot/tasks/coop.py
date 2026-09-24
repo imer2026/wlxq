@@ -641,7 +641,7 @@ class CoopTask(Task):
                     post_delay=0.8,
                     verification="immediate",
                     tag="invite_step_0",
-                    reason="邀请点击链 1/6：开始挑战（进邀请页面）",
+                    reason="邀请点击链 1/7：开始挑战（进邀请页面）",
                 ),
                 State.INVITE_CLICK,
             )
@@ -651,6 +651,7 @@ class CoopTask(Task):
             ("invite_friend_tab", "好友页签"),
             ("invite_guild_recruit", "公会招募"),
             ("invite_one_click", "一键邀请（好友页）"),
+            ("invite_popup_close", "关闭邀请弹窗"),
         )
         index = self._invite_step - 1
         if index >= len(steps):
@@ -679,7 +680,7 @@ class CoopTask(Task):
                 post_delay=0.6,
                 verification="immediate",
                 tag=f"invite_step_{self._invite_step}",
-                reason=f"邀请点击链 {self._invite_step + 1}/6：{label}",
+                reason=f"邀请点击链 {self._invite_step + 1}/7：{label}",
             ),
             State.INVITE_CLICK,
         )
