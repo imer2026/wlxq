@@ -905,8 +905,11 @@ class CoopTask(Task):
             )
         else:
             self._invite_kick_count = 0
-            self._invite_pending_decision = "accept"
+            self._invite_wait_since = self._clock()
             logger.info("帮助者关卡进度 %d ≥ %d，合格", progress, threshold)
+            # 合格：关层与迁移一步完成（等准备阶段没有需要点击的被遮挡
+            # 按钮，无需等关层完成再行动），省一帧
+            return close_action, State.INVITE_START
         return close_action, State.INVITE_WAITING
 
     def _invite_execute_decision(

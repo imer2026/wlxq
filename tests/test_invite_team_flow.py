@@ -191,14 +191,9 @@ class TestHelperInfoFlow:
         })
         action, to_state = task.decide_action(obs, _window_ctx())
         assert action.tag == "invite_close_helper_info"
-        assert to_state == State.INVITE_WAITING
-        assert task._invite_pending_decision == "accept"
-        # 帧 3：弹层已关，执行 accept
-        action2, to_state2 = task.decide_action(
-            _observation({"invite_text_visible": False}), _window_ctx()
-        )
-        assert action2.tag == "invite_helper_accepted"
-        assert to_state2 == State.INVITE_START
+        # 合格：关层与迁移一步完成（无帧 3）
+        assert to_state == State.INVITE_START
+        assert task._invite_pending_decision is None
 
     def test_close_x_not_visible_waits(self) -> None:
         """弹层开但 × 未识别到：等待重读，不盲点固定坐标。"""

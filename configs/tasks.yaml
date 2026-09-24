@@ -225,6 +225,14 @@ hotspots:
 # 坐标体系统一使用客户区比例（ratio），运行时按实际客户区尺寸换算为像素
 locators:
   # ---- 邀请者模式 ----
+  # 组队大厅【邀请】按钮图模板（2026-09-25 用户采集）：等待期模板匹配判
+  # 「邀请」是否可见（可见=无人进房）——替代 OCR（等待帧 OCR 3s/帧导致
+  # 帮助者进房后响应过慢）
+  invite_button_label:
+    strategy: template
+    template: buttons/yao_qing.png
+    threshold: 0.82
+    roi: invite_text
   # 组队大厅【请离】按钮：邀请者请离不合格帮助者。与帮助者退队同区域不同文案，
   # 模板 qing_li.png（2026-09-22 采集），识别区复用退队按钮区 leave_team_area
   invite_kick_button:

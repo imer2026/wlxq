@@ -394,11 +394,13 @@ class CoopPerception:
                 matches.append(transform_match)
                 raw_data["transform_button_match"] = transform_match
         elif observation_mode == "invite_waiting":
-            # 邀请者等待态（spec 2026-09-21 §6）：OCR「邀请」文字（可见=无人
-            # 进房）+ 帮助者信息弹层关卡进度行（有人在房时读取）。两者都限域，
-            # 单帧只做其一由任务层通过两次 observe 完成（先判定后读进度）
+            # 邀请者等待态（spec 2026-09-21 §6）：模板匹配「邀请」按钮图
+            # （可见=无人进房，~0.1s；2026-09-25 由 OCR 改模板——等待帧 OCR
+            # 3s/帧导致帮助者进房后响应过慢）。文字不可见（帮助者界面遮挡
+            # = 可能有人进房）时才 OCR 关卡进度，空闲帧不做任何 OCR
             self._detect_invite_text(ctx, frame, raw_data)
-            self._detect_helper_stage_progress(ctx, frame, raw_data)
+            if not raw_data.get("invite_text_visible"):
+                self._detect_helper_stage_progress(ctx, frame, raw_data)
 
         # 2. 培养阶段做棋盘英雄识别
         board: BoardSnapshot | None = None
@@ -764,18 +766,17 @@ class CoopPerception:
         frame: Any,
         raw_data: dict[str, Any],
     ) -> None:
-        """OCR 组队大厅【邀请】按钮文字区，写 invite_text_visible。
+        """模板匹配组队大厅【邀请】按钮图，写 invite_text_visible。
 
-        可见 = 无人进房（继续等）；不可见 = 有人进房或弹窗遮挡（任务层复检）。
+        可见 = 无人进房（继续等）；不可见 = 有人进房或弹窗遮挡（任务层
+        清残留后重判）。2026-09-25 由 OCR 改为模板匹配（yao_qing.png，
+        用户采集）：等待帧从 ~3s 降到 ~0.1s，帮助者进房后秒级响应。
         """
-        rows = self._read_entry_roi_rows("invite_text", ctx, frame)
-        visible = any("邀请" in row.text for row in rows)
-        raw_data["invite_text_visible"] = visible
+        locator = self._cfg.locators.get("invite_button_label")
+        match = self._match_locator_template(ctx, frame, locator) if locator else None
+        raw_data["invite_text_visible"] = match is not None
         logger.debug(
-            "frame=%d 邀请文字可见=%s rows=%s",
-            ctx.frame_id,
-            visible,
-            [row.text for row in rows],
+            "frame=%d 邀请按钮模板可见=%s", ctx.frame_id, match is not None
         )
 
     def _detect_helper_stage_progress(
