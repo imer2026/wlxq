@@ -749,23 +749,25 @@ class CoopTask(Task):
         if self._invite_helper_opened:
             return self._invite_process_helper(observation, window_ctx)
         if not self._invite_dismiss_checked:
-            # 首次判定进房前：点一次邀请弹窗 × 清残留，下一帧重读文字
+            # 首次判定进房前：若 × 模板识别到（确有弹窗）则点它清残留，
+            # 下一帧重读文字；× 不存在 = 没有弹窗遮挡，直接进入帮助者流程。
+            # 不盲点固定坐标——页面无弹窗时那附近是【概率】等按钮（2026-09-24
+            # 实机：盲点坐标点到了概率按钮）
             self._invite_dismiss_checked = True
-            point = self._invite_hotspot_point("invite_popup_close", window_ctx)
-            if point is None:
-                return None
-            return (
-                Action(
-                    kind="click",
-                    target=point,
-                    duration=0.08,
-                    post_delay=1.0,
-                    verification="immediate",
-                    tag="invite_dismiss_residue",
-                    reason="邀请文字不可见：先关一次残留弹窗再判定（防把弹窗当进房）",
-                ),
-                State.INVITE_WAITING,
-            )
+            close = self._flag_match(observation, "close_button_match")
+            if close is not None:
+                return (
+                    Action(
+                        kind="click",
+                        target=close.position,
+                        duration=0.08,
+                        post_delay=1.0,
+                        verification="immediate",
+                        tag="invite_dismiss_residue",
+                        reason="邀请文字不可见且识别到 ×，关残留弹窗后重判",
+                    ),
+                    State.INVITE_WAITING,
+                )
         self._invite_dismiss_checked = False
         self._invite_wait_since = None
         return self._invite_process_helper(observation, window_ctx)
@@ -807,33 +809,12 @@ class CoopTask(Task):
                 ),
                 State.INVITE_WAITING,
             )
-        # 帧 2：弹层已开。× 必然在层上（close_button flag / 兜底点），
-        # 关层与分流决定一起记下，下一帧执行
+        # 帧 2：弹层已开。读进度 + 等 × 模板识别到再关层——识别不到不盲点
+        # 固定坐标（附近可能是【概率】等无关按钮，2026-09-24 实机教训）：
+        # 弹层开着 × 必然在，单帧漏识别由等待重读吸收；连续 3 帧都没有说明
+        # 弹层其实已关（点击未生效等），复位标记回到进房判定自然重试。
+        # 进度为 None 的重试计数在等待帧推进——× 长期识别不到时同样能收敛
         close = self._flag_match(observation, "close_button_match")
-        self._invite_helper_opened = False
-        if close is not None:
-            close_action = Action(
-                kind="click",
-                target=close.position,
-                duration=0.08,
-                post_delay=0.6,
-                verification="immediate",
-                tag="invite_close_helper_info",
-                reason=f"帮助者进度读取完成（{progress}），点 × 关闭弹层",
-            )
-        else:
-            point = self._invite_hotspot_point("invite_close_fallback", window_ctx)
-            if point is None:
-                return None
-            close_action = Action(
-                kind="click",
-                target=point,
-                duration=0.08,
-                post_delay=0.6,
-                verification="immediate",
-                tag="invite_close_helper_fallback",
-                reason=f"帮助者进度读取完成（{progress}），×未识别，点兜底位置关闭",
-            )
         if progress is None:
             self._invite_progress_misses += 1
             if self._invite_progress_misses >= self._INVITE_PROGRESS_MAX_MISSES:
@@ -842,6 +823,43 @@ class CoopTask(Task):
                     self._invite_progress_misses,
                 )
                 return None
+        if close is None:
+            self._invite_close_wait_frames += 1
+            if self._invite_close_wait_frames >= 3:
+                logger.warning(
+                    "连续 %d 帧未识别到 ×，判定弹层未打开，回到进房判定",
+                    self._invite_close_wait_frames,
+                )
+                self._invite_close_wait_frames = 0
+                self._invite_helper_opened = False
+                self._invite_dismiss_checked = False
+                if progress is None:
+                    logger.warning(
+                        "帮助者关卡进度第 %d 次读取失败（弹层未开）",
+                        self._invite_progress_misses,
+                    )
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.5,
+                    verification="immediate",
+                    tag="invite_wait_close_button",
+                    reason="等待信息层 × 可识别（不盲点固定坐标）",
+                ),
+                State.INVITE_WAITING,
+            )
+        self._invite_close_wait_frames = 0
+        self._invite_helper_opened = False
+        close_action = Action(
+            kind="click",
+            target=close.position,
+            duration=0.08,
+            post_delay=0.6,
+            verification="immediate",
+            tag="invite_close_helper_info",
+            reason=f"帮助者进度读取完成（{progress}），点 × 关闭弹层",
+        )
+        if progress is None:
             logger.warning(
                 "帮助者关卡进度第 %d 次读取失败，关层后重试",
                 self._invite_progress_misses,
@@ -915,6 +933,7 @@ class CoopTask(Task):
     _invite_helper_opened: bool = False
     _invite_pending_decision: str | None = None
     _invite_dismiss_checked: bool = False
+    _invite_close_wait_frames: int = 0
     _invite_progress_misses: int = 0
     _INVITE_PROGRESS_MAX_MISSES: int = 5
 
@@ -3753,6 +3772,14 @@ class CoopTask(Task):
     def verify_action(self, action: Action, before: Observation, after: Observation) -> bool:
         if action.tag == "ready_match":
             return not after.flag("ready_button_visible")
+        if action.tag == "invite_start_game":
+            # 邀请者点组队大厅「已准备」开局：点击生效的画面特征是组队大厅
+            # 元素变化——双态按钮消失或进入层挑战确认页（× 出现）。不再等
+            # 特定页锚点（确认页/对局开局画面的共同点是原按钮不再可见）
+            started = not after.flag("invite_start_ready_visible") and not after.flag(
+                "invite_start_not_ready_visible"
+            )
+            return started
         if action.tag == "close_popup":
             return not after.flag("tan_chuang_visible")
         if action.tag == "close_bonus_popup":

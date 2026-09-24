@@ -133,15 +133,23 @@ class TestInviteWaiting:
         task.ctx.current_state = State.INVITE_WAITING
         task._invite_wait_since = 0.0
         obs = _observation({"invite_text_visible": False})
+        # × 未识别到（无残留弹窗）：不盲点，直接打开帮助者信息层
         action, to_state = task.decide_action(obs, _window_ctx())
-        assert action.tag == "invite_dismiss_residue"
+        assert action.tag == "invite_open_helper_info"
         assert to_state == State.INVITE_WAITING
-        assert task._invite_dismiss_checked is True
-        # 下一帧仍不可见：这才真正打开帮助者信息层
-        action2, to_state2 = task.decide_action(obs, _window_ctx())
-        assert action2.tag == "invite_open_helper_info"
-        assert to_state2 == State.INVITE_WAITING
         assert task._invite_helper_opened is True
+        # × 识别到（确有残留弹窗）：先点 ×，下一帧再走帮助者流程
+        task2 = _make_invite_task()
+        task2.ctx.current_state = State.INVITE_WAITING
+        task2._invite_wait_since = 0.0
+        close = MatchResult(position=(840, 248), confidence=0.9,
+                            template_name="x", roi_name="close_button_area")
+        obs2 = _observation({"invite_text_visible": False, "close_button_match": close})
+        action2, _ = task2.decide_action(obs2, _window_ctx())
+        assert action2.tag == "invite_dismiss_residue"
+        assert task2._invite_dismiss_checked is True
+        action3, _ = task2.decide_action(obs2, _window_ctx())
+        assert action3.tag == "invite_open_helper_info"
 
 
 class TestHelperInfoFlow:
@@ -174,15 +182,30 @@ class TestHelperInfoFlow:
         assert action2.tag == "invite_helper_accepted"
         assert to_state2 == State.INVITE_START
 
-    def test_low_progress_close_then_kick(self) -> None:
-        """进度 200 <475：帧2 关层（兜底 × 位置）；帧3 点请离进冷却。"""
+    def test_close_x_not_visible_waits(self) -> None:
+        """弹层开但 × 未识别到：等待重读，不盲点固定坐标。"""
         task = self._opened_task()
         obs = _observation({
             "invite_text_visible": False,
             "helper_stage_progress": 200,
         })
         action, to_state = task.decide_action(obs, _window_ctx())
-        assert action.tag == "invite_close_helper_fallback"
+        assert action.tag == "invite_wait_close_button"
+        assert to_state == State.INVITE_WAITING
+        assert task._invite_helper_opened is True  # 保持打开状态
+
+    def test_low_progress_close_then_kick(self) -> None:
+        """进度 200 <475：帧2 关层（× 识别到才点）；帧3 点请离进冷却。"""
+        task = self._opened_task()
+        close = MatchResult(position=(800, 240), confidence=0.9,
+                            template_name="x", roi_name="close_button_area")
+        obs = _observation({
+            "invite_text_visible": False,
+            "helper_stage_progress": 200,
+            "close_button_match": close,
+        })
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_close_helper_info"
         assert to_state == State.INVITE_WAITING
         assert task._invite_pending_decision == "kick"
         action2, to_state2 = task.decide_action(
@@ -192,24 +215,25 @@ class TestHelperInfoFlow:
         assert to_state2 == State.INVITE_COOLDOWN
 
     def test_progress_misses_retry_then_stop(self) -> None:
-        """进度读不到：关层重试（帧循环），达上限保守停止。"""
+        """进度持续读不到：重试计数推进，达上限保守停止。"""
         task = self._opened_task()
-        for i in range(1, task._INVITE_PROGRESS_MAX_MISSES):
-            obs = _observation({
-                "invite_text_visible": False,
-                "helper_stage_progress": None,
-            })
+        obs = _observation({
+            "invite_text_visible": False,
+            "helper_stage_progress": None,
+        })
+        # 每次 decide_action 都处于"帧 2"（弹层开），进度 None → 计数推进。
+        # × 识别到与否不影响计数（等待帧/关层帧都推进）
+        stops = 0
+        for i in range(1, task._INVITE_PROGRESS_MAX_MISSES + 2):
+            task._invite_helper_opened = True  # 保持帧 2 语境
             result = task.decide_action(obs, _window_ctx())
-            assert result is not None, f"第 {i} 次失败不应停止"
-            action, _ = result
-            assert action.tag in ("invite_close_helper_info", "invite_close_helper_fallback")
-            # 关层后重开（模拟循环）
-            task._invite_helper_opened = False
-            task.decide_action(
-                _observation({"invite_text_visible": False}), _window_ctx()
+            if result is None:
+                stops = i
+                break
+            assert result[0].tag in (
+                "invite_wait_close_button",
+                "invite_close_helper_info",
             )
-            task._invite_helper_opened = True
-        # 达上限：保守停止
-        task._invite_helper_opened = True
-        obs = _observation({"invite_text_visible": False, "helper_stage_progress": None})
-        assert task.decide_action(obs, _window_ctx()) is None
+        assert stops == task._INVITE_PROGRESS_MAX_MISSES, (
+            f"应在第 {task._INVITE_PROGRESS_MAX_MISSES} 次失败后停止，实际第 {stops} 次"
+        )
