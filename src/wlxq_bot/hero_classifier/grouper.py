@@ -150,7 +150,7 @@ def generate_candidates(
     path_root: Path,
     secondary_trigger: int = 100,
     secondary_threshold: float = 15.0,
-    max_per_group: int = 10,
+    max_per_group: int = 5,
     path_replacement: tuple[str, str] | None = None,
 ) -> CandidateStats:
     """为所有一级簇生成少量多样化候选图，原始裁剪图保持不变。

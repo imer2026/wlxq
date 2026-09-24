@@ -48,6 +48,9 @@ class TrainingConfig:
     other_star4_weight: float = 0.1
     empty_weight: float = 0.5
     unavailable_weight: float = 0.3
+    # 种子模式（数据不足时的初始模型）：跳过整局隔离与类别子集校验，
+    # 验证集为空时直接复用训练集（准确率仅反映拟合程度，不可当泛化指标）。
+    seed_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,14 +101,17 @@ def train_hero_classifier(
         train_samples = samples_for_rounds(all_samples, train_keys)
         validation_samples = samples_for_rounds(all_samples, validation_keys)
     overlap = train_keys & validation_keys
-    if overlap:
+    if overlap and not config.seed_mode:
         raise ValueError(f"训练局和验证局重叠: {', '.join(sorted(overlap))}")
+    if config.seed_mode and not validation_samples:
+        # 种子模式：无独立验证数据时用训练集充当，训练日志的 val_* 即训练集指标
+        validation_samples = train_samples
     if not train_samples or not validation_samples:
         raise ValueError("训练集和验证集都必须至少包含一张已标注图片")
     class_names = class_names_for_samples(train_samples)
     validation_classes = {sample.class_name for sample in validation_samples}
     missing_train = validation_classes - set(class_names)
-    if missing_train:
+    if missing_train and not config.seed_mode:
         raise ValueError(f"验证集包含训练集没有的类别: {', '.join(sorted(missing_train))}")
 
     _seed_everything(random, torch, config.seed)

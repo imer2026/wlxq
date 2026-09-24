@@ -105,7 +105,7 @@ def import_rounds(
     group_threshold: float = 35.0,
     candidate_split_trigger: int = 100,
     candidate_group_threshold: float = 15.0,
-    candidate_max_per_group: int = 10,
+    candidate_max_per_group: int = 5,
 ) -> ImportStats:
     """跳过已处理局，把剩余局裁到同一 import，并在全部裁完后联合聚类一次。"""
     root = Path(dataset_root)
@@ -307,7 +307,7 @@ def select_import_candidates(
     import_dir: Path,
     secondary_trigger: int = 100,
     secondary_threshold: float = 15.0,
-    max_per_group: int = 10,
+    max_per_group: int = 5,
 ):
     """为已经完成一级聚类的历史 import 补生成 candidates，拒绝覆盖已有结果。"""
     from wlxq_bot.hero_classifier.grouper import generate_candidates

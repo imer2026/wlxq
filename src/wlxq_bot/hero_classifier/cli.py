@@ -276,7 +276,7 @@ def import_dataset_rounds(
     candidate_max_per_group: Annotated[
         int,
         typer.Option("--candidate-max-per-group", min=1, max=100, help="每个最终候选组的图片上限"),
-    ] = 10,
+    ] = 5,
 ) -> None:
     """指定多局创建一个增量 import，集中裁切后联合聚类；不修改既有标签。"""
     from wlxq_bot.hero_classifier.dataset import import_rounds
@@ -395,7 +395,7 @@ def select_candidates(
     ] = 15.0,
     max_per_group: Annotated[
         int, typer.Option("--max-per-group", min=1, max=100, help="每个最终组候选上限")
-    ] = 10,
+    ] = 5,
 ) -> None:
     """为已完成一级聚类的历史 import 补生成 candidates，不重新裁切或聚类。"""
     from wlxq_bot.hero_classifier.dataset import select_import_candidates
@@ -535,6 +535,13 @@ def train(
     other_star4_weight: Annotated[float, typer.Option("--other-star4-weight", min=0.000001)] = 0.1,
     empty_weight: Annotated[float, typer.Option("--empty-weight", min=0.000001)] = 0.5,
     unavailable_weight: Annotated[float, typer.Option("--unavailable-weight", min=0.000001)] = 0.3,
+    seed_mode: Annotated[
+        bool,
+        typer.Option(
+            "--seed-mode",
+            help="种子模式：跳过整局隔离校验，验证集为空时用训练集充当（准确率不可当泛化指标）",
+        ),
+    ] = False,
 ) -> None:
     """按整局隔离数据训练 MobileNetV3-Small，并导出 ONNX。"""
     from wlxq_bot.hero_classifier.trainer import TrainingConfig, train_hero_classifier
@@ -565,6 +572,7 @@ def train(
             other_star4_weight=other_star4_weight,
             empty_weight=empty_weight,
             unavailable_weight=unavailable_weight,
+            seed_mode=seed_mode,
         )
         result = train_hero_classifier(
             dataset_root=dataset_root,
