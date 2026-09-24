@@ -123,19 +123,24 @@ class TestInviteWaiting:
         assert to_state == State.INVITE_WAITING
         assert action.tag == "invite_waiting"
 
-    def test_invisible_opens_helper_info_directly(self) -> None:
-        """邀请文字不可见：直接打开帮助者信息层（无独立复检帧）。
+    def test_invisible_dismisses_residue_first(self) -> None:
+        """邀请文字不可见：先关一次残留弹窗再判定（两帧）。
 
-        误判自愈：若实际无人进房，此点击会重开邀请弹窗，后续由进度
-        读取重试上限兜底，不盲踢不盲开局。
+        2026-09-24 实机教训：邀请弹窗关闭后文字有恢复延迟，直接判进房
+        会把自己的信息层当帮助者（误读自己 475 进度）。
         """
         task = _make_invite_task()
         task.ctx.current_state = State.INVITE_WAITING
         task._invite_wait_since = 0.0
         obs = _observation({"invite_text_visible": False})
         action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_dismiss_residue"
         assert to_state == State.INVITE_WAITING
-        assert action.tag == "invite_open_helper_info"
+        assert task._invite_dismiss_checked is True
+        # 下一帧仍不可见：这才真正打开帮助者信息层
+        action2, to_state2 = task.decide_action(obs, _window_ctx())
+        assert action2.tag == "invite_open_helper_info"
+        assert to_state2 == State.INVITE_WAITING
         assert task._invite_helper_opened is True
 
 

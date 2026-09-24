@@ -741,16 +741,32 @@ class CoopTask(Task):
         # 帮助者信息层处理（spec §6 INVITE_WAITING 第 1-3 步）。
         # 待执行分流决定（帧 3）优先于一切——弹层已关，直接执行 kick/accept；
         # 弹层已打开 → 跳过复检直接读进度+关层（弹层必然遮着邀请文字，
-        # 再复检只会死循环）；未打开 → 先复检一次防弹窗遮挡误判，确认进房
-        # 后点邀请位置打开信息层
+        # 再复检只会死循环）；未打开 → 先关一次残留弹窗再读文字——邀请
+        # 弹窗关闭后文字有恢复延迟/弹窗可能没关掉，直接判进房会把自己的
+        # 信息层当帮助者（2026-09-24 实机：误读自己 475 进度）
         if self._invite_pending_decision is not None:
             return self._invite_process_helper(observation, window_ctx)
         if self._invite_helper_opened:
             return self._invite_process_helper(observation, window_ctx)
-        # 邀请文字不可见 → 直接打开帮助者信息层（不再单设复检帧）。
-        # 误判自愈：若实际无人进房，此点击只会重新弹出邀请弹窗——下一帧
-        # 邀请文字依然可见性异常且弹层读不到进度，走进度重试上限后回到
-        # 等待；不盲踢不盲开局
+        if not self._invite_dismiss_checked:
+            # 首次判定进房前：点一次邀请弹窗 × 清残留，下一帧重读文字
+            self._invite_dismiss_checked = True
+            point = self._invite_hotspot_point("invite_popup_close", window_ctx)
+            if point is None:
+                return None
+            return (
+                Action(
+                    kind="click",
+                    target=point,
+                    duration=0.08,
+                    post_delay=1.0,
+                    verification="immediate",
+                    tag="invite_dismiss_residue",
+                    reason="邀请文字不可见：先关一次残留弹窗再判定（防把弹窗当进房）",
+                ),
+                State.INVITE_WAITING,
+            )
+        self._invite_dismiss_checked = False
         self._invite_wait_since = None
         return self._invite_process_helper(observation, window_ctx)
 
@@ -898,6 +914,7 @@ class CoopTask(Task):
     _invite_text_missing_frames: int = 0
     _invite_helper_opened: bool = False
     _invite_pending_decision: str | None = None
+    _invite_dismiss_checked: bool = False
     _invite_progress_misses: int = 0
     _INVITE_PROGRESS_MAX_MISSES: int = 5
 
@@ -937,10 +954,13 @@ class CoopTask(Task):
                 ),
                 State.INVITE_START,
             )
-        # 两个模板都没识别到：帮助者可能已退出（邀请文字重现），回等待态
+        # 两个模板都没识别到：帮助者可能已退出（邀请文字重现），回等待态。
+        # 若连续多帧双模板全无且文字也不可见，说明邀请文字判定可能是误报
+        # （残留弹窗误判进房，实际没人）——回等待态重新走判定（自愈）
         if self._invite_text_visible(observation):
             logger.info("开局按钮消失且邀请文字重现，帮助者已退出，回到等待")
             self._invite_wait_since = self._clock()
+            self._invite_dismiss_checked = False
             return (
                 Action(
                     kind="wait",
