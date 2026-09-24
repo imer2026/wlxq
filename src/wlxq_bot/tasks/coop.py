@@ -747,19 +747,10 @@ class CoopTask(Task):
             return self._invite_process_helper(observation, window_ctx)
         if self._invite_helper_opened:
             return self._invite_process_helper(observation, window_ctx)
-        if self._invite_text_missing_frames < 1:
-            self._invite_text_missing_frames += 1
-            return (
-                Action(
-                    kind="wait",
-                    duration=0.8,
-                    verification="immediate",
-                    tag="invite_join_recheck",
-                    reason="邀请文字不可见，复检一次防弹窗遮挡误判",
-                ),
-                State.INVITE_WAITING,
-            )
-        self._invite_text_missing_frames = 0
+        # 邀请文字不可见 → 直接打开帮助者信息层（不再单设复检帧）。
+        # 误判自愈：若实际无人进房，此点击只会重新弹出邀请弹窗——下一帧
+        # 邀请文字依然可见性异常且弹层读不到进度，走进度重试上限后回到
+        # 等待；不盲踢不盲开局
         self._invite_wait_since = None
         return self._invite_process_helper(observation, window_ctx)
 
@@ -794,7 +785,7 @@ class CoopTask(Task):
                     target=point,
                     duration=0.08,
                     post_delay=1.0,
-                    verification="next_frame",
+                    verification="immediate",
                     tag="invite_open_helper_info",
                     reason="有人进房，打开帮助者信息层读取关卡进度",
                 ),
@@ -810,7 +801,7 @@ class CoopTask(Task):
                 target=close.position,
                 duration=0.08,
                 post_delay=0.6,
-                verification="next_frame",
+                verification="immediate",
                 tag="invite_close_helper_info",
                 reason=f"帮助者进度读取完成（{progress}），点 × 关闭弹层",
             )
@@ -823,7 +814,7 @@ class CoopTask(Task):
                 target=point,
                 duration=0.08,
                 post_delay=0.6,
-                verification="next_frame",
+                verification="immediate",
                 tag="invite_close_helper_fallback",
                 reason=f"帮助者进度读取完成（{progress}），×未识别，点兜底位置关闭",
             )

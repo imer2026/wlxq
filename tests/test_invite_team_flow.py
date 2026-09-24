@@ -123,22 +123,15 @@ class TestInviteWaiting:
         assert to_state == State.INVITE_WAITING
         assert action.tag == "invite_waiting"
 
-    def test_invisible_starts_recheck_not_navigation(self) -> None:
-        """邀请文字首次不可见：先复检，不直接打开帮助者信息。"""
-        task = _make_invite_task()
-        task.ctx.current_state = State.INVITE_WAITING
-        task._invite_wait_since = 0.0
-        obs = _observation({"invite_text_visible": False})
-        action, to_state = task.decide_action(obs, _window_ctx())
-        assert to_state == State.INVITE_WAITING
-        assert action.tag == "invite_join_recheck"
+    def test_invisible_opens_helper_info_directly(self) -> None:
+        """邀请文字不可见：直接打开帮助者信息层（无独立复检帧）。
 
-    def test_second_invisible_opens_helper_info(self) -> None:
-        """连续两帧不可见：判定有人进房，点邀请位置弹信息层。"""
+        误判自愈：若实际无人进房，此点击会重开邀请弹窗，后续由进度
+        读取重试上限兜底，不盲踢不盲开局。
+        """
         task = _make_invite_task()
         task.ctx.current_state = State.INVITE_WAITING
         task._invite_wait_since = 0.0
-        task._invite_text_missing_frames = 1
         obs = _observation({"invite_text_visible": False})
         action, to_state = task.decide_action(obs, _window_ctx())
         assert to_state == State.INVITE_WAITING
