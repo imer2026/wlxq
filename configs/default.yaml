@@ -337,6 +337,9 @@ main_c_profiles:
       death_knight: 0
     # 阵容门禁：天使 + 雪姬在场（猴子看星级门禁）才转纯选技能
     required_lineup_heroes: [angel, snow]
+    # 幻天使是天使的形态（game-rules.md）：棋盘上有幻天使即算有天使
+    lineup_variant_groups:
+      angel: [angel_phantom]
     # 卡住时变身碰辅助：牺牲顺序死骑 → 雪姬（仅数量≥2 时）；天使/猴子永不在列
     transform_sacrifice_order: [death_knight, snow]
     # 技能优先级（2026-09-23 用户定案）：只锁两档——天使大、雪姬大；

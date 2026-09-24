@@ -45,6 +45,7 @@ def _monkey_strategy(**overrides: object) -> CultivationStrategy:
         forbid_star3_merge=True,
         hero_keep_counts={"angel": 1, "snow": 1, "death_knight": 0},
         required_lineup_heroes=["angel", "snow"],
+        lineup_variant_groups={"angel": ["angel_phantom"]},
         transform_sacrifice_order=["death_knight", "snow"],
         **overrides,  # type: ignore[arg-type]
     )
@@ -266,3 +267,22 @@ class TestTransformAssist:
         # 猴子策略的 select_transform 在碰辅助模式下不适用（返回 None）
         monkey = _monkey_strategy()
         assert monkey.select_transform(_monkey_board(), 0, 2) is None
+
+
+class TestLineupVariant:
+    def test_phantom_angel_satisfies_angel_gate(self) -> None:
+        """幻天使是天使的形态：只有幻天使在场也算天使齐（2026-09-24 用户纠正）。"""
+        board = _board(
+            [
+                _hero("monkey", 1, 100, 100),
+                _hero("angel_phantom", 1, 200, 100),
+                _hero("snow", 1, 300, 100),
+            ]
+        )
+        strategy = _monkey_strategy()
+        assert strategy.lineup_missing(board) == []
+        assert strategy.main_c_ready(board) is True
+
+    def test_real_angel_still_counts(self) -> None:
+        board = _monkey_board()
+        assert _monkey_strategy().lineup_missing(board) == []

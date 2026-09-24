@@ -67,6 +67,16 @@ class CultivationStrategy:
         return tuple(self._profile.required_lineup_heroes)
 
     @property
+    def _lineup_variant_groups(self) -> dict[str, list[str]]:
+        """门禁英雄的形态变体等价表（angel_phantom → angel 等）；空 = 无。"""
+        if self._profile is None:
+            return {}
+        return {
+            base: list(variants)
+            for base, variants in self._profile.lineup_variant_groups.items()
+        }
+
+    @property
     def hero_keep_counts(self) -> dict[str, int]:
         """保留数表（合并后任一输入类型在场数不得低于该值）；空 = 未启用。"""
         if self._profile is None:
@@ -86,8 +96,20 @@ class CultivationStrategy:
         return tuple(self._profile.transform_sacrifice_order)
 
     def lineup_missing(self, board: BoardSnapshot) -> list[str]:
-        """返回阵容门禁尚未在场的英雄（按配置顺序）；空列表 = 阵容已齐。"""
-        present = {hero.hero_type for hero in board.heroes}
+        """返回阵容门禁尚未在场的英雄（按配置顺序）；空列表 = 阵容已齐。
+
+        形态变体等价（lineup_variant_groups）：幻天使是天使的形态
+        （game-rules.md），配置后棋盘上有变体即算本体在场。
+        """
+        present: set[str] = set()
+        variant_groups = self._lineup_variant_groups
+        for hero in board.heroes:
+            t = hero.hero_type
+            present.add(t)
+            # 变体类型同时记为其本体（angel_phantom → angel）
+            for base, variants in variant_groups.items():
+                if t in variants:
+                    present.add(base)
         return [h for h in self.required_lineup_heroes if h not in present]
 
     def _hero_type_count(self, board: BoardSnapshot, hero_type: str) -> int:

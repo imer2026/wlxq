@@ -131,6 +131,10 @@ class MainCProfile(BaseModel):
     hero_keep_counts: dict[str, int] = Field(default_factory=dict)
     # 阵容门禁：这些英雄每类在场 ≥1 才允许转选技能；空 = 只看主C星级（强袭现状）
     required_lineup_heroes: list[str] = Field(default_factory=list)
+    # 阵容门禁的形态变体等价：键为 required_lineup_heroes 中的英雄，值为可
+    # 替代其满足门禁的形态变体类型。幻天使是天使的形态（game-rules.md），
+    # 猴子档案配 {angel: [angel_phantom]}——棋盘上有幻天使即算有天使
+    lineup_variant_groups: dict[str, list[str]] = Field(default_factory=dict)
     # 变身碰辅助模式：按此顺序选牺牲英雄（取第一个在场数 > 保留数的）赌变出
     # 缺的辅助；触发条件为阵容不齐 + 棋盘满 + 无安全合成。空 = 强袭的碰主C模式
     transform_sacrifice_order: list[str] = Field(default_factory=list)
