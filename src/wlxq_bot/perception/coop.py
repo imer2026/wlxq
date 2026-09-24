@@ -562,11 +562,14 @@ class CoopPerception:
         # 「召唤」文字模板按阈值匹配不上 → 开局类型识别永远等不到召唤标志
         # 而卡死。模板未命中时对该按钮区域做限域 OCR，读到「召唤」即视为
         # 按钮可见（点击点=文字框中心，皮肤主题不影响文字本身）。
-        # 仅在开局识别态兜底——BUILD_MAIN_C 没有消费者，挂进去会让培养
-        # 主循环每帧多 2.5s OCR（2026-09-24 实机：强制召唤被拖慢到 5s/发）
+        # 两个限定：① 仅在开局识别态——BUILD_MAIN_C 没有消费者，挂进去会让
+        # 培养主循环每帧多 2.5s OCR（2026-09-24 实机：强制召唤被拖慢到 5s/发）；
+        # ② 技能页开着时跳过——页面本来就盖住召唤按钮，读不到是预期而非信息，
+        # 兜底只会白耗 2.5s/帧（2026-09-24 实机：开局选卡被拖慢到 10s/张）
         if (
             hint_state == State.SELECT_OPENING_SKILLS
             and not raw_data.get("summon_button_visible")
+            and not raw_data.get("select_skill_button_visible")
         ):
             rows = self._read_entry_roi_rows("summon_button_area", ctx, frame)
             hit = next((row for row in rows if "召唤" in row.text), None)
