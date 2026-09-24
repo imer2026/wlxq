@@ -115,6 +115,10 @@ class MainCProfile(BaseModel):
     # 启动时自动计算，配置了会被忽略。未配置时技能选择走原有图标识别流程。
     # 技能名需与 configs/skills.yaml 一致
     skill_priority: dict[int, list[str]] = Field(default_factory=dict)
+    # 主C未列入 skill_priority 的技能是否优先于其他英雄技能（第 8 档 vs
+    # 第 11 档，强袭需要）；false = 主C未列技能与其余技能同档随机——
+    # 猴子模型：只有 天使大/雪姬大 两档 + 其他（2026-09-25 用户定案）
+    prefer_main_c_skills: bool = True
     # ---- 邀请者模式（主C猴子）扩展字段；默认值 = 强袭现状行为 ----
     # 主C门禁星级档案化；0 = 回退 run.target_star_level
     target_star_override: int = Field(default=0, ge=0, le=4)

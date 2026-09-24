@@ -443,12 +443,15 @@ def compute_skill_tiers(
     name_to_hero: dict[str, str],
     main_c_hero: str,
     lineup_hero_names: set[str] | None = None,
+    main_c_rest_tier: int = 8,
 ) -> dict[str, int]:
     """按主C的优先级配置计算 {技能名: 档位}。
 
     - 配置里的 1~7/9/10 档为显式数组;第 8、11 档启动时自动计算,配置了也会
       被忽略(打警告)
     - 第 8 档 = 主C清单里未被显式档覆盖的技能——主C技能永不落第 11 档
+      （main_c_rest_tier 可改为 11：主C未列技能与其余技能同档随机，
+      如猴子的三档模型 天使大/雪姬大/其他）
     - 第 11 档 = 清单里其余技能。传入 lineup_hero_names（本局阵容英雄的
       中文名集合）时只收阵容英雄的技能——对局商店只刷本局阵容的技能，
       非阵容英雄（如猴子局里的强袭）的技能留在清单但不进任何档位
@@ -480,7 +483,7 @@ def compute_skill_tiers(
         if name in tier_of:
             continue
         if hero == main_c_hero:
-            tier_of[name] = 8
+            tier_of[name] = main_c_rest_tier
         elif _in_lineup(hero):
             tier_of[name] = 11
     return tier_of

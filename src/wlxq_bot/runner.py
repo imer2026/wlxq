@@ -1401,6 +1401,9 @@ class Runner:
             skill_tiers = compute_skill_tiers(
                 profile.skill_priority, name_to_hero, profile.display_name,
                 lineup_hero_names=lineup_names,
+                # 猴子模型（2026-09-25 用户定案）：主C未列技能不优先，
+                # 与其他英雄技能同档随机——三档 = 天使大/雪姬大/其他
+                main_c_rest_tier=8 if profile.prefer_main_c_skills else 11,
             )
             ensure_engine()
             tier8 = sorted(name for name, tier in skill_tiers.items() if tier == 8)
