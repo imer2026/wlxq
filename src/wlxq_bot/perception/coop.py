@@ -561,9 +561,11 @@ class CoopPerception:
         # 召唤按钮 OCR 兜底（2026-09-24）：帮助者城墙皮肤会改变底栏按钮配色，
         # 「召唤」文字模板按阈值匹配不上 → 开局类型识别永远等不到召唤标志
         # 而卡死。模板未命中时对该按钮区域做限域 OCR，读到「召唤」即视为
-        # 按钮可见（点击点=文字框中心，皮肤主题不影响文字本身）
+        # 按钮可见（点击点=文字框中心，皮肤主题不影响文字本身）。
+        # 仅在开局识别态兜底——BUILD_MAIN_C 没有消费者，挂进去会让培养
+        # 主循环每帧多 2.5s OCR（2026-09-24 实机：强制召唤被拖慢到 5s/发）
         if (
-            hint_state in (State.SELECT_OPENING_SKILLS, State.BUILD_MAIN_C)
+            hint_state == State.SELECT_OPENING_SKILLS
             and not raw_data.get("summon_button_visible")
         ):
             rows = self._read_entry_roi_rows("summon_button_area", ctx, frame)

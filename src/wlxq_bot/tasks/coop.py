@@ -131,6 +131,10 @@ class _RecruitStep(Enum):
     # 挑战页每周弹窗（保卫宠物=本周Buff，每天首次进入弹出）：读到按钮文字
     # 即点文字框中心关闭；模式档案未配置 weekly_buff_text 时跳过本步骤
     CLOSE_WEEKLY_BUFF = "close_weekly_buff"
+    # 邀请者入口收尾标记：挑战页到达后导航即结束（INVITE_CLICK 接手），
+    # observation_mode 对其不返回任何专项识别（否则挑战页 OCR 会在培养
+    # 主循环每帧执行，2026-09-24 实机拖慢强制召唤）
+    INVITE_ENTRY_DONE = "invite_entry_done"
     OPEN_CHALLENGE_CHAT = "open_challenge_chat"
     # 聊天点击生效确认：挑战页锚点（challenge_text）消失才算进入招募；
     # 仍读到锚点说明点击被道具卡等弹窗吃掉，重点聊天（预算
@@ -1548,7 +1552,9 @@ class CoopTask(Task):
             if self._invite_mode:
                 # 邀请者（spec 2026-09-21 §6）：导航到合作挑战页即止——【邀请】
                 # 按钮就在挑战页上，无难度选择、不进招募频道；INVITE_CLICK
-                # 从【开始挑战】开始走 5 步邀请链
+                # 从【开始挑战】开始走邀请点击链。推进入口步骤到完成标记，
+                # 避免 observation_mode 继续返回 challenge_page（每帧 OCR）
+                self._recruit_step = _RecruitStep.INVITE_ENTRY_DONE
                 self._invite_step = 0
                 self._invite_wait_since = None
                 return (
