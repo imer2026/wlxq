@@ -950,16 +950,24 @@ class CoopTask(Task):
         """等帮助者准备：未准备模板 → 继续等；已准备模板 → 点击开局。"""
         ready_match = self._flag_match(observation, "invite_start_ready_match")
         if ready_match is not None:
+            # 邀请者点「已准备」开局：直接进开局选技能（邀请者无"点准备"
+            # 步骤——那是帮助者抢合作路径的 ENTER_MATCH 动作）
+            to_state = (
+                State.SELECT_OPENING_SKILLS
+                if self._invite_mode
+                else State.ENTER_MATCH
+            )
             return (
                 Action(
                     kind="click",
                     target=ready_match.position,
                     duration=0.08,
+                    post_delay=1.0,
                     verification="next_frame",
                     tag="invite_start_game",
                     reason="帮助者已准备，点击开始对局",
                 ),
-                State.ENTER_MATCH,
+                to_state,
             )
         not_ready = self._flag_match(observation, "invite_start_not_ready_match")
         if not_ready is not None:
