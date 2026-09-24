@@ -500,7 +500,7 @@ def calibrate() -> None:
 def run(
     task: str = typer.Argument("coop", help="任务名称，例如 coop"),
     main_c: str | None = typer.Option(
-        None, "--main-c", help="主 C 标识：assault / monkey / angel / snow / death_knight / fox"
+        None, "--main-c", "-m", help="主 C 标识：assault / monkey / angel / snow / death_knight / fox"
     ),
     coop_difficulties: str | None = typer.Option(
         None,
@@ -530,6 +530,7 @@ def run(
     invite: bool = typer.Option(
         False,
         "--invite",
+        "-i",
         help="邀请者模式：发起合作等待帮助者加入（角色 initiator、左下棋盘），"
         "按关卡进度过滤（低于阈值请离重邀）；仅 coop 模式支持",
     ),
