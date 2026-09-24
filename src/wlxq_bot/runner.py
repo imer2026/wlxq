@@ -1202,16 +1202,26 @@ class Runner:
             raise RuntimeError(f"主C {main_c} 不在配置档案中，可用: {available}")
         profile = profiles[main_c]
         if not profile.skill_icon_templates:
-            if start_state != State.BUILD_MAIN_C:
+            if profile.skill_priority:
+                # 标题 OCR 优先级路径（如猴子：神圣契约/冰雪凤鸣 + 自动档）
+                # 不依赖图标模板；图标匹配仅作无 priority 时的识别兜底
+                logger.info(
+                    "主C %s 未配置 skill_icon_templates；已配置 skill_priority，"
+                    "技能识别走标题 OCR 优先级路径",
+                    main_c,
+                )
+            elif start_state != State.BUILD_MAIN_C:
                 raise RuntimeError(
                     f"主C {main_c} 的 skill_icon_templates 为空，不能进入自动对局；"
-                    "请采集该主C技能卡上的英雄图标模板并在 main_c_profiles 中配置。"
+                    "请采集该主C技能卡上的英雄图标模板并在 main_c_profiles 中配置，"
+                    "或配置 skill_priority 走标题 OCR 识别。"
                     "仅调试培养闭环时可使用 --start-state build_main_c"
                 )
-            logger.warning(
-                "主C %s 的 skill_icon_templates 为空；当前仅以 build_main_c 调试模式运行",
-                main_c,
-            )
+            else:
+                logger.warning(
+                    "主C %s 的 skill_icon_templates 为空；当前仅以 build_main_c 调试模式运行",
+                    main_c,
+                )
         if not profile.hero_classifier_model.strip():
             raise RuntimeError(f"主C {main_c} 未配置 hero_classifier_model")
 
