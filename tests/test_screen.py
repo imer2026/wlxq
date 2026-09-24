@@ -155,8 +155,12 @@ def test_validate_context_rejects_monitor_change(monkeypatch) -> None:
 
 
 def test_get_input_idle_seconds_returns_non_negative() -> None:
-    """系统空闲秒数应为非负有限值（GetLastInputInfo 冒烟测试）。"""
+    """系统空闲秒数应为非负有限值（GetLastInputInfo 冒烟测试）。
+
+    只断言非负：空闲时长取决于真机使用状态（挂机一小时即超 3600），
+    任何上限断言都会随环境偶发失败。
+    """
     from wlxq_bot.perception.screen import get_input_idle_seconds
 
     idle = get_input_idle_seconds()
-    assert 0.0 <= idle < 3600.0
+    assert idle >= 0.0
