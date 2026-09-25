@@ -99,6 +99,10 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
     # 开局；「未准备」态 → 继续等。两态同识别区 invite_start_button_area
     ("invite_start_ready", "invite_start_ready_visible", "invite_start_ready_match"),
     ("invite_start_not_ready", "invite_start_not_ready_visible", "invite_start_not_ready_match"),
+    # 组队大厅【邀请】按钮（帮助者槽位空态标志）：INVITE_START 判定帮助者
+    # 是否退房（槽位回空=邀请文字重现，正向信号）。INVITE_WAITING 的同名
+    # 标志由 invite_waiting 观察模式的 _detect_invite_text 提供，不重复识别
+    ("invite_button_label", "invite_text_visible", "invite_text_match"),
 )
 
 # 各状态需要识别的全局界面标志。合作只能通过自己点击加入进入，游戏不会主动
@@ -112,9 +116,17 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     State.FIND_COOP: frozenset(),
     # 邀请点击链第 7 步关邀请弹窗需要 × 识别门控（盲点坐标会点中【概率】）
     State.INVITE_CLICK: frozenset({"close_button"}),
-    # 邀请者等待态：帮助者信息层打开时需要 × 关闭按钮（close_button）
-    State.INVITE_WAITING: frozenset({"close_button"}),
-    State.INVITE_START: frozenset({"invite_start_ready", "invite_start_not_ready"}),
+    # 邀请者等待态：帮助者信息层打开时需要 × 关闭按钮（close_button）；
+    # 双态按钮做房间屏锚点——两个都不在（加载页/对局内）时任务层冻结
+    # 「有人进房」判定，不对非房间画面盲点邀请位（2026-09-26 实机教训）
+    State.INVITE_WAITING: frozenset(
+        {"close_button", "invite_start_ready", "invite_start_not_ready"}
+    ),
+    # 邀请文字（invite_button_label）做帮助者退房的正向信号：槽位回空=
+    # 邀请文字重现；缺失按未退出处理，不再用默认值臆造证据
+    State.INVITE_START: frozenset(
+        {"invite_start_ready", "invite_start_not_ready", "invite_button_label"}
+    ),
     State.INVITE_COOLDOWN: frozenset(),
     State.ENTER_MATCH: frozenset({"ready_button"}),
     State.SELECT_OPENING_SKILLS: frozenset(
@@ -364,8 +376,17 @@ class CoopPerception:
             # 点模式页签前 OCR 页签行定位文字：三个页签共用一条识别区，
             # 仅进招募后的一两帧识别，不在高频循环内
             self._detect_mode_tab_rows(ctx, frame, raw_data)
+        elif observation_mode == "territory_nav_probe":
+            # 领地入口第一步 + 挑战页锚点探测（2026-09-25）：导航文字与
+            # 挑战按钮区同帧读。游戏可能已停在挑战页（上次退出落点/被踢
+            # 落点/手动放置），任务层读到本模式锚点文字即跳过整段领地
+            # →模式选择→选卡导航。挑战 ROI 未配置时只读导航——锚点检测
+            # 缺 ROI 会退化为全图 OCR，入口帧付不起
+            self._detect_territory_nav_text(ctx, frame, raw_data)
+            if self._challenge_roi:
+                self._detect_challenge_text(ctx, frame, raw_data)
         elif observation_mode == "territory_nav":
-            # 领地入口第一步：读底部导航领地格文字（领地=未进领地页，
+            # 领地打开确认：读底部导航领地格文字（领地=未进领地页，
             # 返回=已在领地页），仅入口步骤识别，不在高频循环内
             self._detect_territory_nav_text(ctx, frame, raw_data)
         elif observation_mode == "mode_select":
@@ -399,7 +420,13 @@ class CoopPerception:
             # 3s/帧导致帮助者进房后响应过慢）。文字不可见（帮助者界面遮挡
             # = 可能有人进房）时才 OCR 关卡进度，空闲帧不做任何 OCR
             self._detect_invite_text(ctx, frame, raw_data)
-            if not raw_data.get("invite_text_visible"):
+            # 进度 OCR 只在帮助者信息层确实开着（× 可见）时跑：邀请位不可见
+            # 但 × 也不可见 = 非房间帧（加载页/对局内），OCR 无人消费纯白跑
+            # （2026-09-26 实机：误入对局后每帧 ~2.9s 全付在这上面）
+            if (
+                not raw_data.get("invite_text_visible")
+                and raw_data.get("close_button_visible")
+            ):
                 self._detect_helper_stage_progress(ctx, frame, raw_data)
 
         # 2. 培养阶段做棋盘英雄识别
@@ -591,6 +618,18 @@ class CoopPerception:
                     hit.confidence,
                 )
 
+        # 被踢/房间解散检测（2026-09-25 实机：组队大厅点准备后可能被队长
+        # 请离，落点是领地页而非首页，画面特征=底部导航读「返回」）：仅在
+        # 组队大厅态且准备按钮消失的异常帧读一次领地导航 OCR。正常帧按钮
+        # 可见不读；验证帧走 light 模式也不读——被踢后的无动作帧是完整识别，
+        # 门控在此即可覆盖
+        if (
+            hint_state == State.ENTER_MATCH
+            and not raw_data.get("ready_button_visible")
+            and not light
+        ):
+            self._detect_territory_nav_text(ctx, frame, raw_data)
+
         # 赠送技能卡片（同系列技能选满 3 个触发）：仅在选技能阶段识别
         if hint_state == State.SELECT_MAIN_C_SKILLS:
             locator = locators.get("zeng_song_ji_neng")
@@ -631,6 +670,32 @@ class CoopPerception:
             if leave_match is not None:
                 matches.append(leave_match)
                 raw_data["leave_team_match"] = leave_match
+            # 邀请者：挑战被拒/未生效时画面回到组队大厅，双态按钮重现——
+            # 任务层据此回 INVITE_START 重新开局（实机 2026-09-25）；帮助者
+            # 流程无此按钮，不识别（避免对局内底栏的无谓模板匹配）
+            if self._role == CoopRole.INITIATOR:
+                for locator_name, flag_name, match_name in (
+                    (
+                        "invite_start_ready",
+                        "invite_start_ready_visible",
+                        "invite_start_ready_match",
+                    ),
+                    (
+                        "invite_start_not_ready",
+                        "invite_start_not_ready_visible",
+                        "invite_start_not_ready_match",
+                    ),
+                ):
+                    locator = locators.get(locator_name)
+                    match = (
+                        self._match_locator_template(ctx, frame, locator)
+                        if locator
+                        else None
+                    )
+                    raw_data[flag_name] = match is not None
+                    if match is not None:
+                        matches.append(match)
+                        raw_data[match_name] = match
 
         if not light:
             if hint_state in {State.SELECT_OPENING_SKILLS, State.SELECT_MAIN_C_SKILLS}:

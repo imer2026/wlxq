@@ -418,6 +418,10 @@ class RunConfig(BaseModel):
     # 等待开局期间连续这么多帧识别到首页标记，才判定本局被取消/被踢回首页
     # （加载画面可能与首页有短暂相似，单帧命中不能直接判定）
     home_return_confirm_frames: int = Field(default=2, ge=1, le=10)
+    # 组队大厅点准备后：准备按钮消失且底部导航连续这么多帧读到「返回」（=
+    # 落在领地页），才判定本局被踢/房间解散（2026-09-25 实机：被队长请离后
+    # 落点为领地页，toast「你被队长请离了」）；单帧 OCR 误读不能直接判定
+    territory_return_confirm_frames: int = Field(default=2, ge=1, le=10)
     # 点准备后等待对局界面的超时（秒）；超时按本局未开始处理，回到招募入口
     # 重新抢合作。实机确认房主可踢出已加入的玩家，被踢后回到首页、对局不开始
     match_start_timeout_seconds: float = Field(default=120.0, gt=0.0, le=3600.0)
@@ -529,6 +533,9 @@ class InviteConfig(BaseModel):
     wait_timeout_seconds: float = Field(default=600.0, ge=1.0)
     # 合格帮助者进房后等待其点准备的超时秒数，超时请离重来；0 = 一直等
     ready_timeout_seconds: float = Field(default=60.0, ge=0.0)
+    # 点【挑战】开局后的动作验证帧数预算：游戏从点击到切屏实测 ~2.4s
+    # （2026-09-26 实机），全局 5 帧（~1.5s）在慢过渡时会误判点击失败
+    start_verify_frames: int = Field(default=10, ge=1)
 
 
 class DefaultConfig(BaseModel):

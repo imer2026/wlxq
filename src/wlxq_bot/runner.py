@@ -400,6 +400,7 @@ class Runner:
             main_c_profile=effective_main_c_profile,
             mode_profile=mode_profile,
             invite_mode=invite,
+            invite_config=self.default_config.invite,
             pet_difficulty_targets=mode_profile.entry.difficulty.targets or None,
             pet_difficulty_min_confidence=float(
                 self.tasks_config.pet_difficulty_recognition.get("min_confidence", 0.5)
@@ -890,7 +891,11 @@ class Runner:
                     pending = None
                 else:
                     pending.attempts += 1
-                    if pending.attempts >= self.default_config.run.action_verify_frames:
+                    verify_budget = (
+                        pending.action.verify_frames
+                        or self.default_config.run.action_verify_frames
+                    )
+                    if pending.attempts >= verify_budget:
                         tag = pending.action.tag
                         # 击杀奖励弹窗验证失败大概率是关掉后立刻弹了新弹窗；
                         # 合成拖动可能落空（英雄仍在原位）。两者都可恢复，
@@ -977,6 +982,10 @@ class Runner:
                             pending.attempts,
                             tag,
                         )
+                        # 通用恢复前先通知任务动作已放弃：任务在 on_action_failed
+                        # 里撤销「上一步已生效」的状态标记（如邀请者开局的确认页
+                        # 阶段），否则下一帧决策会带着失效假设盲走
+                        task.on_action_failed(pending.action)
                         if not _recover_or_stop(
                             f"动作 {tag} 验证连续 {pending.attempts} 帧失败"
                         ):
@@ -986,7 +995,7 @@ class Runner:
                         "动作后状态尚未稳定，等待下一帧 tag=%s (%d/%d)",
                         pending.action.tag,
                         pending.attempts,
-                        self.default_config.run.action_verify_frames,
+                        verify_budget,
                     )
                     time.sleep(0.2)
                     continue

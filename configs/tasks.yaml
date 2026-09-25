@@ -67,13 +67,6 @@ hotspots:
     x_ratio: 0.5502
     y_ratio: 0.9540
     description: 合作挑战页【开始挑战】按钮（OCR 文字区中心）
-  # 层挑战确认页【挑战】按钮（2026-09-24 实机截图标定，pixel (466, 1570)）：
-  # 点组队大厅「已准备」按钮后到达（彩虹 19 层确认页：队长+邀请+挑战），
-  # 邀请者在此点【挑战】才真正开局
-  invite_stage_challenge:
-    x_ratio: 0.5027
-    y_ratio: 0.9091
-    description: 层挑战确认页【挑战】按钮（开局最后一次点击）
 
   # 抢合作：最下面的「加入」按钮（coop_grab 连点此点抢合作）
   join_coop:

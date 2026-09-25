@@ -201,6 +201,8 @@ class CoopTask(Task):
         )
         # 邀请者「准备完成」已点标记（开局召唤完成后点一次，动作后验证）
         self._invite_ready_clicked = False
+        # 挑战被拒回到组队大厅的连续确认帧数（防对局内单帧模板误匹配放弃对局）
+        self._invite_back_lobby_streak = 0
         self._skill_candidate_roi = skill_candidate_roi
         # 主C培养策略（合成/门禁/数量回补）：纯决策对象，状态机只负责调度；
         # 模式档案经 Runner 的 resolve_main_c_profile 应用覆盖后传入 profile
@@ -301,6 +303,8 @@ class CoopTask(Task):
         self._opening_clicks_blocked = False
         self._opening_wait_count = 0
         self._home_return_count = 0
+        # 组队大厅被踢检测：准备按钮消失且导航读「返回」的连续帧计数
+        self._territory_return_count = 0
         # 本会话是否已完成过难度勾选（首局选中或手动选过）；被踢回首页重新
         # 进入招募时不再重复勾选难度（再次点击已选中的难度会取消勾选）
         self._difficulty_done_session = False
@@ -560,13 +564,20 @@ class CoopTask(Task):
             if self._transform_stage in ("poll", "confirm"):
                 return "transform_button"
             return None
+        if self.ctx.current_state == State.ENTER_MATCH:
+            # 组队大厅：需要准备按钮 + 全屏弹窗 × 标志（连点误点产生的
+            # 「个人信息」等弹窗可能活到本状态，点准备前必须先关掉）。
+            # 显式声明而不依赖入口子步骤残留值恰好是 JOIN_COOP
+            return "coop_grab"
         if self._recruit_step is _RecruitStep.DETECT_ENTRY_PAGE:
             # 退队落点探测：只区分首页/非首页，首页也改走领地入口
             return "home_page"
-        if self._recruit_step in (
-            _RecruitStep.OPEN_TERRITORY,
-            _RecruitStep.CONFIRM_TERRITORY_OPEN,
-        ):
+        if self._recruit_step is _RecruitStep.OPEN_TERRITORY:
+            # 领地入口第一步：导航文字 + 挑战页锚点同帧读——锚点命中=
+            # 已在挑战页，整段领地导航跳过；打开确认步骤没有锚点消费，
+            # 不付这笔 OCR
+            return "territory_nav_probe"
+        if self._recruit_step is _RecruitStep.CONFIRM_TERRITORY_OPEN:
             # 领地入口：OCR 底部导航领地格文字（领地=可点，返回=已打开）
             return "territory_nav"
         if self._recruit_step in (
@@ -790,6 +801,24 @@ class CoopTask(Task):
                 )
         self._invite_dismiss_checked = False
         self._invite_wait_since = None
+        # 房间屏锚点：金/灰按钮都不在 = 非房间画面（加载页/对局内/未知）。
+        # 此时「邀请文字不可见」不构成进房证据，邀请位点击必然落空并引发
+        # 误判链（2026-09-26 实机：对局画面每帧判「有人进房」盲点两次直到
+        # 保守停止）——冻结判定，等画面回到房间屏
+        if not (
+            observation.flag("invite_start_ready_visible")
+            or observation.flag("invite_start_not_ready_visible")
+        ):
+            return (
+                Action(
+                    kind="wait",
+                    duration=1.0,
+                    verification="immediate",
+                    tag="invite_waiting_not_room",
+                    reason="未见房间标志（过渡中/非房间画面），冻结进房判定",
+                ),
+                State.INVITE_WAITING,
+            )
         return self._invite_process_helper(observation, window_ctx)
 
     def _invite_process_helper(
@@ -934,7 +963,10 @@ class CoopTask(Task):
                     target=kick,
                     duration=0.08,
                     post_delay=0.5,
-                    verification="next_frame",
+                    # INVITE_COOLDOWN 态不识别任何标志，next_frame 无画面特征
+                    # 可验证必然白等 5 帧（2026-09-25 20:05 日志）；冷却后重走
+                    # 邀请链从头复核房间状态，点击生效性由那条链兜底
+                    verification="immediate",
                     tag="invite_kick_helper",
                     reason="请离低于阈值的帮助者",
                 ),
@@ -957,26 +989,83 @@ class CoopTask(Task):
     _invite_pending_decision: str | None = None
     _invite_dismiss_checked: bool = False
     _invite_close_wait_frames: int = 0
-    _invite_confirm_pending: bool = False
     _invite_progress_misses: int = 0
     _INVITE_PROGRESS_MAX_MISSES: int = 5
+    # 挑战被拒回到组队大厅所需的连续确认帧数（防对局内单帧误匹配放弃对局）
+    _INVITE_BACK_LOBBY_CONFIRM_FRAMES: int = 2
 
     def _invite_text_visible(self, observation: Observation) -> bool:
         """读感知层 OCR 结果：邀请文字可见 = 无人进房。缺失按可见（继续等）。"""
         value = observation.raw_data.get("invite_text_visible")
         return True if value is None else bool(value)
 
+    def _invite_ready_budget_exhausted(self) -> bool:
+        """合格后等待开局的预算（ready_timeout_seconds，0=一直等）是否耗尽。"""
+        timeout = self._invite.ready_timeout_seconds
+        if timeout <= 0 or self._invite_wait_since is None:
+            return False
+        return self._clock() - self._invite_wait_since > timeout
+
+    def _invite_kick_action(
+        self, window_ctx: WindowContext | None
+    ) -> tuple[Action, State] | None:
+        """请离当前帮助者进冷却；连续请离达上限返回 None（保守停止）。
+
+        验证用 immediate：INVITE_COOLDOWN 态不识别任何标志，next_frame 没有
+        可验证的画面特征必然白等 5 帧（实机 2026-09-25 20:05 日志）；冷却后
+        重走邀请链会从头复核房间状态，点击是否生效由那条链兜底。
+        """
+        if self._invite_kick_count >= self._invite.max_consecutive_kicks:
+            logger.error(
+                "连续请离 %d 个帮助者（匹配池可能整体不合格），保守停止",
+                self._invite_kick_count,
+            )
+            return None
+        self._invite_kick_count += 1
+        kick = self._invite_hotspot_point("invite_kick", window_ctx)
+        if kick is None:
+            return None
+        logger.info(
+            "等待帮助者准备超时，请离（第 %d/%d 个），%ds 冷却后重邀",
+            self._invite_kick_count,
+            self._invite.max_consecutive_kicks,
+            int(self._invite.kick_cooldown_seconds),
+        )
+        return (
+            Action(
+                kind="click",
+                target=kick,
+                duration=0.08,
+                post_delay=0.5,
+                verification="immediate",
+                tag="invite_kick_helper",
+                reason="等待帮助者准备/开局超时，请离重邀",
+            ),
+            State.INVITE_COOLDOWN,
+        )
+
     def _action_invite_start(
         self,
         observation: Observation,
         window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
-        """等帮助者准备：未准备模板 → 继续等；已准备模板 → 点击开局。"""
+        """等帮助者准备：金色挑战（已准备）→ 点击开局；灰色 → 继续等。
+
+        组队房间只有一张屏（彩虹N层大厅），底部挑战按钮灰=不可开局、
+        金=帮助者已准备（2026-09-26 退出帧实锤，不存在"层挑战确认页"）。
+        点击直下 SELECT_OPENING_SKILLS，状态在验证通过后才提交；游戏从
+        点击到切屏实测 ~2.4s，验证预算用 invite.start_verify_frames 放宽
+        （全局 5 帧 ~1.5s 在慢过渡时会误判点击失败）。
+        """
+        # 等准备预算耗尽（帮助者长期没准备/开局反复被拒）→ 请离重邀：
+        # 每次开局尝试约 2s，超时后原地无限循环毫无意义（0=一直等不受限）
+        if self._invite_ready_budget_exhausted():
+            kick = self._invite_kick_action(window_ctx)
+            if kick is not None:
+                return kick
+            return None
         ready_match = self._flag_match(observation, "invite_start_ready_match")
-        if ready_match is not None and not self._invite_confirm_pending:
-            # 第 1 段：点「已准备」→ 游戏到层挑战确认页（彩虹 N 层：队长+
-            # 邀请+挑战，2026-09-24 退出截图确认），尚不对局
-            self._invite_confirm_pending = True
+        if ready_match is not None:
             return (
                 Action(
                     kind="click",
@@ -984,29 +1073,28 @@ class CoopTask(Task):
                     duration=0.08,
                     post_delay=1.0,
                     verification="next_frame",
+                    verify_frames=self._invite.start_verify_frames,
                     tag="invite_start_game",
-                    reason="帮助者已准备，点击开始对局（进层挑战确认页）",
-                ),
-                State.INVITE_START,
-            )
-        if self._invite_confirm_pending:
-            # 第 2 段：确认页点【挑战】才真正开局（无模板，页面状态由上一
-            # 步验证保证——双态按钮已消失；坐标取实机截图标定）
-            point = self._invite_hotspot_point("invite_stage_challenge", window_ctx)
-            if point is None:
-                return None
-            self._invite_confirm_pending = False
-            return (
-                Action(
-                    kind="click",
-                    target=point,
-                    duration=0.08,
-                    post_delay=1.5,
-                    verification="immediate",
-                    tag="invite_confirm_challenge",
-                    reason="层挑战确认页点【挑战】，正式开局",
+                    reason="帮助者已准备（挑战按钮金色），点击开始对局",
                 ),
                 State.SELECT_OPENING_SKILLS,
+            )
+        # 邀请文字可见（正向信号，真实识别值非默认）：帮助者槽位回空=已退出。
+        # 优先于灰色按钮判断——空房同样是灰按钮，等"未准备的帮助者点准备"
+        # 毫无意义，应回等待态重新走过滤
+        if observation.flag("invite_text_visible", False):
+            logger.info("邀请槽位回空（邀请文字重现），帮助者已退出，回到等待")
+            self._invite_wait_since = self._clock()
+            self._invite_dismiss_checked = False
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.5,
+                    verification="immediate",
+                    tag="invite_helper_left",
+                    reason="帮助者退出房间，继续等待新帮助者",
+                ),
+                State.INVITE_WAITING,
             )
         not_ready = self._flag_match(observation, "invite_start_not_ready_match")
         if not_ready is not None:
@@ -1020,30 +1108,15 @@ class CoopTask(Task):
                 ),
                 State.INVITE_START,
             )
-        # 两个模板都没识别到：帮助者可能已退出（邀请文字重现），回等待态。
-        # 若连续多帧双模板全无且文字也不可见，说明邀请文字判定可能是误报
-        # （残留弹窗误判进房，实际没人）——回等待态重新走判定（自愈）
-        if self._invite_text_visible(observation):
-            logger.info("开局按钮消失且邀请文字重现，帮助者已退出，回到等待")
-            self._invite_wait_since = self._clock()
-            self._invite_dismiss_checked = False
-            return (
-                Action(
-                    kind="wait",
-                    duration=0.5,
-                    verification="immediate",
-                    tag="invite_helper_left",
-                    reason="帮助者退出房间，继续等待新帮助者",
-                ),
-                State.INVITE_WAITING,
-            )
+        # 金灰按钮和邀请文字都没有：非房间画面（点击后加载/过渡）或识别未知，
+        # 原地等待，不做任何状态跳转
         return (
             Action(
                 kind="wait",
                 duration=1.0,
                 verification="immediate",
                 tag="invite_start_ambiguous",
-                reason="开局按钮未识别（可能界面过渡），稍后重试",
+                reason="未见房间标志（过渡中或未知画面），等待下一帧",
             ),
             State.INVITE_START,
         )
@@ -1349,13 +1422,31 @@ class CoopTask(Task):
         observation: Observation,
         window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
-        """领地入口第一步：按导航文字决定点领地、直进弹窗或继续等。
+        """领地入口第一步：先探测挑战页锚点，再按导航文字决定动作。
+
+        挑战按钮区读到本模式锚点文字（合作=「开始挑战」）= 已在挑战页
+        （上次退出落点/被踢落点/手动放置），整段领地→模式选择→选卡导航
+        全部跳过，直接进挑战页后的步骤。注意招募频道页底部同样有「开始
+        挑战」按钮（见 _CHAT_OPEN_ADVANCE_MISSES 注释）：据此误判时后续
+        链照样收敛——点聊天后 CONFIRM_CHAT_OPEN 以页签行为准，招募页页签
+        行可读直接放行，与真挑战页走同一条路径。
 
         读到「领地」=未进领地页，点击 territory_nav；读到「返回」=已在
         领地页（如手动打开过），跳过点击与等待直进模式选择；读不到文字
         不盲点（当前页面可能没有底部导航），等下一帧复识，超过入口等待
         上限保守停止。
         """
+        challenge_text = self._mode.entry.challenge_text if self._mode else None
+        anchor = str(observation.raw_data.get("challenge_text") or "")
+        if challenge_text and challenge_text in anchor:
+            logger.info(
+                "frame=%d 已在挑战页（读到「%s」），跳过领地→模式选择导航",
+                observation.frame_id,
+                challenge_text,
+            )
+            return self._advance_after_challenge_page(
+                f"启动即在挑战页（读到「{challenge_text}」），跳过领地导航"
+            )
         text = str(observation.raw_data.get("territory_nav_text") or "")
         if "返回" in text:
             logger.info(
@@ -1541,6 +1632,46 @@ class CoopTask(Task):
             State.FIND_COOP,
         )
 
+    def _advance_after_challenge_page(self, reason: str) -> tuple[Action, State]:
+        """挑战页确认后的公共去向（到达确认与领地入口探测共用）。
+
+        邀请者（spec 2026-09-21 §6）：导航到合作挑战页即止——【邀请】
+        按钮就在挑战页上，无难度选择、不进招募频道；INVITE_CLICK 从
+        【开始挑战】开始走邀请点击链。推进入口步骤到完成标记，避免
+        observation_mode 继续返回 challenge_page（每帧 OCR）。
+        普通模式：配置了每周弹窗识别（保卫宠物=本周Buff）先关弹窗再进
+        招募，等待 deadline 从进入本步骤起重新起算。
+        """
+        if self._invite_mode:
+            self._recruit_step = _RecruitStep.INVITE_ENTRY_DONE
+            self._invite_step = 0
+            self._invite_wait_since = None
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.3,
+                    verification="immediate",
+                    tag="invite_nav_done",
+                    reason="邀请者已到挑战页，开始邀请点击链",
+                ),
+                State.INVITE_CLICK,
+            )
+        if self._mode is not None and self._mode.entry.weekly_buff_text:
+            self._recruit_step = _RecruitStep.CLOSE_WEEKLY_BUFF
+            self._start_entry_wait()
+        else:
+            self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
+        return (
+            Action(
+                kind="wait",
+                duration=0.0,
+                verification="immediate",
+                tag="challenge_page_confirmed",
+                reason=reason,
+            ),
+            State.FIND_COOP,
+        )
+
     def _action_confirm_challenge_page(
         self,
         observation: Observation,
@@ -1557,40 +1688,8 @@ class CoopTask(Task):
             logger.info(
                 "frame=%d 已到达挑战页（读到「%s」）", observation.frame_id, challenge_text
             )
-            if self._invite_mode:
-                # 邀请者（spec 2026-09-21 §6）：导航到合作挑战页即止——【邀请】
-                # 按钮就在挑战页上，无难度选择、不进招募频道；INVITE_CLICK
-                # 从【开始挑战】开始走邀请点击链。推进入口步骤到完成标记，
-                # 避免 observation_mode 继续返回 challenge_page（每帧 OCR）
-                self._recruit_step = _RecruitStep.INVITE_ENTRY_DONE
-                self._invite_step = 0
-                self._invite_wait_since = None
-                return (
-                    Action(
-                        kind="wait",
-                        duration=0.3,
-                        verification="immediate",
-                        tag="invite_nav_done",
-                        reason="邀请者已到挑战页，开始邀请点击链",
-                    ),
-                    State.INVITE_CLICK,
-                )
-            # 配置了每周弹窗识别（保卫宠物=本周Buff）先关弹窗再进招募；
-            # 等待 deadline 从进入本步骤起重新起算
-            if self._mode is not None and self._mode.entry.weekly_buff_text:
-                self._recruit_step = _RecruitStep.CLOSE_WEEKLY_BUFF
-                self._start_entry_wait()
-            else:
-                self._recruit_step = _RecruitStep.OPEN_CHALLENGE_CHAT
-            return (
-                Action(
-                    kind="wait",
-                    duration=0.0,
-                    verification="immediate",
-                    tag="challenge_page_confirmed",
-                    reason=f"挑战页已确认打开（读到「{challenge_text}」）",
-                ),
-                State.FIND_COOP,
+            return self._advance_after_challenge_page(
+                f"挑战页已确认打开（读到「{challenge_text}」）"
             )
         self._entry_misses += 1
         # 弹窗标题仍可见=选卡点击未生效（弹窗没关、页面没切）：连续多帧
@@ -2310,9 +2409,26 @@ class CoopTask(Task):
         )
 
     def _action_ready(self, observation: Observation) -> tuple[Action, State] | None:
+        # 全屏弹窗（抢合作连点误点的「个人信息」等）开着时点准备会被模态层
+        # 吞掉：2026-09-25 实机，弹窗关了、准备没按上，白白耗尽 5 帧验证
+        # 窗口。先关弹窗（× 消失即验证通过），下一帧再点准备
+        popup = self._flag_match(observation, "close_button_match")
+        if popup is not None:
+            return (
+                Action(
+                    kind="click",
+                    target=popup.position,
+                    duration=0.08,
+                    verification="next_frame",
+                    tag="close_grab_popup",
+                    reason="识别到全屏弹窗关闭按钮，先关闭再点准备",
+                ),
+                State.ENTER_MATCH,
+            )
         match = self._flag_match(observation, "ready_button_match")
         if match is None:
-            return None
+            return self._action_ready_kick_check(observation)
+        self._territory_return_count = 0
         return (
             Action(
                 kind="click",
@@ -2323,6 +2439,52 @@ class CoopTask(Task):
                 reason="识别并点击准备按钮",
             ),
             State.SELECT_OPENING_SKILLS,
+        )
+
+    def _action_ready_kick_check(
+        self, observation: Observation
+    ) -> tuple[Action, State] | None:
+        """准备按钮消失的异常帧：区分被踢回领地页与未知画面。
+
+        2026-09-25 实机：点准备后可被队长请离（toast「你被队长请离了」），
+        落点是领地页而非首页，画面特征=底部导航读「返回」（识别层仅在准备
+        按钮消失的异常帧提供该文字）。连续多帧确认后按本局未开始处理，回
+        FIND_COOP 从领地入口重新走招募——入口读到「返回」会跳过点领地直进
+        模式选择，读到「领地」则正常点（落点万一是首页也能自校正）。读到
+        其他文字（含空）不盲判，返回 None 交由上层保守停止。
+        """
+        text = str(observation.raw_data.get("territory_nav_text") or "")
+        if "返回" not in text:
+            self._territory_return_count = 0
+            return None
+        frames = self._run_config.territory_return_confirm_frames
+        if self._territory_return_count + 1 >= frames:
+            logger.warning(
+                "frame=%d 准备按钮消失且连续 %d 帧读到领地导航「返回」，"
+                "判定本局被踢/房间解散，回到领地入口重新抢合作",
+                observation.frame_id,
+                self._territory_return_count + 1,
+            )
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.0,
+                    verification="immediate",
+                    tag="kick_reentry_territory",
+                    reason="被踢回领地页，本局未开始，重新进入招募",
+                ),
+                State.FIND_COOP,
+            )
+        return (
+            Action(
+                kind="wait",
+                duration=0.5,
+                verification="immediate",
+                tag="territory_return_check",
+                reason="准备按钮消失且读到领地页标志，确认是否被踢"
+                f"（{self._territory_return_count + 1}/{frames}）",
+            ),
+            State.ENTER_MATCH,
         )
 
     # ------------------------------------------------------------------
@@ -2486,6 +2648,63 @@ class CoopTask(Task):
         # 两者都没识别到：对局界面尚未稳定，继续等待；同时解除点击阻塞，
         # 待下一组技能页弹出时再正常尝试选择。
         self._opening_clicks_blocked = False
+        # 邀请者：挑战未生效/被拒时画面回到组队大厅（双态按钮重现）。帮助者
+        # 可能此时才点准备——立即回 INVITE_START 重新开局，不干等开局超时
+        # （实机 2026-09-25：帮助者点了准备，任务却在开局等待里死等）。
+        # 连续 2 帧可见才认定真回大厅：对局内底栏与大厅按钮区域重叠，单帧
+        # 模板误匹配不足以放弃对局
+        if self._invite_mode:
+            ready_back = self._flag_match(observation, "invite_start_ready_match")
+            not_ready_back = self._flag_match(observation, "invite_start_not_ready_match")
+            if ready_back is None and not_ready_back is None:
+                self._invite_back_lobby_streak = 0
+            else:
+                self._match_started_at = None
+                self._opening_wait_count = 0
+                if self._invite_ready_budget_exhausted():
+                    kick = self._invite_kick_action(window_ctx)
+                    if kick is not None:
+                        return kick
+                    return None
+                self._invite_back_lobby_streak += 1
+                if self._invite_back_lobby_streak < self._INVITE_BACK_LOBBY_CONFIRM_FRAMES:
+                    return (
+                        Action(
+                            kind="wait",
+                            duration=0.3,
+                            verification="immediate",
+                            tag="invite_back_lobby_confirm",
+                            reason="疑似回到组队大厅，连续确认"
+                            f"（{self._invite_back_lobby_streak}/"
+                            f"{self._INVITE_BACK_LOBBY_CONFIRM_FRAMES}）",
+                        ),
+                        State.SELECT_OPENING_SKILLS,
+                    )
+                self._invite_back_lobby_streak = 0
+                if ready_back is not None:
+                    return (
+                        Action(
+                            kind="click",
+                            target=ready_back.position,
+                            duration=0.08,
+                            post_delay=1.0,
+                            verification="next_frame",
+                            verify_frames=self._invite.start_verify_frames,
+                            tag="invite_start_game",
+                            reason="挑战未生效回到组队大厅，重新点击开始对局",
+                        ),
+                        State.SELECT_OPENING_SKILLS,
+                    )
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.5,
+                        verification="immediate",
+                        tag="invite_back_to_lobby",
+                        reason="挑战未生效回到组队大厅（帮助者未准备），回开局等待",
+                    ),
+                    State.INVITE_START,
+                )
         # 组队大厅（点完准备、对局未开始）：识别到【退队】且房主超过
         # leave_team_after_seconds 仍未开始，主动退队重新抢合作，不干等
         leave_match = self._flag_match(observation, "leave_team_match")
@@ -4111,6 +4330,7 @@ class CoopTask(Task):
             self._opening_clicks_blocked = False
             self._opening_wait_count = 0
             self._home_return_count = 0
+            self._territory_return_count = 0
             self._main_skill_selections = 0
             self._main_skill_selections_total = 0
             self._skill_refresh_used_count = 0
@@ -4123,6 +4343,16 @@ class CoopTask(Task):
             self._clear_transform_state()
             # 点过准备 = 本会话已完成难度勾选（无论程序选的还是手动选的）
             self._difficulty_done_session = True
+        elif tag == "invite_start_game":
+            # 邀请者挑战已点：与帮助者 ready_match 同样起 match_start_timeout
+            # 兜底。此前 invite 模式从不设置该时间戳，「120s 超时重新招募」
+            # 形同虚设——挑战被拒时在开局等待里无限死等（实机 2026-09-25）
+            self._match_started_at = self._clock()
+            self._opening_loaded = False
+            self._opening_skill_selections = 0
+            self._opening_clicks_blocked = False
+            self._opening_wait_count = 0
+            self._home_return_count = 0
         elif tag == "opening_load_wait":
             self._opening_loaded = True
         elif tag == "opening_interface_wait":
@@ -4145,8 +4375,16 @@ class CoopTask(Task):
             self._opening_exit_empty_count += 1
         elif tag == "home_return_check":
             self._home_return_count += 1
-        elif tag in {"kick_reentry_home", "match_start_timeout"}:
-            # 本局未开始即被取消：清空对局内进度，从首页重新走招募入口
+        elif tag == "territory_return_check":
+            self._territory_return_count += 1
+        elif tag in {
+            "kick_reentry_home",
+            "kick_reentry_territory",
+            "match_start_timeout",
+        }:
+            # 本局未开始即被取消（被踢回首页/被踢回领地页/等待超时）：
+            # 清空对局内进度，从领地入口重新走招募——入口读导航文字自校正，
+            # 「返回」=已在领地页跳过点击，「领地」=在首页正常点
             self._reset_for_home_reentry()
         elif tag == "leave_team":
             # 主动退队：清空对局内进度，先探测落点页面再选招募入口
@@ -4218,11 +4456,7 @@ class CoopTask(Task):
     def on_action_failed(self, action: Action) -> None:
         """动作重试耗尽、Runner 放弃该动作时调整内部进度，均不结束任务。"""
         tag = action.tag
-        if tag == "invite_start_game":
-            # 开始点击未生效（验证 5 帧失败）：撤销确认页阶段标记，
-            # 下一帧重新识别双态按钮再点
-            self._invite_confirm_pending = False
-        elif tag == "skill_refresh":
+        if tag == "skill_refresh":
             # 刷新点击未生效（或换出同三张）：本局机会按已用处理，页面仍开时
             # 下一帧直接按优先级选卡——刷新不可用后必须选一张
             self._skill_refresh_used_count += 1
@@ -4275,10 +4509,12 @@ class CoopTask(Task):
         self._recruit_step = _RecruitStep.OPEN_COOP_CHAT
 
     def _reset_for_home_reentry(self) -> None:
-        """本局未开始即被取消（被踢回首页/等待超时）：清空对局内进度。
+        """本局未开始即被取消（被踢回首页/被踢回领地页/等待超时）：清空对局内进度。
 
-        与结算后重置不同，此时画面在游戏首页，招募入口从领地入口重新开始；
-        难度勾选不重复（_difficulty_done_session 保持已置位）。
+        与结算后重置不同，此时画面不在对局内，招募入口从领地入口重新开始；
+        难度勾选不重复（_difficulty_done_session 保持已置位）。入口第一步
+        读导航文字自校正：「返回」=已在领地页（2026-09-25 实机被踢落点）
+        跳过点击直进模式选择，「领地」=在首页正常点领地。
         """
         self._recruit_step = _RecruitStep.OPEN_TERRITORY
         self._entry_reclicks = 0
@@ -4311,6 +4547,7 @@ class CoopTask(Task):
         self._opening_clicks_blocked = False
         self._opening_wait_count = 0
         self._home_return_count = 0
+        self._territory_return_count = 0
         self._match_started_at = None
         self._next_skill_at = None
         self._awaiting_main_candidates = False

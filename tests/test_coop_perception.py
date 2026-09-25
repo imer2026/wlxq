@@ -519,11 +519,13 @@ _FLAG_LOCATOR_FILES = {
     "summon_button": "zhao_huan.png",
     "skill_refresh_button": "shua_xin.png",
     "close_button": "x.png",
+    "invite_start_ready": "tiao_zhan_dui_you_zhun_bei.png",
+    "invite_start_not_ready": "tiao_zhan_dui_you_wei_zhun_bei.png",
 }
 
 
 def _flag_gated_perception(
-    tmp_path, vision, *, skill_refresh_enabled: bool = False
+    tmp_path, vision, *, skill_refresh_enabled: bool = False, role=CoopRole.HELPER
 ) -> CoopPerception:
     from wlxq_bot.assets import TemplatePack
 
@@ -542,7 +544,7 @@ def _flag_gated_perception(
         vision,
         TemplatePack(client_size=(3000, 2000), root=pack_root),
         tasks_cfg,
-        CoopRole.HELPER,
+        role,
         "assault",
         skill_refresh_enabled=skill_refresh_enabled,
     )
@@ -1487,6 +1489,21 @@ class TestTerritoryEntryDetection:
         perception._detect_territory_nav_text(_make_window_ctx(), _frame(), raw)
         assert raw["territory_nav_text"] == ""
 
+    def test_territory_nav_probe_reads_nav_and_challenge(self, tmp_path):
+        """领地入口探测观察分支（2026-09-25）：导航文字与挑战按钮区同帧
+        读，任务层据锚点文字判定已在挑战页、跳过领地导航。"""
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("开始挑战", 0.798, (30, 40))])
+        )
+        observation = perception.observe(
+            _make_window_ctx(),
+            _frame(),
+            observation_mode="territory_nav_probe",
+        )
+        # 假 reader 对任何识别区返回同一行：两个区域都各自写出文字
+        assert observation.raw_data["territory_nav_text"] == "开始挑战"
+        assert observation.raw_data["challenge_text"] == "开始挑战"
+
     def test_mode_select_title_uses_substring_match(self, tmp_path):
         """标题装饰星星读作「模式选择·」也应命中：必须子串匹配而非全等。"""
         perception = _build_entry_perception(
@@ -1671,3 +1688,41 @@ class TestModalFrameDetection:
         perception = _flag_gated_perception(tmp_path, _RecordingVision())
         assert perception.is_modal_frame(None, 45.0) is False
         assert perception.is_modal_frame("not-a-frame", 45.0) is False
+
+
+class TestInitiatorInviteButtonFlags:
+    """邀请者在开局等待态识别组队大厅双态按钮（挑战被拒回大厅的自愈依据）。
+
+    帮助者流程无此按钮，不识别（避免对局内底栏误匹配白白消耗模板匹配）。
+    """
+
+    def test_initiator_opening_state_matches_invite_buttons(self, tmp_path):
+        from wlxq_bot.models import State
+
+        vision = _RecordingVision()
+        perception = _flag_gated_perception(tmp_path, vision, role=CoopRole.INITIATOR)
+
+        raw: dict = {}
+        perception._detect_interface_flags(
+            _make_window_ctx(), None, State.SELECT_OPENING_SKILLS, raw, []
+        )
+
+        assert "tiao_zhan_dui_you_zhun_bei.png" in vision.template_calls
+        assert "tiao_zhan_dui_you_wei_zhun_bei.png" in vision.template_calls
+        assert raw["invite_start_ready_visible"] is False
+        assert raw["invite_start_not_ready_visible"] is False
+
+    def test_helper_opening_state_skips_invite_buttons(self, tmp_path):
+        from wlxq_bot.models import State
+
+        vision = _RecordingVision()
+        perception = _flag_gated_perception(tmp_path, vision, role=CoopRole.HELPER)
+
+        raw: dict = {}
+        perception._detect_interface_flags(
+            _make_window_ctx(), None, State.SELECT_OPENING_SKILLS, raw, []
+        )
+
+        assert "tiao_zhan_dui_you_zhun_bei.png" not in vision.template_calls
+        assert "tiao_zhan_dui_you_wei_zhun_bei.png" not in vision.template_calls
+        assert "invite_start_ready_visible" not in raw

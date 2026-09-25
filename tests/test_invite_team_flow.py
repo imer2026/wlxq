@@ -20,7 +20,6 @@ _INVITE_HOTSPOTS = {
     "invite_kick": Hotspot(x_ratio=0.70, y_ratio=0.78),
     "invite_close_fallback": Hotspot(x_ratio=0.91, y_ratio=0.14),
     "invite_popup_close": Hotspot(x_ratio=0.91, y_ratio=0.14),
-    "invite_stage_challenge": Hotspot(x_ratio=0.50, y_ratio=0.91),
     "opening_ready_done": Hotspot(x_ratio=0.68, y_ratio=0.30),
 }
 
@@ -150,7 +149,8 @@ class TestInviteWaiting:
         task = _make_invite_task()
         task.ctx.current_state = State.INVITE_WAITING
         task._invite_wait_since = 0.0
-        obs = _observation({"invite_text_visible": False})
+        # 房间屏锚点（灰按钮可见）必须在场，进房判定才合法
+        obs = _observation({"invite_text_visible": False, "invite_start_not_ready_visible": True})
         # × 未识别到（无残留弹窗）：不盲点，直接打开帮助者信息层
         action, to_state = task.decide_action(obs, _window_ctx())
         assert action.tag == "invite_open_helper_info"
@@ -162,12 +162,31 @@ class TestInviteWaiting:
         task2._invite_wait_since = 0.0
         close = MatchResult(position=(840, 248), confidence=0.9,
                             template_name="x", roi_name="close_button_area")
-        obs2 = _observation({"invite_text_visible": False, "close_button_match": close})
+        obs2 = _observation({
+            "invite_text_visible": False,
+            "invite_start_not_ready_visible": True,
+            "close_button_match": close,
+        })
         action2, _ = task2.decide_action(obs2, _window_ctx())
         assert action2.tag == "invite_dismiss_residue"
         assert task2._invite_dismiss_checked is True
         action3, _ = task2.decide_action(obs2, _window_ctx())
         assert action3.tag == "invite_open_helper_info"
+
+    def test_non_room_frame_freezes_judgment(self) -> None:
+        """非房间画面（金/灰按钮都不在，如加载页/对局内）：冻结进房判定。
+
+        2026-09-26 实机回归：误入对局后每帧判「有人进房」，对局画面盲点
+        邀请位直到进度读取计数耗尽保守停止。
+        """
+        task = _make_invite_task()
+        task.ctx.current_state = State.INVITE_WAITING
+        task._invite_wait_since = 0.0
+        obs = _observation({"invite_text_visible": False})
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_waiting_not_room"
+        assert to_state == State.INVITE_WAITING
+        assert task._invite_helper_opened is False  # 未点邀请位开层
 
 
 class TestHelperInfoFlow:
@@ -253,34 +272,172 @@ class TestHelperInfoFlow:
 
 
 class TestInviteStartConfirm:
-    def test_start_then_confirm_challenge(self) -> None:
-        """两段式开局：点已准备（停留等待）→ 下一点确认页【挑战】→ 选技能。"""
-        task = _make_invite_task()
-        task.ctx.current_state = State.INVITE_START
-        ready = MatchResult(position=(500, 1500), confidence=0.95,
-                            template_name="zhun_bei", roi_name="invite_start_button_area")
-        obs = _observation({"invite_start_ready_match": ready})
-        action, to_state = task.decide_action(obs, _window_ctx())
-        assert action.tag == "invite_start_game"
-        assert to_state == State.INVITE_START
-        assert task._invite_confirm_pending is True
-        action2, to_state2 = task.decide_action(
-            _observation({"invite_text_visible": False}), _window_ctx()
-        )
-        assert action2.tag == "invite_confirm_challenge"
-        assert to_state2 == State.SELECT_OPENING_SKILLS
-        assert task._invite_confirm_pending is False
+    """单段式开局（2026-09-26）：组队房间只有一张屏，金色挑战=可开局，
+    点击直下 SELECT_OPENING_SKILLS，无"确认页第二击"。"""
 
-    def test_start_failed_resets_confirm_flag(self) -> None:
-        """开始点击验证失败：on_action_failed 撤销确认页标记，可重新点击。"""
+    @staticmethod
+    def _ready_obs() -> dict:
+        return {
+            "invite_start_ready_match": MatchResult(
+                position=(500, 1500),
+                confidence=0.95,
+                template_name="zhun_bei",
+                roi_name="invite_start_button_area",
+            ),
+        }
+
+    def test_start_click_goes_straight_to_opening(self) -> None:
+        """金色挑战：点击开局，目标态直接是 SELECT_OPENING_SKILLS。"""
+        invite = InviteConfig(start_verify_frames=12)
+        task = _make_invite_task(invite=invite)
+        task.ctx.current_state = State.INVITE_START
+        action, to_state = task.decide_action(
+            _observation(self._ready_obs()), _window_ctx()
+        )
+        assert action.tag == "invite_start_game"
+        assert to_state == State.SELECT_OPENING_SKILLS
+        # 慢过渡验证预算：游戏点击到切屏实测 ~2.4s，全局 5 帧不够
+        assert action.verify_frames == 12
+
+    def test_empty_slot_means_helper_left(self) -> None:
+        """邀请文字重现（槽位回空）= 帮助者退出，回 INVITE_WAITING 重过滤。"""
         task = _make_invite_task()
         task.ctx.current_state = State.INVITE_START
-        ready = MatchResult(position=(500, 1500), confidence=0.95,
-                            template_name="zhun_bei", roi_name="invite_start_button_area")
-        obs = _observation({"invite_start_ready_match": ready})
-        task.decide_action(obs, _window_ctx())
-        assert task._invite_confirm_pending is True
+        obs = _observation({"invite_text_visible": True})
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_helper_left"
+        assert to_state == State.INVITE_WAITING
+
+    def test_unknown_frame_waits_without_transition(self) -> None:
+        """金灰按钮和邀请文字都没有（加载页/未知过渡）：原地等待不跳状态。
+
+        2026-09-26 实机回归：黑屏加载页被按"邀请文字缺失默认可见"判成
+        帮助者退出，整个邀请流程脱轨。
+        """
+        task = _make_invite_task()
+        task.ctx.current_state = State.INVITE_START
+        action, to_state = task.decide_action(_observation(), _window_ctx())
+        assert action.tag == "invite_start_ambiguous"
+        assert to_state == State.INVITE_START
+
+    def test_start_failure_allows_retry(self) -> None:
+        """开始点击验证失败：无内部标记需要撤销，金色仍在即可重新点击。"""
         from wlxq_bot.models import Action
 
+        task = _make_invite_task()
+        task.ctx.current_state = State.INVITE_START
         task.on_action_failed(Action(kind="click", target=(0, 0), tag="invite_start_game"))
-        assert task._invite_confirm_pending is False
+        action, to_state = task.decide_action(
+            _observation(self._ready_obs()), _window_ctx()
+        )
+        assert action.tag == "invite_start_game"
+        assert to_state == State.SELECT_OPENING_SKILLS
+
+class TestInviteOpeningEscape:
+    """挑战未生效/被拒回到组队大厅的自愈闭环（实机 2026-09-25 死等开局修复）。
+
+    实机证据：帮助者进房后橙色【挑战】模板立即命中（与是否准备无关），
+    点开始→确认页→挑战 可能被游戏拒绝（帮助者未准备），画面回到组队大厅；
+    原实现滞留在 SELECT_OPENING_SKILLS 死等开局，帮助者后来点了准备也无人
+    再点开始。
+    """
+
+    def _opening_task(self, invite: InviteConfig | None = None, clock=None) -> CoopTask:
+        task = _make_invite_task(invite=invite, clock=clock)
+        task.ctx.current_state = State.SELECT_OPENING_SKILLS
+        task._opening_loaded = True  # 跳过 3s 载入等待门，直达开局识别循环
+        return task
+
+    @staticmethod
+    def _ready_obs() -> dict:
+        return {
+            "invite_start_ready_visible": True,
+            "invite_start_ready_match": MatchResult(
+                position=(500, 1500),
+                confidence=0.95,
+                template_name="zhun_bei",
+                roi_name="invite_start_button_area",
+            ),
+        }
+
+    def test_back_at_lobby_reconfirms_then_reclicks_start(self) -> None:
+        """回大厅（按钮可见）连续 2 帧确认 → 重新点开始，直下选技能态。"""
+        task = self._opening_task()
+        obs = _observation(self._ready_obs())
+        first, to1 = task.decide_action(obs, _window_ctx())
+        assert first.tag == "invite_back_lobby_confirm"
+        assert to1 == State.SELECT_OPENING_SKILLS
+        second, to2 = task.decide_action(obs, _window_ctx())
+        assert second.tag == "invite_start_game"
+        assert to2 == State.SELECT_OPENING_SKILLS
+        assert task._match_started_at is None
+
+    def test_single_frame_hit_keeps_waiting(self) -> None:
+        """单帧误匹配不放弃对局：继续开局等待，不迁移状态。"""
+        task = self._opening_task()
+        action, to_state = task.decide_action(_observation(self._ready_obs()), _window_ctx())
+        assert to_state == State.SELECT_OPENING_SKILLS
+        assert action.tag == "invite_back_lobby_confirm"
+        action2, to_state2 = task.decide_action(_observation(), _window_ctx())
+        assert to_state2 == State.SELECT_OPENING_SKILLS
+        assert action2.tag == "opening_interface_wait"
+
+    def test_budget_exhausted_kicks_helper(self) -> None:
+        """合格后 ready_timeout_seconds 仍开不了局 → 请离重邀，不再无限重试。"""
+        clock = _FakeClock()
+        invite = InviteConfig(ready_timeout_seconds=60.0)
+        task = self._opening_task(invite=invite, clock=clock)
+        task._invite_wait_since = 0.0
+        clock.now = 61.0
+        obs = _observation(self._ready_obs())
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_kick_helper"
+        assert to_state == State.INVITE_COOLDOWN
+        assert task._invite_kick_count == 1
+
+    def test_zero_timeout_never_kicks(self) -> None:
+        """ready_timeout_seconds=0：一直等，预算永不耗尽。"""
+        clock = _FakeClock()
+        invite = InviteConfig(ready_timeout_seconds=0)
+        task = self._opening_task(invite=invite, clock=clock)
+        task._invite_wait_since = 0.0
+        clock.now = 99999.0
+        obs = _observation(self._ready_obs())
+        task.decide_action(obs, _window_ctx())
+        action, to_state = task.decide_action(obs, _window_ctx())
+        assert action.tag == "invite_start_game"
+        assert to_state == State.SELECT_OPENING_SKILLS
+
+    def test_kick_limit_reached_stops_conservatively(self) -> None:
+        """连续请离达上限：决策返回 None 保守停止。"""
+        clock = _FakeClock()
+        invite = InviteConfig(ready_timeout_seconds=60.0)
+        task = self._opening_task(invite=invite, clock=clock)
+        task._invite_wait_since = 0.0
+        task._invite_kick_count = invite.max_consecutive_kicks
+        clock.now = 61.0
+        assert task.decide_action(_observation(self._ready_obs()), _window_ctx()) is None
+
+    def test_invite_start_budget_kicks_before_clicking_start(self) -> None:
+        """INVITE_START 态预算耗尽：不再反复点开始，直接请离。"""
+        clock = _FakeClock()
+        invite = InviteConfig(ready_timeout_seconds=60.0)
+        task = _make_invite_task(invite=invite, clock=clock)
+        task.ctx.current_state = State.INVITE_START
+        task._invite_wait_since = 0.0
+        clock.now = 61.0
+        action, to_state = task.decide_action(_observation(self._ready_obs()), _window_ctx())
+        assert action.tag == "invite_kick_helper"
+        assert to_state == State.INVITE_COOLDOWN
+
+    def test_start_click_verifies_match_timeout_backstop(self) -> None:
+        """开始点击验证通过 → 起 match_start_timeout 兜底（invite 模式此前无兜底死等）。"""
+        from wlxq_bot.models import Action
+
+        task = _make_invite_task()
+        assert task._match_started_at is None
+        task.on_action_verified(
+            Action(kind="click", target=(0, 0), tag="invite_start_game"),
+            State.SELECT_OPENING_SKILLS,
+        )
+        assert task._match_started_at is not None

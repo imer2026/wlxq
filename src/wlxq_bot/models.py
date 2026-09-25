@@ -606,6 +606,9 @@ class Action:
             按钮（选技能/召唤）点击后指针悬停在按钮上会触发游戏高亮效果，
             稀释下一帧费用区域的红/白颜色判定（2026-09-10 实机：连续多次
             红色被误判为白色）
+        verify_frames: next_frame 验证的帧数预算覆盖；None 用全局
+            run.action_verify_frames。目标画面切换慢于全局预算的动作
+            （如邀请者点开局后游戏需 ~2.5s 才切屏）在此放宽
     """
 
     kind: str
@@ -619,6 +622,7 @@ class Action:
     reason: str = ""
     save_frame_before: bool = False
     hover_park: tuple[int, int] | None = None
+    verify_frames: int | None = None
 
 
 @dataclass(frozen=True)

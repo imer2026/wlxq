@@ -234,18 +234,29 @@ def default_entry_mode_profile() -> ModeProfile:
 def territory_entry_observations(frame_id: int = 1) -> list[Observation]:
     """领地入口链的逐帧观察（6 帧各推进一步）：领地点击→返回确认→进入
     按钮点击→弹窗标题确认→选卡点击→挑战页确认。除导航文字逐帧变化外，
-    其余识别数据每帧都在（各步骤只读取自己需要的那一份）。"""
+    其余识别数据每帧都在（各步骤只读取自己需要的那一份）。挑战页锚点
+    （challenge_text）只在挑战页确认帧存在——与实机一致：感知层仅在
+    challenge_page 观察模式读挑战按钮区，入口前几帧读不到（领地入口
+    探测消费该文字，前几帧携带会被误判为已在挑战页）。"""
     base = {
         "mode_select_visible": True,
         "mode_card_rows": [ModeTabRow("合作模式", 0.9, (250, 1174))],
-        "challenge_text": "开始挑战",
     }
 
-    def obs(index: int, nav: str) -> Observation:
+    def obs(index: int, nav: str, challenge_text: str | None = None) -> Observation:
         raw = {**base, "territory_nav_text": nav} if nav else dict(base)
+        if challenge_text is not None:
+            raw["challenge_text"] = challenge_text
         return Observation(frame_id=frame_id + index, raw_data=raw)
 
-    return [obs(0, "领地"), obs(1, "返回"), obs(2, ""), obs(3, ""), obs(4, ""), obs(5, "")]
+    return [
+        obs(0, "领地"),
+        obs(1, "返回"),
+        obs(2, ""),
+        obs(3, ""),
+        obs(4, ""),
+        obs(5, "", challenge_text="开始挑战"),
+    ]
 
 
 def advance_territory_entry_to_recruit(task: CoopTask, frame_id: int = 1) -> None:
@@ -539,8 +550,11 @@ class TestFindCoopAction:
         assert join_decision[0].kind == "grab_coop"
 
     def test_initial_recruit_requests_territory_nav_observation(self):
-        """领地入口第一步不做首页校验：直接 OCR 底部导航领地格。"""
+        """领地入口第一步不做首页校验：OCR 底部导航领地格 + 挑战页锚点
+        （探测是否已在挑战页）；打开确认步骤只读导航文字。"""
         task = make_task()
+        assert task.observation_mode() == "territory_nav_probe"
+        task._recruit_step = _RecruitStep.CONFIRM_TERRITORY_OPEN
         assert task.observation_mode() == "territory_nav"
 
     def test_join_step_emits_grab_coop_signal(self):
@@ -992,6 +1006,143 @@ class TestOtherStates:
         assert resumed is not None
         assert task._home_return_count == 0
         assert resumed[0].tag == "opening_exit_confirm_check"
+
+    def test_kick_back_to_territory_restarts_recruit(self):
+        """组队大厅被踢回领地页（2026-09-25 实机）：准备按钮消失且导航连续
+        读到「返回」→ 按本局未开始处理，从领地入口重新抢合作。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        frames = task._run_config.territory_return_confirm_frames
+        for frame_id in range(1, frames):
+            decision = task.decide_action(
+                Observation(
+                    frame_id=frame_id, raw_data={"territory_nav_text": "返回"}
+                ),
+                make_window_ctx(),
+            )
+            assert decision is not None
+            assert decision[0].tag == "territory_return_check"
+            assert decision[1] == State.ENTER_MATCH
+            task.on_action_verified(*decision)
+
+        decision = task.decide_action(
+            Observation(frame_id=frames, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "kick_reentry_territory"
+        assert decision[1] == State.FIND_COOP
+        task.on_action_verified(*decision)
+        task.ctx.current_state = State.FIND_COOP
+
+        # 已在领地页（导航读「返回」）：入口跳过点领地直接进模式选择
+        follow_up = task.decide_action(
+            Observation(
+                frame_id=frames + 1, raw_data={"territory_nav_text": "返回"}
+            ),
+            make_window_ctx(),
+        )
+        assert follow_up is not None
+        assert follow_up[0].tag == "territory_open_confirmed"
+
+    def test_kick_reentry_recovers_when_landed_on_home(self):
+        """被踢落点若是首页（导航读「领地」）：同一条恢复链自校正为点领地。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        task._territory_return_count = (
+            task._run_config.territory_return_confirm_frames - 1
+        )
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "kick_reentry_territory"
+        task.on_action_verified(*decision)
+        task.ctx.current_state = State.FIND_COOP
+
+        follow_up = task.decide_action(
+            Observation(frame_id=2, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert follow_up is not None
+        assert follow_up[0].tag == "open_territory"
+
+    def test_single_territory_frame_flash_does_not_reenter(self):
+        """单帧读到「返回」（OCR 误读）不触发重进：准备按钮恢复即计数归零。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "territory_return_check"
+        task.on_action_verified(*decision)
+
+        resumed = task.decide_action(
+            Observation(
+                frame_id=2,
+                raw_data={
+                    "ready_button_visible": True,
+                    "ready_button_match": MatchResult(
+                        "buttons/zhun_bei.png", (499, 1633), 0.9
+                    ),
+                },
+            ),
+            make_window_ctx(),
+        )
+        assert resumed is not None
+        assert resumed[0].tag == "ready_match"
+        assert task._territory_return_count == 0
+
+    def test_ready_screen_without_nav_text_stops_conservatively(self):
+        """准备按钮消失且导航读不到文字（未知画面）：不盲判，保守停止。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        assert task.decide_action(Observation(frame_id=1), make_window_ctx()) is None
+
+    def test_ready_click_defers_to_stray_popup_close(self):
+        """组队大厅弹窗开着时点准备被模态层吞掉（2026-09-25 实机）：
+        先关弹窗（× 消失即验证），下一帧再点准备。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        popup = Observation(
+            frame_id=1,
+            raw_data={
+                "close_button_visible": True,
+                "close_button_match": MatchResult("buttons/x.png", (838, 251), 0.95),
+                "ready_button_visible": True,
+                "ready_button_match": MatchResult(
+                    "buttons/zhun_bei.png", (499, 1633), 0.87
+                ),
+            },
+        )
+        decision = task.decide_action(popup, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "close_grab_popup"
+        assert decision[1] == State.ENTER_MATCH
+        task.on_action_verified(*decision)
+
+        clean = Observation(
+            frame_id=2,
+            raw_data={
+                "ready_button_visible": True,
+                "ready_button_match": MatchResult(
+                    "buttons/zhun_bei.png", (499, 1633), 0.87
+                ),
+            },
+        )
+        decision = task.decide_action(clean, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "ready_match"
+        assert decision[1] == State.SELECT_OPENING_SKILLS
+
+    def test_enter_match_declares_grab_observation_mode(self):
+        """组队大厅显式声明 coop_grab 观察模式：不依赖入口子步骤残留值。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        assert task.observation_mode() == "coop_grab"
 
     def test_match_start_timeout_restarts_recruit(self):
         """点准备后长时间无对局界面：按本局未开始处理，重新进入招募。"""
@@ -3288,6 +3439,96 @@ class TestTerritoryEntry:
         assert decision is not None
         assert decision[0].tag == "territory_nav_pending"
         assert decision[0].kind == "wait"
+
+    def test_entry_probe_jumps_to_chat_when_already_on_challenge_page(self):
+        """领地入口探测（2026-09-25）：启动即停在挑战页（读到「开始挑战」）
+        时，整段领地→模式选择→选卡导航全部跳过，直接点聊天进招募。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "challenge_page_confirmed"
+        assert to_state == State.FIND_COOP
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
+        # 跳过后与正常到达挑战页同链：聊天 → 生效确认
+        chat = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert chat is not None and chat[0].tag == "open_challenge_chat"
+
+    def test_entry_probe_without_anchor_keeps_territory_flow(self):
+        """锚点读空（不在挑战页）：按导航文字正常走领地入口。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(
+                frame_id=1,
+                raw_data={"challenge_text": "", "territory_nav_text": "领地"},
+            ),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "open_territory"
+
+    def test_entry_probe_weekly_buff_profile_closes_buff_first(self):
+        """配置每周弹窗的模式（保卫宠物）：探测命中先进关弹窗步骤。"""
+        task = make_task(
+            mode_profile=make_mode_profile(
+                challenge_text="挑战", weekly_buff_text="知道"
+            )
+        )
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "challenge_page_confirmed"
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.CLOSE_WEEKLY_BUFF
+
+    def test_entry_probe_invite_mode_enters_click_chain(self):
+        """邀请者启动即停在挑战页：跳过领地导航直接进邀请点击链。"""
+        task = make_task()
+        task._invite_mode = True
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "invite_nav_done"
+        assert decision[1] == State.INVITE_CLICK
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.INVITE_ENTRY_DONE
+        assert task._invite_step == 0
+
+    def test_kick_reentry_on_challenge_page_skips_navigation(self):
+        """被踢/等待超时重入时游戏停在挑战页：领地入口探测直接进招募。"""
+        task = make_task()
+        task.ctx.current_state = State.ENTER_MATCH
+        task._territory_return_count = (
+            task._run_config.territory_return_confirm_frames - 1
+        )
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
+        assert decision is not None and decision[0].tag == "kick_reentry_territory"
+        task.on_action_verified(*decision)
+        task.ctx.current_state = State.FIND_COOP
+        probe = task.decide_action(
+            Observation(
+                frame_id=2,
+                raw_data={"challenge_text": "开始挑战", "territory_nav_text": ""},
+            ),
+            make_window_ctx(),
+        )
+        assert probe is not None and probe[0].tag == "challenge_page_confirmed"
+        task.on_action_verified(*probe)
+        assert task._recruit_step == _RecruitStep.OPEN_CHALLENGE_CHAT
 
     def test_territory_confirm_waits_for_fanhui_then_advances(self):
         task = make_task()

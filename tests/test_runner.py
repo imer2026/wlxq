@@ -102,9 +102,18 @@ class FakeScreen:
 
 
 class FakePerception:
-    """假识别管线，返回预设 Observation。"""
+    """假识别管线，返回预设 Observation。
 
-    def __init__(self, observation: Observation, preserve_frame_id: bool = False) -> None:
+    ``observation`` 传列表时按调用次序逐帧返回（超出后停在最后一帧）——
+    用于入口链这类「不同步骤读不同识别数据」的场景：挑战页锚点只在
+    challenge_page 观察帧出现，入口首帧携带会被领地入口探测误判。
+    """
+
+    def __init__(
+        self,
+        observation: Observation | list[Observation],
+        preserve_frame_id: bool = False,
+    ) -> None:
         self._obs = observation
         self._preserve_frame_id = preserve_frame_id
         self.observe_count = 0
@@ -124,9 +133,12 @@ class FakePerception:
         self.observation_modes.append(observation_mode)
         self.light_flags: list[bool] = getattr(self, "light_flags", [])
         self.light_flags.append(light)
+        obs = self._obs
+        if isinstance(obs, list):
+            obs = obs[min(self.observe_count - 1, len(obs) - 1)]
         if self._preserve_frame_id:
-            return self._obs
-        return replace(self._obs, frame_id=ctx.frame_id)
+            return obs
+        return replace(obs, frame_id=ctx.frame_id)
 
     def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
         """培养阶段多帧累积的 fake：直接返回预设 observation。"""
@@ -367,6 +379,95 @@ def test_run_rejects_invalid_max_rounds() -> None:
         runner.run("coop", max_rounds=0)
 
 
+def test_run_passes_invite_config_to_coop_task(monkeypatch) -> None:
+    """回归：run(invite=True) 必须把 default_config.invite 传进 CoopTask。
+
+    曾漏传 invite_config，任务构造时落到 InviteConfig() 代码默认值
+    （min_stage_progress=475），default.yaml 的 invite 段整段不生效——
+    改配置里的门槛值怎么改都不起作用。
+    """
+    from types import SimpleNamespace
+
+    from wlxq_bot.config import (
+        InviteConfig,
+        MatchProfile,
+        RunConfig,
+        SettlementProfile,
+        VisionConfig,
+    )
+
+    config = DefaultConfig(
+        run=RunConfig(settlement_screenshot=False),
+        vision=VisionConfig(debug=False),
+        main_c_profiles={
+            "assault": MainCProfile(
+                display_name="强袭",
+                hero_template_dir="heroes/assault",
+                hero_classifier_model="outputs/assault.onnx",
+                skill_icon_templates=[],
+                skill_priority={1: ["天穹支援"]},
+            )
+        },
+        mode_profiles={
+            "coop": ModeProfile(
+                display_name="合作模式",
+                mode_chat_hotspot="coop_chat",
+                match=MatchProfile(ready_button="ready_button", leave_team="coop_leave_team"),
+                settlement=SettlementProfile(return_button="return_button"),
+            )
+        },
+        invite=InviteConfig(min_stage_progress=375),
+    )
+    runner = Runner(config, TasksConfig(), None)
+
+    captured: dict = {}
+
+    class SpyCoopTask(CoopTask):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    fake_screen = SimpleNamespace(
+        find_window=lambda _title: 1,
+        validate_context=lambda _ctx: True,
+    )
+    fake_perception = SimpleNamespace(
+        available_heroes={"assault", "angel", "snow", "death_knight", "angel_phantom"}
+    )
+    monkeypatch.setattr("wlxq_bot.runner.CoopTask", SpyCoopTask)
+    monkeypatch.setattr("wlxq_bot.runner.ScreenCapture", lambda: fake_screen)
+    monkeypatch.setattr("wlxq_bot.runner.Vision", SimpleNamespace)
+    monkeypatch.setattr("wlxq_bot.runner.CoopPerception", lambda *a, **k: fake_perception)
+    monkeypatch.setattr("wlxq_bot.runner.activate_window", lambda _handle: True)
+    monkeypatch.setattr("wlxq_bot.runner.time.sleep", lambda _s: None)
+    # Runner 自有构建/检查方法全部打桩：本测试只验证 CoopTask 的参数接线
+    for name, ret in (
+        ("_ensure_window_size", None),
+        ("_load_template_pack", SimpleNamespace()),
+        ("_load_hero_cell_classifier", None),
+        ("_build_skill_collector", None),
+        ("_build_gold_reader", (None, 0.5, False)),
+    ):
+        monkeypatch.setattr(runner, name, lambda *a, _ret=ret, **k: _ret)
+    monkeypatch.setattr(runner, "_build_skill_priority", lambda _mc: (None, None, None))
+    for name in (
+        "_check_skill_templates",
+        "_check_home_page_template",
+        "_check_difficulty_templates",
+        "_check_mode_assets",
+    ):
+        monkeypatch.setattr(runner, name, lambda *a, **k: None)
+    monkeypatch.setattr(SafetyGuard, "start_esc_listener", lambda self: True)
+    monkeypatch.setattr(runner, "_run_loop", lambda *a, **k: State.COMPLETED)
+
+    final = runner.run("coop", invite=True)
+
+    assert final == State.COMPLETED
+    assert captured["invite_mode"] is True
+    assert captured["invite_config"] is config.invite
+    assert captured["invite_config"].min_stage_progress == 375
+
+
 def test_normal_run_requires_skill_icon_templates() -> None:
     from wlxq_bot.config import MainCProfile
 
@@ -573,17 +674,24 @@ class TestLoopStopConditions:
             ),
         )
         # 一帧推进一步的领地入口链：导航直接读「返回」跳过点领地。档案未
-        # 配置页签文字：聊天生效确认步骤 1 帧跳过（无专项 OCR）
+        # 配置页签文字：聊天生效确认步骤 1 帧跳过（无专项 OCR）。
+        # 首帧只有导航文字（实机：入口探测帧不读挑战锚点区），弹窗/挑战
+        # 锚点数据从弹窗确认帧起才在
         perception = FakePerception(
-            Observation(
-                frame_id=1,
-                raw_data={
-                    "territory_nav_text": "返回",
-                    "mode_select_visible": True,
-                    "mode_card_rows": [ModeTabRow("合作模式", 0.9, (100, 200))],
-                    "challenge_text": "开始挑战",
-                },
-            )
+            [
+                Observation(
+                    frame_id=1,
+                    raw_data={"territory_nav_text": "返回"},
+                ),
+                Observation(
+                    frame_id=2,
+                    raw_data={
+                        "mode_select_visible": True,
+                        "mode_card_rows": [ModeTabRow("合作模式", 0.9, (100, 200))],
+                        "challenge_text": "开始挑战",
+                    },
+                ),
+            ]
         )
 
         make_runner()._run_loop(
@@ -598,10 +706,11 @@ class TestLoopStopConditions:
 
         # 打开难度弹窗后先进入打开确认步骤：只用标题图轻量识别（difficulty_dialog），
         # 候选识别（coop_difficulty）要到确认打开后的勾选步骤才启用；
-        # 领地入口各步只 OCR 对应小区域（territory_nav/mode_select/challenge_page）；
+        # 领地入口首帧同帧读导航 + 挑战锚点（territory_nav_probe），打开
+        # 确认帧只读导航（territory_nav）；弹窗两步读 mode_select；
         # 聊天生效确认（档案未配置页签文字）与页签步骤一样无专项 OCR
         assert perception.observation_modes == [
-            "territory_nav",
+            "territory_nav_probe",
             "mode_select",
             "mode_select",
             "mode_select",
@@ -2777,3 +2886,151 @@ class TestPopupPreEmptsVerification:
         # 关弹窗自身的验证走满帧预算、按重试预算重新点击（未被预占跳过）
         assert task.verify_calls >= 5
         assert "close_popup 动作后验证失败，重新点击关闭" in messages
+
+
+def test_generic_verification_failure_notifies_task_on_action_failed() -> None:
+    """回归：验证耗尽走通用恢复路径时必须通知任务（on_action_failed）。
+
+    invite_start_game 曾因此不撤销「确认页阶段」标记，下一帧按标定坐标
+    盲点确认页并推进状态——任务写好的自愈逻辑成了死代码。
+    """
+    from wlxq_bot.models import Action
+    from wlxq_bot.tasks.base import TaskContext
+
+    failed_tags: list[str] = []
+
+    class _FailingStartTask:
+        def __init__(self) -> None:
+            self.ctx = TaskContext(main_c="assault", max_rounds=1)
+            self.ctx.current_state = State.BUILD_MAIN_C
+            self.fail_count = 0
+
+        def wants_board_watch(self) -> bool:
+            return False
+
+        def wants_gold_read(self) -> bool:
+            return False
+
+        def observation_mode(self):
+            return None
+
+        def in_match_states(self) -> bool:
+            return True
+
+        def determine_state(self, observation):
+            return self.ctx.current_state
+
+        def decide_action(self, observation, window_ctx):
+            if failed_tags:
+                self.ctx.current_state = State.COMPLETED
+                return (
+                    Action(kind="wait", duration=0.0, verification="immediate",
+                           tag="done", reason="已收到失败通知，结束"),
+                    State.COMPLETED,
+                )
+            return (
+                Action(kind="click", target=(1, 1), duration=0.08,
+                       verification="next_frame", tag="invite_start_game", reason="测试"),
+                State.BUILD_MAIN_C,
+            )
+
+        def verify_action(self, action, before, after) -> bool:
+            return False
+
+        def on_action_verified(self, action, to_state) -> None:
+            pass
+
+        def on_action_failed(self, action) -> None:
+            self.fail_count += 1
+            failed_tags.append(action.tag)
+
+    task = _FailingStartTask()
+    final = make_runner()._run_loop(
+        FakeScreen(make_window_ctx()),
+        FakePerception(Observation(frame_id=1)),
+        FakeExecutor(verified=False),
+        task,
+        SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+        1,
+        max_steps=10,
+    )
+
+    assert failed_tags == ["invite_start_game"]
+    assert task.fail_count == 1
+    assert final == State.COMPLETED
+
+
+def test_action_level_verify_frames_override_global_budget() -> None:
+    """回归（2026-09-26）：动作级 verify_frames 覆盖全局验证帧预算。
+
+    邀请者点开局后游戏 ~2.4s 才切屏，全局 5 帧（~1.5s）会误判点击失败；
+    invite_start_game 携带更宽的动作级预算，验证耗尽应按它而非全局值。
+    """
+    from wlxq_bot.config import RunConfig, DefaultConfig
+    from wlxq_bot.models import Action, Observation
+    from wlxq_bot.tasks.base import TaskContext
+
+    verify_calls: list[int] = []
+
+    class _SlowTransitionTask:
+        def __init__(self) -> None:
+            self.ctx = TaskContext(main_c="assault", max_rounds=1)
+            self.ctx.current_state = State.BUILD_MAIN_C
+            self.failed = False
+
+        def wants_board_watch(self) -> bool:
+            return False
+
+        def wants_gold_read(self) -> bool:
+            return False
+
+        def observation_mode(self):
+            return None
+
+        def in_match_states(self) -> bool:
+            return False
+
+        def determine_state(self, observation):
+            return self.ctx.current_state
+
+        def decide_action(self, observation, window_ctx):
+            if self.failed:
+                return (
+                    Action(kind="wait", duration=0.0, verification="immediate",
+                           tag="done", reason="结束"),
+                    State.COMPLETED,
+                )
+            return (
+                Action(kind="click", target=(1, 1), duration=0.08,
+                       verification="next_frame", tag="invite_start_game",
+                       verify_frames=3, reason="测试"),
+                State.SELECT_OPENING_SKILLS,
+            )
+
+        def verify_action(self, action, before, after) -> bool:
+            verify_calls.append(1)
+            return False
+
+        def on_action_verified(self, action, to_state) -> None:
+            pass
+
+        def on_action_failed(self, action) -> None:
+            self.failed = True
+
+    task = _SlowTransitionTask()
+    Runner(
+        default_config=DefaultConfig(run=RunConfig(action_verify_frames=1)),
+        tasks_config=TasksConfig(),
+    )._run_loop(
+        FakeScreen(make_window_ctx()),
+        FakePerception(Observation(frame_id=1)),
+        FakeExecutor(verified=False),
+        task,
+        SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+        1,
+        max_steps=20,
+    )
+
+    # 全局预算是 1 帧；动作携带 3 → 验证应跑满 3 帧才判失败
+    assert len(verify_calls) == 3
+    assert task.failed is True
