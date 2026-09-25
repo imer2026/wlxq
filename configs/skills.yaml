@@ -21,6 +21,8 @@ skills:
     description: 流星会附带20%易伤效果
   - name: 流星坠落
     description: 召唤流星数量+1
+  - name: 战神化身
+    description: 战士受到赐福时，额外提升20%攻击力，并暴击率翻倍
   死骑:
   - name: 死灵战神
     description: 大招！最高星死骑召唤死灵战神。伤害+50%，技能范围+20%，灵魂冲击附带剑气且无敌时间+5

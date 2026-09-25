@@ -357,7 +357,7 @@ main_c_profiles:
       4: [江海翻, 天地倾]
       5: [称心如意]
       6: [大闹天宫]
-      7: [乱点天宫]
+      7: [乱点天宫, 战神化身]
 
   angel:
     display_name: 天使
@@ -386,7 +386,7 @@ main_c_profiles:
 # 邀请者模式（run --invite）：组队等待/过滤/踢人循环参数
 invite:
   # 帮助者关卡进度阈值：低于请离，不低于留下开局（2026-09-21 定 475，2026-09-25 调 375）
-  min_stage_progress: 375
+  min_stage_progress: 475
   # 请离后冷却秒数，之后重走邀请点击链
   kick_cooldown_seconds: 60
   # 等待无人进房的重发间隔：超时重走 5 步邀请点击链刷新邀请
