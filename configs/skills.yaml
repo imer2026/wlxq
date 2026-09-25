@@ -94,3 +94,32 @@ skills:
     description: 冰核飞行结束时会爆炸，并且发出一圈20枚冰箭
   - name: 职业控制
     description: 最高星控制英雄冷却缩短50%
+  猴子:
+  - name: 万化随形
+    description: 场上所有小猴会有50%概率模仿悟空的招式
+  - name: 化身仗势
+    description: 小猴伤害+320%
+  - name: 应物随心
+    description: 小猴模仿概率提升30%，伤害提升200%
+  - name: 江海翻
+    description: 最高星悟空劈棍数+1，伤害+60%
+  - name: 天地倾
+    description: 最高星悟空劈棍数+1，伤害+60%
+  - name: 称心如意
+    description: 每次劈棍范围提升30%，伤害提升240%，最多生效4次
+  - name: 战意升腾
+    description: 悟空伤害+60%
+  - name: 斗战激昂
+    description: 悟空伤害+100%
+  - name: 无处遁形
+    description: 悟空攻击的怪物血量越低，造成的伤害越高（最高400%）
+  - name: 翻江倒海
+    description: 棍舞时间增加1秒
+  - name: 风卷残云
+    description: 棍舞伤害频率提升30%，棍花伤害提升120%
+  - name: 乘胜追击
+    description: 棍舞结束时，必定对范围内血量最低的怪物进行一次高额劈棍
+  - name: 乱点天宫
+    description: 棍舞过程中，50%概率对周围随机怪物进行一次劈棍
+  - name: 大闹天宫
+    description: 最高星悟空天降金箍棒造成伤害后，分化双倍数量小猴攻击怪物（强化词条越多，伤害越高）
