@@ -441,3 +441,83 @@ class TestInviteOpeningEscape:
             State.SELECT_OPENING_SKILLS,
         )
         assert task._match_started_at is not None
+
+
+class TestInviteReinviteCadence:
+    """两层重邀节奏（2026-09-26 用户定案）：全量链每 60s，轻量短链每 15s。
+
+    轻量链 = 邀请 → 一键邀请（弹窗层）→ 关弹窗，不走好友/公会招募；
+    轻量链不重置全量计时（全量仍自上次全量邀请起算 60s）。
+    """
+
+    def _waiting_task(self, clock):
+        task = _make_invite_task(clock=clock)
+        task.ctx.current_state = State.INVITE_WAITING
+        task._invite_wait_since = 0.0
+        task._invite_full_since = 0.0
+        return task
+
+    def test_light_reinvite_due_at_15s(self):
+        clock = _FakeClock()
+        task = self._waiting_task(clock)
+        clock.now = 15.0
+        action, to_state = task.decide_action(
+            _observation({"invite_text_visible": True}), _window_ctx()
+        )
+        assert action.tag == "invite_reinvite_light"
+        assert to_state == State.INVITE_CLICK
+        assert task._invite_light_walk is True
+        assert task._invite_step == 1  # 跳过开始挑战，从邀请按钮起步
+
+    def test_light_chain_walks_three_steps(self):
+        clock = _FakeClock()
+        task = self._waiting_task(clock)
+        clock.now = 20.0
+        task.decide_action(_observation({"invite_text_visible": True}), _window_ctx())
+        # 模拟 runner：轻量重发动作提交后状态切到 INVITE_CLICK
+        task.ctx.current_state = State.INVITE_CLICK
+        a2, _ = task.decide_action(_observation(), _window_ctx())
+        assert a2.tag == "invite_step_1"  # 邀请按钮
+        a3, _ = task.decide_action(_observation(), _window_ctx())
+        assert a3.tag == "invite_step_2"  # 一键邀请（弹窗层）
+        a4, s4 = task.decide_action(_observation(), _window_ctx())
+        assert a4.tag == "invite_wait_entry"  # × 未命中 → 跳过关弹窗 → 完成
+        assert s4 == State.INVITE_WAITING
+        assert task._invite_full_since == 0.0  # 轻量链不重置全量计时
+
+    def test_full_reinvite_due_at_60s(self):
+        clock = _FakeClock()
+        task = self._waiting_task(clock)
+        clock.now = 60.0
+        action, to_state = task.decide_action(
+            _observation({"invite_text_visible": True}), _window_ctx()
+        )
+        assert action.tag == "invite_reinvite"
+        assert to_state == State.INVITE_CLICK
+        assert task._invite_light_walk is False
+        assert task._invite_step == 0  # 全量链从头走（含开始挑战）
+
+    def test_full_wins_when_both_due(self):
+        """20s 轻量被全量优先级覆盖：60s 到点走全量而非轻量。"""
+        clock = _FakeClock()
+        task = self._waiting_task(clock)
+        clock.now = 60.0
+        # 先走一次轻量（t=20），再推进到 t=60：全量与轻量同时到期
+        clock.now = 20.0
+        task.decide_action(_observation({"invite_text_visible": True}), _window_ctx())
+        task._invite_wait_since = 20.0
+        clock.now = 60.0
+        action, _ = task.decide_action(
+            _observation({"invite_text_visible": True}), _window_ctx()
+        )
+        assert action.tag == "invite_reinvite"
+
+    def test_under_15s_keeps_waiting(self):
+        clock = _FakeClock()
+        task = self._waiting_task(clock)
+        clock.now = 10.0
+        action, to_state = task.decide_action(
+            _observation({"invite_text_visible": True}), _window_ctx()
+        )
+        assert action.tag == "invite_waiting"
+        assert to_state == State.INVITE_WAITING

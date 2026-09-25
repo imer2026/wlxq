@@ -192,7 +192,11 @@ class CoopTask(Task):
         self._invite_step = 0  # 5 步点击链游标
         self._invite_wait_since: float | None = None  # 当前等待段起点（clock 秒）
         self._invite_kick_count = 0  # 连续请离计数
-        self._invite_reinvite_count = 0  # 连续空等重发计数
+        self._invite_reinvite_count = 0  # 连续空等重发计数（只数全量重发）
+        # 轻量重邀（2026-09-26）：邀请→一键邀请（弹窗层）→关弹窗 的短链
+        self._invite_light_walk = False
+        # 最近一次全量邀请发出时刻；None = 全量链尚未走完（首链进行中）
+        self._invite_full_since: float | None = None
         self._invite_cooldown_until: float | None = None
         # 开局召唤次数档案覆盖（opening_summons>0 时替换 run 级配置）
         self._main_c_profile = main_c_profile
@@ -647,8 +651,9 @@ class CoopTask(Task):
         每步点击后保留固定间隔供界面切换；链完成进入 INVITE_WAITING 并重置
         重发计数。
         """
-        if self._invite_step == 0:
-            # 第 0 步：挑战页【开始挑战】（进邀请页面）
+        if self._invite_step == 0 and not self._invite_light_walk:
+            # 第 0 步：挑战页【开始挑战】（进邀请页面）；轻量重邀已在房间内，
+            # 跳过本步
             point = self._invite_hotspot_point("invite_start_challenge", window_ctx)
             if point is None:
                 return None
@@ -673,11 +678,24 @@ class CoopTask(Task):
             ("invite_one_click", "一键邀请（好友页）"),
             ("invite_popup_close", "关闭邀请弹窗"),
         )
+        if self._invite_light_walk:
+            # 轻量重邀短链（2026-09-26 用户定案）：邀请 → 一键邀请（弹窗层）
+            # → 关弹窗，不走好友/公会招募——每 20 秒刷新一次邀请曝光
+            steps = (
+                ("invite_button", "邀请按钮"),
+                ("invite_one_click", "一键邀请（弹窗层）"),
+                ("invite_popup_close", "关闭邀请弹窗"),
+            )
         index = self._invite_step - 1
         if index >= len(steps):
             self._invite_step = 0
             self._invite_reinvite_count = 0
             self._invite_wait_since = self._clock()
+            if self._invite_light_walk:
+                # 轻量链不改全量计时：全量重发仍按上次全量邀请起算
+                self._invite_light_walk = False
+            else:
+                self._invite_full_since = self._clock()
             return (
                 Action(
                     kind="wait",
@@ -725,9 +743,12 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         """等待进房 + 帮助者过滤（spec §6 INVITE_WAITING）。
 
-        「邀请」文字可识别 = 无人进房：超 reinvite_after_seconds 重走点击链。
-        识别不到 = 有人进房（复检一次防遮挡误判）：点邀请位置弹帮助者信息，
-        OCR 关卡进度，× 关闭弹层；≥阈值进 INVITE_START，<阈值请离进冷却。
+        「邀请」文字可识别 = 无人进房：两层重邀节奏（2026-09-26 用户定案）
+        ——全量邀请链每 reinvite_after_seconds（60s）重走一次；两次全量之间
+        每 light_reinvite_interval_seconds（20s）走轻量短链（邀请→一键邀请
+        →关弹窗）刷新邀请曝光。识别不到 = 有人进房（复检一次防遮挡误判）：
+        点邀请位置弹帮助者信息，OCR 关卡进度，× 关闭弹层；≥阈值进
+        INVITE_START，<阈值请离进冷却。
         """
         invite_visible = self._invite_text_visible(observation)
         now = self._clock()
@@ -735,7 +756,12 @@ class CoopTask(Task):
             self._invite_wait_since = now
         if invite_visible:
             waited = now - self._invite_wait_since
-            if waited >= self._invite.reinvite_after_seconds:
+            # 全量重邀到期（自上次全量邀请起算）；首链未走完（None）不触发
+            full_due = (
+                self._invite_full_since is not None
+                and now - self._invite_full_since >= self._invite.reinvite_after_seconds
+            )
+            if full_due:
                 self._invite_reinvite_count += 1
                 if self._invite_reinvite_count > self._invite.max_empty_reinvites:
                     logger.error(
@@ -743,11 +769,13 @@ class CoopTask(Task):
                     )
                     return None
                 logger.info(
-                    "等待 %.0f 秒无人进房，重走邀请点击链（第 %d 次重发）",
-                    waited,
+                    "等待 %.0f 秒无人进房，重走全量邀请链（第 %d 次重发）",
+                    now - self._invite_full_since,
                     self._invite_reinvite_count,
                 )
                 self._invite_step = 0
+                self._invite_light_walk = False
+                self._invite_full_since = now
                 self._invite_wait_since = None
                 return (
                     Action(
@@ -755,7 +783,24 @@ class CoopTask(Task):
                         duration=0.2,
                         verification="immediate",
                         tag="invite_reinvite",
-                        reason="无人进房超时，重新发起邀请",
+                        reason="无人进房超时，重新发起全量邀请",
+                    ),
+                    State.INVITE_CLICK,
+                )
+            if waited >= self._invite.light_reinvite_interval_seconds:
+                logger.info(
+                    "等待 %.0f 秒无人进房，轻量重发（邀请→一键邀请→关弹窗）", waited
+                )
+                self._invite_step = 1
+                self._invite_light_walk = True
+                self._invite_wait_since = None
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.2,
+                        verification="immediate",
+                        tag="invite_reinvite_light",
+                        reason="无人进房，轻量刷新邀请（不走好友页）",
                     ),
                     State.INVITE_CLICK,
                 )

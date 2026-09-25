@@ -30,6 +30,8 @@ _PAD_GRAY = 114
 
 # 金币/费用数字格式：纯数字或 K 后缀(3.3K)；中间不允许空格(识别结果先拼接)
 _GOLD_VALUE_RE = re.compile(r"^\d+(?:\.\d+)?[Kk]?$")
+# 费用数字条里的噪声字符（金币图标边缘被 OCR 读成 '?' 等）：清洗后再解析
+_GOLD_NOISE_RE = re.compile(r"[^0-9.Kk]")
 # 红色(买不起)判定阈值：红字占比随文本长度变化——"2.5K"实测 0.233、
 # "3K"实测 0.136（2026-09-11 实机：短文本红字像素少，0.15 阈值把红色
 # 误判为白色导致盲点）；白字实测 ≈0.00。0.05 居中分隔两组
@@ -44,6 +46,13 @@ _GOLD_PAD_COLOR = (120, 90, 60)
 def ensure_engine() -> None:
     """预加载 OCR 引擎；依赖缺失时抛 RuntimeError，供启动期探测。"""
     _get_engine()
+
+
+def create_ocr_engine() -> Any:
+    """创建独立 OCR 引擎实例：后台线程专用，与主线程标题 OCR 隔离。"""
+    from rapidocr_onnxruntime import RapidOCR
+
+    return RapidOCR()
 
 
 def _get_engine() -> Any:
@@ -69,8 +78,16 @@ class TitleReader:
     只适合确定单行文本的图）。
     """
 
+    def __init__(self, engine: Any | None = None) -> None:
+        # engine 可注入：后台金币线程用独立实例与主线程标题 OCR 隔离；
+        # 缺省共享全局懒加载引擎
+        self._injected_engine = engine
+
+    def _engine(self) -> Any:
+        return self._injected_engine if self._injected_engine is not None else _get_engine()
+
     def read_with_confidence(self, image: np.ndarray) -> list[tuple[str, float, tuple[int, int]]]:
-        engine = _get_engine()
+        engine = self._engine()
         result, _ = engine(image)
         lines: list[tuple[str, float, tuple[int, int]]] = []
         if not result:
@@ -104,7 +121,7 @@ class TitleReader:
             canvas[:, left : left + width] = image
             image = canvas
             height, width = image.shape[:2]
-        engine = _get_engine()
+        engine = self._engine()
         result, _ = engine(image)
         if not result:
             return []
@@ -176,6 +193,11 @@ def parse_gold_value(text: str) -> int | None:
     if t.endswith("K"):
         return int(float(t[:-1]) * 1000)
     return int(float(t))
+
+
+def clean_gold_text(text: str) -> str:
+    """剥掉数字/K 后缀以外的噪声字符（如金币图标边缘被 OCR 读成 '?'）。"""
+    return _GOLD_NOISE_RE.sub("", text).strip()
 
 
 def red_ratio(image: np.ndarray) -> float:
@@ -252,6 +274,38 @@ class GoldReader:
         x, y, w, h = roi
         return frame[y : y + h, x : x + w]
 
+    def read_pair(
+        self,
+        frame: np.ndarray,
+        current_roi: tuple[int, int, int, int],
+        cost_roi: tuple[int, int, int, int],
+        line_reader: TitleReader | None = None,
+    ) -> tuple[int | None, int | None]:
+        """后台数值读取：read_line 免检测快路径优先（~1s/区域，2026-09-26
+        实机），解析不出再回退三变体检测路径（慢但稳）。"""
+        current_crop = self._crop(frame, current_roi)
+        cost_crop = self._crop(frame, cost_roi)
+        current = self._read_value_fast(current_crop, line_reader)
+        cost = self._read_value_fast(cost_crop, line_reader)
+        return current, cost
+
+    def _read_value_fast(
+        self,
+        crop: np.ndarray,
+        line_reader: TitleReader | None,
+    ) -> int | None:
+        if line_reader is not None:
+            big = cv2.resize(
+                crop,
+                (crop.shape[1] * _GOLD_SCALE, crop.shape[0] * _GOLD_SCALE),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            for text, _ in line_reader.read_line(big):
+                value = parse_gold_value(clean_gold_text(text))
+                if value is not None:
+                    return value
+        return self._read_value(crop)
+
     def _read_value(self, crop: np.ndarray) -> int | None:
         texts: list[str] = []
         for variant in self._variants(crop):
@@ -290,3 +344,32 @@ class GoldReader:
             _, binary = cv2.threshold(channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             variants.append(cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR))
         return variants
+
+
+class BackgroundGoldReader:
+    """后台金币数值读取器：持有独立 OCR 引擎实例，与主线程标题 OCR 隔离。
+
+    供 GoldCache 后台线程使用；接口收缩为 read_pair 一项。
+    """
+
+    def __init__(self, engine: Any | None = None) -> None:
+        # 缺省首个 read_pair 时自建独立实例（懒加载，成本后置）；测试可注入假引擎
+        self._engine = engine
+        self._gold_reader: GoldReader | None = None
+        self._line_reader: TitleReader | None = None
+
+    def _ensure(self) -> None:
+        if self._gold_reader is None or self._line_reader is None:
+            if self._engine is None:
+                self._engine = create_ocr_engine()
+            self._gold_reader = GoldReader(engine=self._engine)
+            self._line_reader = TitleReader(engine=self._engine)
+
+    def read_pair(
+        self,
+        frame: np.ndarray,
+        current_roi: tuple[int, int, int, int],
+        cost_roi: tuple[int, int, int, int],
+    ) -> tuple[int | None, int | None]:
+        self._ensure()
+        return self._gold_reader.read_pair(frame, current_roi, cost_roi, self._line_reader)

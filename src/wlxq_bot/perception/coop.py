@@ -40,6 +40,7 @@ from wlxq_bot.models import (
     WindowContext,
 )
 from wlxq_bot.perception.hero_classifier import HeroCellClassifier, HeroCellPrediction
+from wlxq_bot.perception.gold_cache import GoldCache
 from wlxq_bot.perception.locator import (
     board_grid_for_role,
     format_cell_label,
@@ -183,9 +184,7 @@ class CoopPerception:
         title_reader: Any | None = None,
         skill_tiers: dict[str, int] | None = None,
         new_skill_dir: Path | None = None,
-        gold_reader: Any | None = None,
-        gold_read_interval: float = 1.0,
-        gold_color_only: bool = False,
+        gold_cache: GoldCache | None = None,
         difficulty_kind: str = "template",
         locator_aliases: dict[str, str] | None = None,
         difficulty_reader: Any | None = None,
@@ -237,15 +236,9 @@ class CoopPerception:
         self._skill_tiers = skill_tiers or {}
         self._tier_name_entries = [{"name": name} for name in self._skill_tiers]
         self._new_skill_dir = new_skill_dir
-        # 金币感知（按需）：仅在任务层声明需要时读取（回补召唤/付费选技能
-        # 门控），最小间隔内复用上次结果；其他状态零开销
-        self._gold_reader = gold_reader
-        self._gold_read_interval = max(0.0, gold_read_interval)
-        # 只认色模式：金币门控只判定费用文字红/白（毫秒级），跳过数字 OCR；
-        # 判定足够廉价，每帧新鲜计算，不走进度间隔缓存
-        self._gold_color_only = gold_color_only
-        self._last_gold_read = float("-inf")
-        self._last_gold_info: dict[str, Any] | None = None
+        # 金币感知（按需）：后台 GoldCache 线程读数（主循环零 OCR），本层只
+        # 负责喂干净帧与取快照；缓存未装配（ROI 未标定）时金币门控不可用
+        self._gold_cache = gold_cache
         # 难度识别方式（模式档案）：template=合作文字模板；ocr=保卫宠物行 OCR。
         # OCR 目标难度（targets）只由任务层 CoopTask 消费，感知层不持有
         self._difficulty_kind = difficulty_kind
@@ -324,38 +317,16 @@ class CoopPerception:
             observation_mode=observation_mode,
             light=light,
         )
-        # 金币感知（按需）：仅任务层声明需要（回补召唤/付费选技能门控）时读取。
-        # 技能页/赠送页已打开时金币已支付，读了也无意义——跳过，把帧时间让给标题 OCR
-        page_open = any(
-            raw_data.get(flag)
-            for flag in (
-                "select_skill_button_visible",
-                "merge_gift_skill_page_visible",
-                "tian_shi_kai_ju_visible",
-            )
-        )
-        if self._gold_reader is not None and read_gold and not page_open and (
-            not light or self._gold_color_only
-        ):
-            if self._gold_color_only:
-                # 只认色：红/白判定毫秒级，每帧新鲜计算（含轻量验证帧），
-                # 无需读取间隔缓存。轻量帧也必须算——关弹窗验证通过后任务层
-                # 直接拿该帧决策，缺金币信息会盲点【选技能】（2026-09-10 实机）
-                gold = self._read_gold(ctx, frame)
-                if gold is not None:
-                    raw_data["gold"] = gold
-            else:
-                now_monotonic = perf_counter()
-                if now_monotonic - self._last_gold_read >= self._gold_read_interval:
-                    self._last_gold_read = now_monotonic
-                    gold = self._read_gold(ctx, frame)
-                    if gold is not None:
-                        self._last_gold_info = gold
-                if (
-                    self._last_gold_info is not None
-                    and now_monotonic - self._last_gold_read < self._gold_read_interval * 5
-                ):
-                    raw_data["gold"] = self._last_gold_info
+        # 金币感知：读数由 GoldCache 后台线程完成（主循环零 OCR），这里只取
+        # 快照。超龄/未就绪返回 None，任务层按「金币缺失不拦截」放行。
+        if self._gold_cache is not None and read_gold:
+            gold = self._gold_cache.snapshot()
+            if gold is not None:
+                raw_data["gold"] = gold
+        # 喂帧：培养期两个金币门控状态才提交（开局召唤免费，不查金币）。
+        # 弹窗/技能页遮挡底栏时标脏，后台跳过读取，缓存保持最后好值。
+        if self._gold_cache is not None:
+            self._submit_gold_frame(ctx, frame, hint_state, raw_data)
         difficulty_candidates = []
         if observation_mode == "coop_difficulty":
             if self._difficulty_kind == "ocr":
@@ -1279,58 +1250,73 @@ class CoopPerception:
                 logger.warning("新技能记录失败 name=%s error=%r", name, exc)
         return 11, False, description
 
-    def _read_gold(self, ctx: WindowContext, frame: Any) -> dict[str, Any] | None:
-        """读取金币门控信息；只认色模式仅判定两个费用区域红/白。
+    # 金币门控状态 → (状态提示, 费用缓存键)：决定后台读取哪对 ROI、读数
+    # 写入快照的哪个键。开局召唤免费（底栏「召唤 免费」），不查金币。
+    _GOLD_HINT_BY_STATE: dict[State, tuple[str, str]] = {
+        State.BUILD_MAIN_C: ("summon", "summon_cost"),
+        State.SELECT_MAIN_C_SKILLS: ("skill", "skill_cost"),
+    }
 
-        ROI 未标定时永久停用金币读取。
-        """
-        current = self._resolve_named_roi("gold_current_area", ctx)
-        skill = self._resolve_named_roi("skill_cost_area", ctx)
-        summon = self._resolve_named_roi("summon_cost_area", ctx)
-        if self._gold_color_only:
-            if skill is None or summon is None:
-                logger.debug("只认色模式缺费用 ROI，停用金币读取")
-                self._gold_reader = None
-                return None
-            info = self._gold_reader.read_affordability(frame, skill, summon)
-            logger.debug(
-                "frame=%d 金币只认色 skill红=%s(%.3f) summon红=%s(%.3f)",
-                ctx.frame_id,
-                info.skill_red,
-                info.skill_red_ratio,
-                info.summon_red,
-                info.summon_red_ratio,
-            )
-            return {
-                "current": None,
-                "skill_cost": None,
-                "summon_cost": None,
-                "skill_red": info.skill_red,
-                "summon_red": info.summon_red,
-                "skill_red_ratio": info.skill_red_ratio,
-                "summon_red_ratio": info.summon_red_ratio,
-            }
-        if current is None or skill is None or summon is None:
-            logger.debug("金币感知 ROI 未标定，停用金币读取")
-            self._gold_reader = None
-            return None
-        info = self._gold_reader.read(frame, current, skill, summon)
-        logger.debug(
-            "frame=%d 金币读取 current=%s skill=%s(红=%s) summon=%s(红=%s)",
-            ctx.frame_id,
-            info.current,
-            info.skill_cost,
-            info.skill_red,
-            info.summon_cost,
-            info.summon_red,
+    # 遮挡底栏费用条的全屏覆盖物：任一可见即脏帧，后台跳过读取（缓存保持
+    # 最后好值）。注意选技能页**不遮挡**费用条（页面开着时金币/费用照常
+    # 可读可读数，2026-09-26 04:27 日志实锤），不作为脏帧条件。
+    _GOLD_OCCLUSION_FLAGS = (
+        "tan_chuang_visible",
+        "zeng_song_ji_neng_visible",
+        "merge_gift_skill_page_visible",
+    )
+
+    def _submit_gold_frame(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        hint_state: State,
+        raw_data: dict[str, Any],
+    ) -> None:
+        """把当前帧投递给后台金币缓存；仅在金币门控状态且有 ROI 标定时。"""
+        hint = self._GOLD_HINT_BY_STATE.get(hint_state)
+        if hint is None:
+            return
+        current_roi = self._resolve_named_roi("gold_current_area", ctx)
+        cost_roi = self._resolve_named_roi(f"{hint[0]}_cost_area", ctx)
+        if current_roi is None or cost_roi is None:
+            return
+        clean = not any(
+            raw_data.get(flag) for flag in self._GOLD_OCCLUSION_FLAGS
         )
-        return {
-            "current": info.current,
-            "skill_cost": info.skill_cost,
-            "summon_cost": info.summon_cost,
-            "skill_red": info.skill_red,
-            "summon_red": info.summon_red,
-        }
+        self._gold_cache.submit(
+            frame,
+            frame_id=ctx.frame_id,
+            clean=clean,
+            current_roi=current_roi,
+            cost_roi=cost_roi,
+            cost_key=hint[1],
+        )
+
+    def _read_gold(self, ctx: WindowContext, frame: Any) -> dict[str, Any] | None:
+        """读取金币门控信息：返回后台缓存快照（超龄/未就绪为 None）。
+
+        None 时任务层按「金币缺失不拦截」放行（既有语义，见
+        CoopTask._can_afford 与召唤/选技能调用点）。
+        """
+        if self._gold_cache is None:
+            return None
+        return self._gold_cache.snapshot()
+
+    def invalidate_gold_cache(self) -> None:
+        """花钱事件（召唤落位/技能购买验证通过）：下一干净帧立即补读。"""
+        if self._gold_cache is not None:
+            self._gold_cache.invalidate()
+
+    def clear_gold_cache(self) -> None:
+        """每局重置：清空缓存，新局金币与本局无关，首查走缺失放行。"""
+        if self._gold_cache is not None:
+            self._gold_cache.clear()
+
+    def stop_gold_cache(self) -> None:
+        """任务会话结束：停后台线程（幂等；daemon 随进程退出兜底）。"""
+        if self._gold_cache is not None:
+            self._gold_cache.stop()
 
     def match_ready_button(
         self,
@@ -1649,7 +1635,7 @@ class CoopPerception:
                 matches,
             )
             # 金币感知：培养/回补阶段的召唤门控需要金币数据（按最小间隔读取）
-            if self._gold_reader is not None:
+            if self._gold_cache is not None:
                 gold = self._read_gold(latest_ctx, latest_frame)
                 if gold is not None:
                     raw_data["gold"] = gold

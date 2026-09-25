@@ -446,7 +446,7 @@ def test_run_passes_invite_config_to_coop_task(monkeypatch) -> None:
         ("_load_template_pack", SimpleNamespace()),
         ("_load_hero_cell_classifier", None),
         ("_build_skill_collector", None),
-        ("_build_gold_reader", (None, 0.5, False)),
+        ("_build_gold_cache", None),
     ):
         monkeypatch.setattr(runner, name, lambda *a, _ret=ret, **k: _ret)
     monkeypatch.setattr(runner, "_build_skill_priority", lambda _mc: (None, None, None))

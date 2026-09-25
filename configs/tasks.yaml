@@ -841,13 +841,14 @@ skill_collection:
 # gold_current_area / skill_cost_area / summon_cost_area 三个数字区域。
 # 三个 ROI 全部标定才会启用；读取结果存入 Observation.raw_data['gold']
 gold_recognition:
-  # 两次读取的最小间隔（秒）：金币变化缓慢，控制小 ROI OCR 的频率
+  # 两次成功读取的最小间隔（秒）：也约束花钱事件触发的立即补读
   read_min_interval_seconds: 1.0
-  # 只认色（2026-09-10）：金币门控只判定选技能/召唤费用文字红/白
-  # （红 = 游戏自身判买不起，纯 OpenCV 颜色统计，毫秒级；白 = 付得起），
-  # 跳过数字 OCR——慢速机上数字 OCR 每次读取约 5 秒，是选技能节奏的
-  # 最大瓶颈。代价：日志不再有具体金额。false 回退数字 OCR + 数值比较
-  color_only: true
+  # 数值门控（2026-09-26 替代只认色）：后台线程读 金币/费用 数字做数值
+  # 比较，与颜色和皮肤无关——只认色在暗红棕城墙皮肤下恒判「买不起」
+  # （2026-09-26 00:47 实机）。读数在后台线程完成，主循环零阻塞
+  numeric_refresh_interval_seconds: 2.0
+  # 快照年龄超过此值视同缺失 → 按「缺失不拦截」放行；只兜后台线程死亡
+  numeric_stale_after_seconds: 30.0
 
 # 英雄模板配置
 heroes:

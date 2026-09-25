@@ -523,8 +523,12 @@ class InviteConfig(BaseModel):
     min_stage_progress: int = Field(default=475, ge=1)
     # 请离后冷却秒数，之后重走邀请点击链
     kick_cooldown_seconds: float = Field(default=60.0, ge=0.0)
-    # 等待无人进房的重发间隔秒数：超时重走邀请点击链刷新邀请
+    # 等待无人进房的重发间隔秒数：全量邀请链（邀请→一键邀请→好友→
+    # 公会招募→一键邀请→关弹窗）的重发周期
     reinvite_after_seconds: float = Field(default=60.0, ge=1.0)
+    # 轻量重邀间隔秒数（2026-09-26 用户定案）：两次全量之间每 15 秒走
+    # 邀请→一键邀请（弹窗层）→关弹窗 的短链刷新邀请曝光，不走好友页
+    light_reinvite_interval_seconds: float = Field(default=15.0, ge=1.0)
     # 连续「空等→重发」轮数上限（帮助者一直没来），超过保守停止
     max_empty_reinvites: int = Field(default=30, ge=1)
     # 连续请离帮助者数量上限（匹配池可能整体不合格），超过保守停止
