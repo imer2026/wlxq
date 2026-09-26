@@ -28,6 +28,7 @@ from wlxq_bot.tasks.base import TaskContext
 from wlxq_bot.tasks.coop import (
     _EMPTY_BOARD_RETRY,
     _ENTRY_RECLICK_MISSES,
+    _NO_PROGRESS_LIMIT,
     CoopTask,
     _RecruitStep,
 )
@@ -864,6 +865,34 @@ class TestBuildMainCAction:
         task.ctx.current_state = State.BUILD_MAIN_C
         obs = Observation(frame_id=1, board=make_board([]))
         assert task.decide_action(obs, make_window_ctx()) is None
+
+    def test_frozen_board_wait_does_not_exhaust_no_progress(self):
+        """冻结干等是有意等待：棋盘静止不触发无进展 None（2026-09-26 实机事故）。
+
+        锁定格冻结召唤、棋盘合到无可合成对后每帧走 frozen_board_wait，
+        此前棋盘签名连续 _NO_PROGRESS_LIMIT 次不变会使 decide_action 返回
+        None，runner 连续 3 次无可用动作后保守退出，而画面完全正常。
+        """
+        task = make_task(main_c="monkey")
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._board_capacity_frozen = True
+        # 类型互异、无主C达标、无金币数据（跳过门控）：只能落入冻结干等
+        board = make_board(
+            [
+                make_hero("death_knight", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("angel", star=2, pos=(300, 300)),
+                make_hero("snow", star=2, pos=(400, 400)),
+            ]
+        )
+        obs = Observation(frame_id=1, board=board)
+        for _ in range(_NO_PROGRESS_LIMIT + 4):
+            decision = task.decide_action(obs, make_window_ctx())
+            assert decision is not None
+            action, to_state = decision
+            assert action.tag == "frozen_board_wait"
+            assert to_state == State.BUILD_MAIN_C
 
 
 # ---------------------------------------------------------------------------

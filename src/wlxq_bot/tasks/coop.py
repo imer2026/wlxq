@@ -3683,6 +3683,10 @@ class CoopTask(Task):
             )
             if assist is not None:
                 return assist
+            # 冻结干等是有意等待（对局推进前棋盘静止不动），不计入无进展，
+            # 否则看门狗把连续同签名判成停滞、runner 计满后保守停止
+            # （2026-09-26 实机事故）
+            self._no_progress_count = 0
             return (
                 Action(
                     kind="wait",
