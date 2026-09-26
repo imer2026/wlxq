@@ -312,10 +312,12 @@ locators:
   # 实机确认 2026-08-21：该文案只在赠送页出现，不选技能页面就常驻；【选技能】图
   # 在该页上不稳定（实机出现过整页在等选择却始终未命中的情况），以此模板为页面主标识。
   # 页面可能被Boss奖励弹窗遮挡：任务层先关弹窗再识别本图。ROI 待标定，标定前走全图识别。
+  # 阈值 0.75（2026-09-26）：游戏更新后提示条渲染漂移，实拍得分 0.785 过不了旧阈值
+  # 0.82（9-25 还能确认成功）；无页帧负样本最高约 0.50，余量充足。
   merge_gift_skill_title:
     strategy: template
     template: skills/4_xing_e_wai_ji_neng.png
-    threshold: 0.82
+    threshold: 0.75
     roi: skill_page_markers_area
     action_point:
       source: match_center
