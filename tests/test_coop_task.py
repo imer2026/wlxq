@@ -5255,3 +5255,36 @@ class TestInvitePrepLineup:
         task._invite_ready_clicked = True
         task._reset_for_next_round()
         assert task._invite_ready_clicked is False
+
+    def test_return_to_invite_click_resets_round_state(self):
+        """回归（2026-09-27 实机）：邀请者结算直通 INVITE_CLICK 时局内状态
+        也必须清零。此前只在回 FIND_COOP 时重置，_summon_count 带入第 2 局
+        后开局强制召唤被跳过，空棋盘一路干等到队友带过 19 层。"""
+        task = _monkey_invite_build_task()
+        task.ctx.round_count = 0
+        task._summon_count = 14
+        task._invite_ready_clicked = True
+        task._empty_board_count = 16
+        task._batch_summon_remaining = 2
+        task._failed_merge_pairs = {((1, 1), (2, 2))}
+
+        match = MatchResult("buttons/fan_hui.png", (500, 1000), 0.9)
+        before = Observation(
+            frame_id=1,
+            raw_data={"return_button_visible": True, "return_button_match": match},
+        )
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+        decision = task.decide_action(before, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert to_state == State.INVITE_CLICK
+        assert task.verify_action(action, before, Observation(frame_id=2))
+        task.on_action_verified(action, to_state)
+
+        assert task.ctx.round_count == 1
+        assert task._summon_count == 0
+        assert task._invite_ready_clicked is False
+        assert task._empty_board_count == 0
+        assert task._batch_summon_remaining == 0
+        assert task._failed_merge_pairs == set()
+

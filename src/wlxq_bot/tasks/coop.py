@@ -4564,8 +4564,12 @@ class CoopTask(Task):
             self._merge_gift_misses = 0
         elif tag == "return_result":
             self.ctx.round_count += 1
-            if to_state == State.FIND_COOP:
-                self._reset_for_next_round()
+            # 本局对局内状态无条件清零。此前只在回 FIND_COOP 时重置，而邀请者
+            # 结算直通 INVITE_CLICK 开下一局（_action_return），_summon_count
+            # 等带入第 2 局后开局强制召唤被跳过，空棋盘一路干等（2026-09-27 实机）。
+            # INVITE_CLICK 链由 _invite_step 驱动、不消费 _recruit_step，
+            # OPEN_COOP_CHAT 仅在异常回退到 find_coop 时作为落点步骤
+            self._reset_for_next_round()
 
     def on_action_failed(self, action: Action) -> None:
         """动作重试耗尽、Runner 放弃该动作时调整内部进度，均不结束任务。"""

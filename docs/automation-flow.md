@@ -143,6 +143,11 @@ INVITE_COOLDOWN 等 kick_cooldown_seconds → 回 INVITE_CLICK 重发邀请
   培养期金币召唤；游戏 90s 自动开始，无需机器人侧超时（2026-09-26
   用户定案：不设召唤次数/停留时长上限）。每局重置 `_invite_ready_clicked`
   （2026-09-26 修复：此前不重置，第 2 局起永不点准备完成）；
+  结算 `return_result` 现已**无条件**清零全部局内状态（`_summon_count`、
+  批次、空棋盘计数、失败合成记忆等，2026-09-27 修复：此前只在回
+  FIND_COOP 时重置，而邀请者结算直通 INVITE_CLICK——`_summon_count`
+  带入第 2 局后开局强制召唤被整段跳过，空棋盘识别一路干等，当实机
+  第 2 局开局后干等 26 秒、由队友带过 19 层才自行恢复）；
 - 凑阵容：每批召唤 `summon_batch_size`(3) 个；棋盘满时安全合成腾格子
   （保留数 `hero_keep_counts` + 3 星软避让 `forbid_star3_merge`：产物 ≥3 星一律不合，
   占满也不合）；
