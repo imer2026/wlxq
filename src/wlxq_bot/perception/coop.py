@@ -875,6 +875,8 @@ class CoopPerception:
         rows = self._read_entry_roi_rows(self._mode_select_title_roi, ctx, frame)
         visible = any(title_text in row.text for row in rows)
         raw_data["mode_select_visible"] = visible
+        # 标题行原文一并透出：任务层用「拥有：」等领地标签判弹窗确定未开
+        raw_data["mode_select_title_rows"] = rows
         logger.debug("frame=%d 模式选择标题可见=%s", ctx.frame_id, visible)
 
     def _detect_mode_card_rows(

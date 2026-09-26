@@ -3898,6 +3898,73 @@ class TestChatOpenConfirm:
         task.on_action_verified(*decision)
         assert task._recruit_step == _RecruitStep.SELECT_MODE_CARD
 
+    def _mode_select_territory_observation(self, frame_id: int) -> Observation:
+        """弹窗未开时领地页的读数：标题带是传送门标签，卡名行是领地建筑。"""
+        return Observation(
+            frame_id=frame_id,
+            raw_data={
+                "mode_select_visible": False,
+                "mode_select_title_rows": [
+                    ModeTabRow("拥有：", 0.8, (300, 320)),
+                    ModeTabRow("合作模式", 0.8, (558, 363)),
+                ],
+                "mode_card_rows": [ModeTabRow("玩法大", 0.8, (200, 1180))],
+            },
+        )
+
+    def test_mode_select_confirm_reclicks_when_territory_label_still_visible(self):
+        """领地「拥有：」标签仍在=弹窗确定未开：重点进入按钮是安全的。
+
+        2026-09-26 18:05 实机：点击前画面被临时覆盖物挡住，进入按钮点击
+        被吃，本步骤此前不做重点，干等 60 秒后保守退出。
+        """
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+        decision = None
+        for frame_id in range(1, _ENTRY_RECLICK_MISSES + 1):
+            decision = task.decide_action(
+                self._mode_select_territory_observation(frame_id), make_window_ctx()
+            )
+            assert decision is not None
+            if frame_id < _ENTRY_RECLICK_MISSES:
+                assert decision[0].tag == "mode_select_open_pending"
+        assert decision[0].tag == "open_mode_select"
+        assert "重点进入按钮" in decision[0].reason
+        task.on_action_verified(*decision)
+        assert task._recruit_step == _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+        assert task._entry_reclicks == 1
+
+    def test_mode_select_confirm_keeps_waiting_when_reads_ambiguous(self):
+        """领地标签消失但标题卡名都没命中（读数模糊）：不重点，只干等。
+
+        弹窗可能开着只是 OCR 全漏读，重点会误点卡面（2026-09-17 教训）。
+        """
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+        for frame_id in range(1, _ENTRY_RECLICK_MISSES + 5):
+            decision = task.decide_action(
+                Observation(frame_id=frame_id), make_window_ctx()
+            )
+            assert decision is not None
+            assert decision[0].tag == "mode_select_open_pending"
+        assert task._entry_reclicks == 0
+
+    def test_mode_select_confirm_stops_when_reclick_budget_exhausted(self):
+        """重点预算用尽弹窗仍未开：保守停止，不无限重试。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task._recruit_step = _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+        task._entry_reclicks = task._entry_max_reclicks
+        task._entry_misses = _ENTRY_RECLICK_MISSES
+        assert (
+            task.decide_action(
+                self._mode_select_territory_observation(1), make_window_ctx()
+            )
+            is None
+        )
+
     def test_challenge_confirm_returns_to_card_while_popup_visible(self):
         """弹窗仍打开=选卡点击未生效：连续多帧后回选卡步骤重读重点。"""
         task = make_task()

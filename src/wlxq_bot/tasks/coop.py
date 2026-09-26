@@ -1587,14 +1587,20 @@ class CoopTask(Task):
     def _action_confirm_mode_select_open(
         self,
         observation: Observation,
+        window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
         """正向确认模式选择弹窗打开：标题区域 OCR 读到「模式选择」。
 
         点击进入按钮后弹窗有延迟；超过入口等待上限仍未出现说明点击未生效
         或页面异常，保守停止。标题偶发漏读时，本模式卡名文字可读同样证明
-        弹窗已打开（卡名与标题同帧识别），直接放行选卡。本步骤不做盲点
-        重点：进入按钮坐标落在弹窗卡面附近，弹窗已开时重点可能误选另一
-        模式卡片。
+        弹窗已打开（卡名与标题同帧识别），直接放行选卡。
+
+        弹窗状态有三种，不确定才干等：标题带仍读到领地票据标签「拥有：」
+        =传送门区域未被弹窗盖住=点击确定没生效（2026-09-26 18:05 实机：
+        点击前画面被临时覆盖物挡住，点击被吃，干等 60 秒保守停止）——
+        弹窗没开就没有卡面可误点，连续多帧未变化时**重点进入按钮**（最多
+        entry_max_reclicks 次，每次重点重新起算等待上限）；领地标签消失
+        但标题卡名都没命中（读数模糊）才维持纯等待。
         """
         card_text = self._mode.entry.mode_card_text if self._mode else None
         card_rows = observation.raw_data.get("mode_card_rows") or []
@@ -1620,6 +1626,30 @@ class CoopTask(Task):
                 ),
                 State.FIND_COOP,
             )
+        title_rows = observation.raw_data.get("mode_select_title_rows") or []
+        territory_label_seen = any("拥有：" in row.text for row in title_rows)
+        if territory_label_seen:
+            self._entry_misses += 1
+            if self._entry_misses >= _ENTRY_RECLICK_MISSES:
+                if self._entry_reclicks >= self._entry_max_reclicks:
+                    logger.error(
+                        "frame=%d 重点进入按钮 %d 次后弹窗仍未出现（领地标签仍在），"
+                        "保守停止",
+                        observation.frame_id,
+                        self._entry_reclicks,
+                    )
+                    return None
+                self._entry_reclicks += 1
+                self._entry_misses = 0
+                self._start_entry_wait()
+                return self._hotspot_click(
+                    "open_mode_select",
+                    "open_mode_select",
+                    f"领地页仍在（读到「拥有：」），弹窗未开，重点进入按钮"
+                    f"（{self._entry_reclicks}/{self._entry_max_reclicks}）",
+                    State.FIND_COOP,
+                    window_ctx,
+                )
         if self._entry_deadline_exceeded(observation, "点进入按钮后模式选择弹窗未出现"):
             return None
         return self._entry_wait_action(
@@ -1987,7 +2017,7 @@ class CoopTask(Task):
                 window_ctx,
             )
         if self._recruit_step == _RecruitStep.CONFIRM_MODE_SELECT_OPEN:
-            return self._action_confirm_mode_select_open(observation)
+            return self._action_confirm_mode_select_open(observation, window_ctx)
         if self._recruit_step == _RecruitStep.SELECT_MODE_CARD:
             return self._action_select_mode_card(observation)
         if self._recruit_step == _RecruitStep.CONFIRM_CHALLENGE_PAGE:
@@ -4315,6 +4345,7 @@ class CoopTask(Task):
         elif tag == "open_mode_select":
             # 进入按钮点击已发送：确认弹窗打开后再选卡
             self._recruit_step = _RecruitStep.CONFIRM_MODE_SELECT_OPEN
+            self._entry_misses = 0
             self._start_entry_wait()
         elif tag == "mode_card_selected":
             # 选卡点击已发送（开环）：确认到达挑战页后再点聊天
