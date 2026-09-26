@@ -32,9 +32,20 @@ def test_drag_dwells_before_release(monkeypatch):
 
     assert calls == [
         ("moveTo", 10, 20, None),  # 指针先落到起点
-        ("sleep", 0.05),  # 稍停，游戏先注册指针位置
+        ("sleep", 0.15),  # 稍停，游戏先注册指针位置（含原 PAUSE 停顿）
         ("mouseDown",),
+        ("sleep", 0.1),  # 按下停顿（原由 pyautogui.PAUSE 提供，PAUSE 已归零）
         ("moveTo", 110, 220, 1.0),  # 按住插值移动到终点
         ("sleep", 0.15),  # 终点停留，等英雄跟随到位
         ("mouseUp",),
     ]
+
+
+def test_input_controller_disables_pyautogui_global_pause():
+    """pyautogui 内置 0.1s 全局停顿必须归零：否则召唤连点的 0.2s 配置
+    间隔会被 click+停靠移动的两次内置停顿拖成 ~1s 实际节奏
+    （2026-09-26 实机日志定位）；节奏统一由 Action post_delay 控制。"""
+    import pyautogui
+
+    InputController()
+    assert pyautogui.PAUSE == 0.0

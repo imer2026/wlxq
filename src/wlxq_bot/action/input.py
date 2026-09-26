@@ -34,6 +34,11 @@ class InputController:
         """
         self._jitter = jitter
         self._release_dwell = release_dwell
+        # 关闭 PyAutoGUI 每次调用后内置的 0.1s 全局停顿：召唤等高频连点的
+        # 节奏由 Action 的 post_delay / executor 兜底间隔显式控制，内置停顿
+        # 只会在 click+停靠移动上固定叠加 0.2s，把 0.5s 的配置间隔拖成
+        # ~1s 的实际节奏（2026-09-26 实机日志定位）。drag 的按压停顿见下
+        pyautogui.PAUSE = 0.0
 
     def click(self, x: int, y: int, duration: float = 0.08) -> None:
         """在屏幕坐标 (x, y) 处点击。
@@ -57,10 +62,14 @@ class InputController:
         终点 → 停留 ``release_dwell`` 让英雄跟随到位 → 松开。不用
         ``pyautogui.drag`` 一步到位，因为它移动完成立即松开，游戏内英雄
         以缓动跟随指针，来不及到位就会被弹回原格。
+
+        显式 sleep 保持 pyautogui.PAUSE 归零前的实际停顿（落起点 0.15s、
+        按下 0.1s），拖动时序与实机标定时一致。
         """
         pyautogui.moveTo(start[0], start[1])
-        pyautogui.sleep(0.05)
+        pyautogui.sleep(0.15)
         pyautogui.mouseDown()
+        pyautogui.sleep(0.1)
         pyautogui.moveTo(end[0], end[1], duration=duration)
         pyautogui.sleep(self._release_dwell)
         pyautogui.mouseUp()

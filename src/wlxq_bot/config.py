@@ -462,9 +462,11 @@ class RunConfig(BaseModel):
     merge_gift_confirm_hits: int = Field(default=2, ge=1, le=10)
     merge_gift_fail_misses: int = Field(default=12, ge=1, le=60)
     # 技能解锁前强制召唤阶段（前 minimum_summon_count_before_skills 次）的连点
-    # 间隔（秒）：该阶段不以棋盘识别为门禁（点击发送即计数），跳过多帧棋盘识别
-    # 快速连点；最后一次保留正常稳定等待后再进入棋盘决策
-    forced_summon_interval_seconds: float = Field(default=0.5, gt=0.0, le=10.0)
+    # 间隔（秒）：该阶段不以棋盘识别为门禁（点击发送即计数），跳过多帧棋盘
+    # 快速连点；最后一次保留正常稳定等待后再进入棋盘决策。批次召唤共用。
+    # 2026-09-26 实机日志：截图+识别固定开销 ≈0.28s（pyautogui.PAUSE 已归
+    # 零），0.2 等待对应实际 ≈0.5s/击（此前 0.5 配置实际跑出 ≈1s/击）
+    forced_summon_interval_seconds: float = Field(default=0.2, gt=0.0, le=10.0)
     # 召唤点击后棋盘始终未变化（多为金币不足，点击被游戏忽略）时的重试等待
     # （秒）：等待后重新尝试召唤。金币门控（summon_gold_wait）下金币不足时
     # 原地等待恢复，不设次数上限
