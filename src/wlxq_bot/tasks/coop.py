@@ -3387,13 +3387,22 @@ class CoopTask(Task):
             )
         self._empty_board_count = 0
 
-        # 邀请者「准备完成」（spec §5.4，2026-09-22 用户定案）：开局召唤
-        # 计满后点一次固定坐标确认（与阵容无关），点击后进入常规凑阵容循环
+        # 邀请者「准备完成」（spec §5.4；2026-09-26 用户定案修订）：准备阶段
+        # 召唤免费，先凑齐阵容（猴子≥1 & 天使≥1 & 雪姬≥1，幻天使算天使）
+        # 再点确认；未凑齐时不点，走下方免费召唤/合成/变身循环继续凑
+        # （满盘兜底见金币门控处的准备阶段分支）
         if self._invite_mode and not self._invite_ready_clicked:
-            ready_action = self._invite_ready_done_action(window_ctx)
-            if ready_action is None:
-                return None
-            return ready_action
+            if self._strategy.main_c_ready(board, require_hero_count=False):
+                ready_action = self._invite_ready_done_action(window_ctx)
+                if ready_action is None:
+                    return None
+                logger.info(
+                    "frame=%d 准备阶段阵容已凑齐，点击准备完成进入常规培养",
+                    observation.frame_id,
+                )
+                return ready_action
+            # 未凑齐：不点准备完成，继续走下方免费召唤/合成/变身循环
+            # （满盘时的合成/变身/确认兜底在金币门控处的准备阶段分支）
 
         # 召唤落位护栏（2026-09-24）：上一批召唤点击全部发出后占用无增长 =
         # 打在锁定格/满盘上（识别模型未学过锁定格时 capacity 会虚报空位）。
@@ -3428,14 +3437,37 @@ class CoopTask(Task):
                 ),
             )
 
-        # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足时优先在等待
-        # 空档合成（见下方分支），无对可合再原地等待金币恢复（击杀回金），
-        # 一直等到够或对局自然结束——不设上限、不放弃回补（2026-09-05 定案）。
-        # 放在无进展检查之前：等待本身不算停滞，重置无进展计数，避免等待
-        # 期间误触保守停止。
-        # 金币信息缺失（未读取/OCR 失败）时不拦截，保持原有行为。
         gold = observation.raw_data.get("gold")
-        if gold is not None and not self._can_afford(gold, "summon"):
+        # 准备阶段（邀请者，准备完成未点）：召唤免费，跳过金币门控。
+        # 满盘未凑齐时：先合成/变身腾格子继续凑阵容（2026-09-26 用户定案：
+        # 停止召唤 → 变身 → 仍不凑够才点准备完成，剩余凑阵容交给培养期
+        # 金币召唤）；合成与变身都无解（只剩合3星的死局）→ 点准备完成
+        if self._invite_mode and not self._invite_ready_clicked:
+            if board.capacity.available <= 0:
+                merge = self._gold_wait_merge_action(observation, "准备阶段满盘凑阵容")
+                if merge is not None:
+                    return merge
+                assist = self._invite_gold_wait_assist(
+                    board, observation, "准备阶段满盘凑阵容"
+                )
+                if assist is not None:
+                    return assist
+                logger.info(
+                    "frame=%d 准备阶段满盘且合成/变身无解，点击准备完成"
+                    "（阵容未齐，剩余凑阵容交给培养期）",
+                    observation.frame_id,
+                )
+                ready_action = self._invite_ready_done_action(window_ctx)
+                if ready_action is None:
+                    return None
+                return ready_action
+        elif gold is not None and not self._can_afford(gold, "summon"):
+            # 召唤金币门控（开局强制召唤与准备阶段之外的所有召唤）：费用不足
+            # 时优先在等待空档合成（见下方分支），无对可合再原地等待金币恢复
+            # （击杀回金），一直等到够或对局自然结束——不设上限、不放弃回补
+            # （2026-09-05 定案）。放在无进展检查之前：等待本身不算停滞，
+            # 重置无进展计数，避免等待期间误触保守停止。
+            # 金币信息缺失（未读取/OCR 失败）时不拦截，保持原有行为。
             self._no_progress_count = 0
             self._last_board_signature = None
             if gold.get("summon_red"):
@@ -3979,7 +4011,9 @@ class CoopTask(Task):
         最后一次保留稳定等待供批后识别。
         """
         gold = observation.raw_data.get("gold")
-        if gold is not None and not self._can_afford(gold, "summon"):
+        # 准备阶段召唤免费：跳过金币门控（2026-09-26 用户定案）
+        prep_active = self._invite_mode and not self._invite_ready_clicked
+        if gold is not None and not prep_active and not self._can_afford(gold, "summon"):
             if gold.get("summon_red"):
                 detail = "召唤费用红色（游戏判买不起）"
             else:
@@ -4565,6 +4599,10 @@ class CoopTask(Task):
         self._entry_reclicks = 0
         self._entry_misses = 0
         self._start_entry_wait()
+        # 邀请者「准备完成」标记按局重置：否则第 2 局起永不点准备完成
+        # （此前靠游戏 90s 自动开始兜底，2026-09-26 凑阵容前移后必须逐局重置）
+        self._invite_ready_clicked = False
+        self._invite_light_walk = False
         self._summon_count = 0
         self._batch_summon_remaining = 0
         self._batch_merge_queue = []

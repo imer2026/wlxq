@@ -136,7 +136,13 @@ INVITE_COOLDOWN 等 kick_cooldown_seconds → 回 INVITE_CLICK 重发邀请
 ### 邀请者局内差异（spec §5）
 
 - 门禁：主C ≥1 星（`target_star_override`）且天使、雪姬在场（`required_lineup_heroes`）；
-- 开局召唤 5 次（`opening_summons`）后点「准备完成」（固定坐标，动作后验证）；
+- 开局召唤 5 次（`opening_summons`）后**不立即确认**：准备阶段召唤免费，
+  继续免费召唤 + 合成 + 变身凑阵容（门禁=猴子≥1 & 天使≥1（含幻天使）
+  & 雪姬≥1），凑齐才点「准备完成」（固定坐标，动作后验证）。兜底：满盘
+  且合成/变身都无解（只剩合 3 星死局）→ 也点准备完成，剩余凑阵容交给
+  培养期金币召唤；游戏 90s 自动开始，无需机器人侧超时（2026-09-26
+  用户定案：不设召唤次数/停留时长上限）。每局重置 `_invite_ready_clicked`
+  （2026-09-26 修复：此前不重置，第 2 局起永不点准备完成）；
 - 凑阵容：每批召唤 `summon_batch_size`(3) 个；棋盘满时安全合成腾格子
   （保留数 `hero_keep_counts` + 3 星软避让 `forbid_star3_merge`：产物 ≥3 星一律不合，
   占满也不合）；

@@ -5016,3 +5016,146 @@ class TestTransformSequence:
         assert task._transform_used_count == 0
         assert task._transform_stage is None
         assert task._transform_skip_signature is None
+
+
+# ---------------------------------------------------------------------------
+# 邀请者准备阶段：凑齐阵容再点准备完成（2026-09-26 用户定案）
+# ---------------------------------------------------------------------------
+
+
+def _monkey_invite_build_task(minimum_summons: int = 1):
+    """邀请者猴子 BUILD 任务：强制召唤已完成，带准备完成 hotspot。"""
+    from wlxq_bot.config import Hotspot
+
+    profile = MainCProfile(
+        display_name="猴子",
+        hero_template_dir="heroes/monkey",
+        required_lineup_heroes=["angel", "snow"],
+        lineup_variant_groups={"angel": ["angel_phantom"]},
+        hero_keep_counts={"angel": 1, "snow": 1, "death_knight": 0},
+        transform_sacrifice_order=["death_knight", "snow"],
+        target_star_override=1,
+    )
+    spots = {
+        "add_hero": Hotspot(x_ratio=0.7, y_ratio=0.96),
+        "mouse_park": Hotspot(x_ratio=0.5, y_ratio=0.06),
+        "opening_ready_done": Hotspot(x_ratio=0.68, y_ratio=0.30),
+    }
+    task = make_task(
+        main_c="monkey",
+        minimum_summons=minimum_summons,
+        main_c_profile=profile,
+        hotspots=spots,
+        batch_enabled=True,
+        transform_button_locator={"search_dx_ratio": 0.11},
+    )
+    task._invite_mode = True
+    task.ctx.current_state = State.BUILD_MAIN_C
+    task._summon_count = minimum_summons
+    return task
+
+
+def _full_board_without_lineup() -> BoardSnapshot:
+    """满盘 12 格、无雪姬、无合法合成对、无 3 星（变身无候选）。"""
+    heroes = [
+        make_hero("monkey", 1, (100, 200)),
+        make_hero("angel", 1, (200, 200)),
+        make_hero("death_knight", 1, (300, 200)),
+        make_hero("monkey", 2, (400, 200)),
+        make_hero("monkey", 2, (500, 200)),
+        make_hero("angel", 2, (600, 200)),
+        make_hero("angel", 2, (700, 200)),
+        make_hero("death_knight", 2, (800, 200)),
+        make_hero("death_knight", 2, (900, 200)),
+        make_hero("death_knight", 3, (1000, 200)),
+        make_hero("death_knight", 3, (1100, 200)),
+        make_hero("death_knight", 3, (1200, 200)),
+    ]
+    board = make_board(heroes)
+    return board
+
+
+class TestInvitePrepLineup:
+    def test_lineup_incomplete_keeps_free_summon_despite_no_gold(self):
+        """阵容未齐：金币不足也继续免费召唤（准备阶段跳过金币门控）。"""
+        task = _monkey_invite_build_task()
+        board = make_board([make_hero("monkey", 1), make_hero("angel", 1)])
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        # 旧逻辑（金币门控）会在这里等待恢复；准备阶段召唤免费，直接召唤
+        # （批规划帧返回 batch_summon 复合动作，批内点击才是 summon_hero）
+        assert action.tag == "batch_summon"
+
+    def test_lineup_ready_clicks_ready_done(self):
+        """凑齐 猴子+天使+雪姬 → 点准备完成。"""
+        task = _monkey_invite_build_task()
+        board = make_board(
+            [make_hero("monkey", 1), make_hero("angel", 1), make_hero("snow", 1)]
+        )
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "invite_ready_done"
+        assert to_state == State.BUILD_MAIN_C
+
+    def test_board_full_without_lineup_merges_first(self):
+        """满盘未凑齐：先合法合成腾格子（死骑保留数 0，1星对可合）。"""
+        task = _monkey_invite_build_task()
+        task._transform_used_count = 2  # 变身已耗尽，排除变身分支干扰
+        heroes = [
+            make_hero("monkey", 1, (100, 200)),
+            make_hero("angel", 1, (200, 200)),
+            make_hero("monkey", 2, (300, 200)),
+            make_hero("monkey", 2, (400, 200)),
+            make_hero("angel", 2, (500, 200)),
+            make_hero("angel", 2, (600, 200)),
+            make_hero("death_knight", 2, (700, 200)),
+            make_hero("death_knight", 2, (800, 200)),
+            make_hero("death_knight", 1, (900, 200)),
+            make_hero("death_knight", 1, (1000, 200)),
+            make_hero("death_knight", 3, (1100, 200)),
+            make_hero("death_knight", 3, (1200, 200)),
+        ]
+        board = make_board(heroes)  # 满盘，无雪姬
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "merge_heroes"
+
+    def test_board_full_stuck_clicks_ready_done(self):
+        """满盘、合成与变身都无解（阵容仍未齐）→ 点准备完成。
+
+        桩掉合成/变身探针（确定性）；真实策略的"还有 2星对可合"场景
+        由 test_board_full_without_lineup_merges_first 覆盖。
+        """
+        task = _monkey_invite_build_task()
+        task._transform_used_count = 2  # 变身耗尽
+        task._gold_wait_merge_action = lambda *a, **k: None
+        task._invite_gold_wait_assist = lambda *a, **k: None
+        board = _full_board_without_lineup()
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        action, _ = decision
+        assert action.tag == "invite_ready_done"
+
+    def test_round_reset_clears_invite_ready_clicked(self):
+        """每局重置必须清理准备完成标记：否则第 2 局起永不点准备完成。"""
+        task = _monkey_invite_build_task()
+        task._invite_ready_clicked = True
+        task._reset_for_home_reentry()
+        assert task._invite_ready_clicked is False
+        task._invite_ready_clicked = True
+        task._reset_for_next_round()
+        assert task._invite_ready_clicked is False
