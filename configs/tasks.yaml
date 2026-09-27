@@ -55,7 +55,7 @@ hotspots:
     x_ratio: 0.9094
     y_ratio: 0.1361
     description: 帮助者信息层 × 兜底关闭点
-  # 局内开局召唤完成后的「准备完成」（固定坐标点击，动作后验证）
+  # 局内开局召唤完成后的「准备完成」（固定坐标点击，无动作后验证）
   opening_ready_done:
     x_ratio: 0.6802
     y_ratio: 0.3017
@@ -847,8 +847,10 @@ gold_recognition:
   read_min_interval_seconds: 1.0
   # 数值门控（2026-09-26 替代只认色）：后台线程读 金币/费用 数字做数值
   # 比较，与颜色和皮肤无关——只认色在暗红棕城墙皮肤下恒判「买不起」
-  # （2026-09-26 00:47 实机）。读数在后台线程完成，主循环零阻塞
-  numeric_refresh_interval_seconds: 2.0
+  # （2026-09-26 00:47 实机）。读数在后台线程完成，主循环零阻塞。
+  # 0.5 = 两次读取间几乎不空等（单次 read_pair 本身 ~2s，实际节奏以它
+  # 为下限；门控状态期间后台 OCR 线程近乎满负荷，2026-09-27 定）
+  numeric_refresh_interval_seconds: 0.5
   # 快照年龄超过此值视同缺失 → 按「缺失不拦截」放行；只兜后台线程死亡
   numeric_stale_after_seconds: 30.0
 

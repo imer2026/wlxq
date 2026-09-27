@@ -894,6 +894,41 @@ class TestBuildMainCAction:
             assert action.tag == "frozen_board_wait"
             assert to_state == State.BUILD_MAIN_C
 
+    def test_merge_success_unfreezes_summon(self):
+        """合成成功解除召唤冻结（2026-09-27 实机事故）：冻结不再一冻一局。
+
+        第 2 局实机：两批召唤未落位误触发冻结（识别把占格读丢/锁定格误读
+        为空），此后合成腾出的真实空位永不复用，干等 4 分钟到局终。合成
+        成功 = 棋盘已变化，"点不进去"的依据过时，必须解冻恢复试探召唤。
+        """
+        task = make_task(main_c="monkey", batch_enabled=True)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._board_capacity_frozen = True
+        task._batch_no_land_streak = 2
+        task.on_action_verified(
+            Action(kind="drag", tag="merge_heroes", target=(1, 1), end=(2, 2)),
+            State.BUILD_MAIN_C,
+        )
+        assert task._board_capacity_frozen is False
+        assert task._batch_no_land_streak == 0
+        assert task._batch_planned_occupancy is None
+        # 下一帧：识别容量报告有空位 → 恢复召唤规划（而非 frozen_board_wait）
+        board = make_board(
+            [
+                make_hero("death_knight", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+            ]
+        )
+        decision = task.decide_action(
+            Observation(frame_id=2, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        action, to_state = decision
+        assert to_state == State.BUILD_MAIN_C
+        assert action.kind == "click"
+        assert action.tag == "batch_summon"
+
 
 # ---------------------------------------------------------------------------
 # decide_action - 其他状态
@@ -5115,7 +5150,8 @@ class TestTransformSequence:
 
 
 # ---------------------------------------------------------------------------
-# 邀请者准备阶段：凑齐阵容再点准备完成（2026-09-26 用户定案）
+# 邀请者「准备完成」：开局召唤完成后直接点击（2026-09-27 用户定案；
+# 2026-09-26 定案的「凑齐猴子+天使+雪姬再点」已废弃）
 # ---------------------------------------------------------------------------
 
 
@@ -5151,29 +5187,9 @@ def _monkey_invite_build_task(minimum_summons: int = 1):
     return task
 
 
-def _full_board_without_lineup() -> BoardSnapshot:
-    """满盘 12 格、无雪姬、无合法合成对、无 3 星（变身无候选）。"""
-    heroes = [
-        make_hero("monkey", 1, (100, 200)),
-        make_hero("angel", 1, (200, 200)),
-        make_hero("death_knight", 1, (300, 200)),
-        make_hero("monkey", 2, (400, 200)),
-        make_hero("monkey", 2, (500, 200)),
-        make_hero("angel", 2, (600, 200)),
-        make_hero("angel", 2, (700, 200)),
-        make_hero("death_knight", 2, (800, 200)),
-        make_hero("death_knight", 2, (900, 200)),
-        make_hero("death_knight", 3, (1000, 200)),
-        make_hero("death_knight", 3, (1100, 200)),
-        make_hero("death_knight", 3, (1200, 200)),
-    ]
-    board = make_board(heroes)
-    return board
-
-
-class TestInvitePrepLineup:
-    def test_lineup_incomplete_keeps_free_summon_despite_no_gold(self):
-        """阵容未齐：金币不足也继续免费召唤（准备阶段跳过金币门控）。"""
+class TestInviteReadyDone:
+    def test_lineup_incomplete_clicks_ready_done(self):
+        """阵容未齐：召唤完成即点准备完成，不等凑阵容（金币不足也不影响）。"""
         task = _monkey_invite_build_task()
         board = make_board([make_hero("monkey", 1), make_hero("angel", 1)])
         obs = Observation(
@@ -5183,13 +5199,15 @@ class TestInvitePrepLineup:
         )
         decision = task.decide_action(obs, make_window_ctx())
         assert decision is not None
-        action, _ = decision
-        # 旧逻辑（金币门控）会在这里等待恢复；准备阶段召唤免费，直接召唤
-        # （批规划帧返回 batch_summon 复合动作，批内点击才是 summon_hero）
-        assert action.tag == "batch_summon"
+        action, to_state = decision
+        assert action.tag == "invite_ready_done"
+        assert to_state == State.BUILD_MAIN_C
+        # 回归防护：该按钮无验证规则，next_frame 会必然失败空转 5 帧
+        # 全量观察（2026-09-27 定案固定坐标点击无动作后验证）
+        assert action.verification == "immediate"
 
     def test_lineup_ready_clicks_ready_done(self):
-        """凑齐 猴子+天使+雪姬 → 点准备完成。"""
+        """阵容凑齐（猴子+天使+雪姬）同样直接点准备完成。"""
         task = _monkey_invite_build_task()
         board = make_board(
             [make_hero("monkey", 1), make_hero("angel", 1), make_hero("snow", 1)]
@@ -5202,10 +5220,9 @@ class TestInvitePrepLineup:
         assert action.tag == "invite_ready_done"
         assert to_state == State.BUILD_MAIN_C
 
-    def test_board_full_without_lineup_merges_first(self):
-        """满盘未凑齐：先合法合成腾格子（死骑保留数 0，1星对可合）。"""
+    def test_board_full_clicks_ready_done(self):
+        """满盘未凑齐：同样直接点准备完成，不再先合成/变身腾格子。"""
         task = _monkey_invite_build_task()
-        task._transform_used_count = 2  # 变身已耗尽，排除变身分支干扰
         heroes = [
             make_hero("monkey", 1, (100, 200)),
             make_hero("angel", 1, (200, 200)),
@@ -5221,24 +5238,6 @@ class TestInvitePrepLineup:
             make_hero("death_knight", 3, (1200, 200)),
         ]
         board = make_board(heroes)  # 满盘，无雪姬
-        decision = task.decide_action(
-            Observation(frame_id=1, board=board), make_window_ctx()
-        )
-        assert decision is not None
-        action, _ = decision
-        assert action.tag == "merge_heroes"
-
-    def test_board_full_stuck_clicks_ready_done(self):
-        """满盘、合成与变身都无解（阵容仍未齐）→ 点准备完成。
-
-        桩掉合成/变身探针（确定性）；真实策略的"还有 2星对可合"场景
-        由 test_board_full_without_lineup_merges_first 覆盖。
-        """
-        task = _monkey_invite_build_task()
-        task._transform_used_count = 2  # 变身耗尽
-        task._gold_wait_merge_action = lambda *a, **k: None
-        task._invite_gold_wait_assist = lambda *a, **k: None
-        board = _full_board_without_lineup()
         decision = task.decide_action(
             Observation(frame_id=1, board=board), make_window_ctx()
         )

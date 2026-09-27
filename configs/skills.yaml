@@ -23,6 +23,8 @@ skills:
     description: 召唤流星数量+1
   - name: 战神化身
     description: 战士受到赐福时，额外提升20%攻击力，并暴击率翻倍
+  - name: 巨大流星
+    description: 流星范围提升50%
   死骑:
   - name: 死灵战神
     description: 大招！最高星死骑召唤死灵战神。伤害+50%，技能范围+20%，灵魂冲击附带剑气且无敌时间+5
@@ -96,6 +98,10 @@ skills:
     description: 冰核飞行结束时会爆炸，并且发出一圈20枚冰箭
   - name: 职业控制
     description: 最高星控制英雄冷却缩短50%
+  - name: 冰箭穿透
+    description: 冰箭穿透+1，冰箭伤害+80%
+  - name: 冰箭大伤害
+    description: 冰箭伤害+160%
   猴子:
   - name: 万化随形
     description: 场上所有小猴会有50%概率模仿悟空的招式

@@ -113,10 +113,12 @@ class FakeScreen:
     def __init__(self, ctx: WindowContext) -> None:
         self._ctx = ctx
         self.capture_count = 0
+        self.last_frame = None
 
     def capture(self, handle):
         self.capture_count += 1
-        return self._ctx, np.zeros((1723, 923, 3), dtype=np.uint8)
+        self.last_frame = np.zeros((1723, 923, 3), dtype=np.uint8)
+        return self._ctx, self.last_frame
 
 
 def _make_window_ctx() -> WindowContext:
@@ -249,6 +251,73 @@ class TestObserveCultivation:
 
         assert obs.board is not None
         assert obs.board.heroes == []
+
+
+class RecordingGoldCache:
+    """记录 submit 调用的假金币缓存：snapshot 返回固定快照。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def snapshot(self):
+        return {"current": 2000, "summon_cost": 320}
+
+    def submit(self, frame, **kwargs):
+        self.calls.append({"frame": frame, **kwargs})
+
+
+def _build_perception_with_gold(tmp_path, classifier, gold_cache):
+    """带金币 ROI 标定与注入缓存的 CoopPerception。"""
+    from wlxq_bot.assets import TemplatePack
+    from wlxq_bot.config import RoiConfig
+
+    pack_root = tmp_path / "3000x2000"
+    pack_root.mkdir(parents=True)
+    pack = TemplatePack(client_size=(3000, 2000), root=pack_root)
+    tasks_cfg = TasksConfig(
+        board={"helper": _helper_board_params()},
+        rois={
+            "gold_current_area": RoiConfig(
+                x_ratio=0.30, y_ratio=0.855, width_ratio=0.10, height_ratio=0.02
+            ),
+            "summon_cost_area": RoiConfig(
+                x_ratio=0.62, y_ratio=0.955, width_ratio=0.10, height_ratio=0.02
+            ),
+        },
+    )
+    return CoopPerception(
+        FakeVision([]),
+        pack,
+        tasks_cfg,
+        CoopRole.HELPER,
+        "assault",
+        hero_cell_classifier=classifier,
+        allowed_heroes={"assault", "angel", "snow", "death_knight"},
+        gold_cache=gold_cache,
+    )
+
+
+class TestObserveCultivationGoldFeed:
+    def test_multi_frame_path_submits_frame_to_gold_cache(self, tmp_path):
+        """回归（2026-09-27 实机）：多帧路径只读快照不喂帧，金币等待循环
+        全走本路径时信箱断粮、快照冻结在最后好值 30s。"""
+        classifier = FakeCellClassifier([_board_predictions(_prediction("empty"))] * 3)
+        gold_cache = RecordingGoldCache()
+        perception = _build_perception_with_gold(tmp_path, classifier, gold_cache)
+        ctx = _make_window_ctx()
+        screen = FakeScreen(ctx)
+
+        latest_ctx, obs = perception.observe_cultivation(screen, 1, ctx, n_frames=3)
+
+        # 每批喂一次（最新帧），不是每帧一次
+        assert len(gold_cache.calls) == 1
+        call = gold_cache.calls[0]
+        assert call["frame"] is screen.last_frame
+        assert call["frame_id"] == latest_ctx.frame_id
+        assert call["clean"] is True
+        assert call["cost_key"] == "summon_cost"
+        assert call["current_roi"] == (276, 1473, 92, 34)
+        assert obs.raw_data["gold"] == {"current": 2000, "summon_cost": 320}
 
 
 class TestDifficultyObservation:

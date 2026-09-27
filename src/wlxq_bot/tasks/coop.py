@@ -1295,7 +1295,11 @@ class CoopTask(Task):
     def _invite_ready_done_action(
         self, window_ctx: WindowContext | None = None
     ) -> tuple[Action, State] | None:
-        """邀请者「准备完成」一次性点击。
+        """邀请者「准备完成」一次性点击（固定坐标，无动作后验证）。
+
+        按钮无识别特征（2026-09-22 用户定案固定坐标不识别）；next_frame 验证
+        缺规则会必然失败空转 5 帧全量观察，2026-09-27 改 immediate。未点中的
+        兜底：仍处准备阶段则培养决策照常运行，游戏 90s 也会自动开始。
 
         Returns:
             首次调用返回点击动作；已点过（或非邀请模式）返回 None。
@@ -1312,7 +1316,7 @@ class CoopTask(Task):
                 target=point,
                 duration=0.08,
                 post_delay=1.5,
-                verification="next_frame",
+                verification="immediate",
                 tag="invite_ready_done",
                 reason="开局召唤完成，点击「准备完成」确认进入培养",
             ),
@@ -3417,22 +3421,19 @@ class CoopTask(Task):
             )
         self._empty_board_count = 0
 
-        # 邀请者「准备完成」（spec §5.4；2026-09-26 用户定案修订）：准备阶段
-        # 召唤免费，先凑齐阵容（猴子≥1 & 天使≥1 & 雪姬≥1，幻天使算天使）
-        # 再点确认；未凑齐时不点，走下方免费召唤/合成/变身循环继续凑
-        # （满盘兜底见金币门控处的准备阶段分支）
+        # 邀请者「准备完成」（2026-09-27 用户定案）：走到这里说明开局强制
+        # 召唤已完成且棋盘识别正常，直接点击确认，不再等待凑齐阵容
+        # （2026-09-26 定案的「猴子≥1 & 天使≥1 & 雪姬≥1 才点」废弃）；
+        # 剩余凑阵容交给培养期金币召唤
         if self._invite_mode and not self._invite_ready_clicked:
-            if self._strategy.main_c_ready(board, require_hero_count=False):
-                ready_action = self._invite_ready_done_action(window_ctx)
-                if ready_action is None:
-                    return None
-                logger.info(
-                    "frame=%d 准备阶段阵容已凑齐，点击准备完成进入常规培养",
-                    observation.frame_id,
-                )
-                return ready_action
-            # 未凑齐：不点准备完成，继续走下方免费召唤/合成/变身循环
-            # （满盘时的合成/变身/确认兜底在金币门控处的准备阶段分支）
+            ready_action = self._invite_ready_done_action(window_ctx)
+            if ready_action is None:
+                return None
+            logger.info(
+                "frame=%d 开局召唤完成，点击准备完成进入常规培养",
+                observation.frame_id,
+            )
+            return ready_action
 
         # 召唤落位护栏（2026-09-24）：上一批召唤点击全部发出后占用无增长 =
         # 打在锁定格/满盘上（识别模型未学过锁定格时 capacity 会虚报空位）。
@@ -3468,31 +3469,8 @@ class CoopTask(Task):
             )
 
         gold = observation.raw_data.get("gold")
-        # 准备阶段（邀请者，准备完成未点）：召唤免费，跳过金币门控。
-        # 满盘未凑齐时：先合成/变身腾格子继续凑阵容（2026-09-26 用户定案：
-        # 停止召唤 → 变身 → 仍不凑够才点准备完成，剩余凑阵容交给培养期
-        # 金币召唤）；合成与变身都无解（只剩合3星的死局）→ 点准备完成
-        if self._invite_mode and not self._invite_ready_clicked:
-            if board.capacity.available <= 0:
-                merge = self._gold_wait_merge_action(observation, "准备阶段满盘凑阵容")
-                if merge is not None:
-                    return merge
-                assist = self._invite_gold_wait_assist(
-                    board, observation, "准备阶段满盘凑阵容"
-                )
-                if assist is not None:
-                    return assist
-                logger.info(
-                    "frame=%d 准备阶段满盘且合成/变身无解，点击准备完成"
-                    "（阵容未齐，剩余凑阵容交给培养期）",
-                    observation.frame_id,
-                )
-                ready_action = self._invite_ready_done_action(window_ctx)
-                if ready_action is None:
-                    return None
-                return ready_action
-        elif gold is not None and not self._can_afford(gold, "summon"):
-            # 召唤金币门控（开局强制召唤与准备阶段之外的所有召唤）：费用不足
+        if gold is not None and not self._can_afford(gold, "summon"):
+            # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足
             # 时优先在等待空档合成（见下方分支），无对可合再原地等待金币恢复
             # （击杀回金），一直等到够或对局自然结束——不设上限、不放弃回补
             # （2026-09-05 定案）。放在无进展检查之前：等待本身不算停滞，
@@ -3546,10 +3524,11 @@ class CoopTask(Task):
             self._no_progress_count = 0
             # 棋盘内容变化时输出各格英雄，便于人工核对识别结果和后续动作
             logger.info(
-                "棋盘识别 frame=%d 占用=%d/%d: %s",
+                "棋盘识别 frame=%d 占用=%d/%d%s: %s",
                 observation.frame_id,
                 len(board.heroes),
                 board.capacity.total_slots,
+                "（冻结钳制值，非识别原始容量）" if self._board_capacity_frozen else "",
                 ", ".join(
                     f"{hero.hero_type}{hero.star_level}星@{_hero_location(hero)}"
                     for hero in board.heroes
@@ -4045,9 +4024,7 @@ class CoopTask(Task):
         最后一次保留稳定等待供批后识别。
         """
         gold = observation.raw_data.get("gold")
-        # 准备阶段召唤免费：跳过金币门控（2026-09-26 用户定案）
-        prep_active = self._invite_mode and not self._invite_ready_clicked
-        if gold is not None and not prep_active and not self._can_afford(gold, "summon"):
+        if gold is not None and not self._can_afford(gold, "summon"):
             if gold.get("summon_red"):
                 detail = "召唤费用红色（游戏判买不起）"
             else:
@@ -4325,6 +4302,18 @@ class CoopTask(Task):
             return not after.flag("return_button_visible")
         return False
 
+    def _unfreeze_summon(self, source: str) -> None:
+        """合成成功 = 棋盘已变化，落位护栏"点不进去"的依据过时：解除本局
+        召唤冻结并复位连败计数，让下一帧正常规划试探召唤（2026-09-27 用户
+        拍板：冻结不再一冻一局，合成腾出的空位必须重新可用）。"""
+        if not self._board_capacity_frozen:
+            return
+        self._board_capacity_frozen = False
+        self._batch_no_land_streak = 0
+        self._batch_planned_occupancy = None
+        self._batch_clicks_sent = 0
+        logger.info("合成成功（%s），解除召唤落位冻结，恢复试探召唤", source)
+
     def on_action_verified(self, action: Action, to_state: State) -> None:
         tag = action.tag
         if tag == "skill_refresh_wait_button":
@@ -4512,11 +4501,13 @@ class CoopTask(Task):
         elif tag == "merge_heroes":
             # 合成成功 = 拖动机制正常；清空失败记忆，让之前的失败对可重试
             self._failed_merge_pairs.clear()
+            self._unfreeze_summon("单动作合成")
         elif tag == "batch_merge":
             # 批次合成单拖已发送：弹出队首；拖动生效同样证明机制正常，
             # 清空失败记忆（与单动作合成语义一致）
             self._batch_merge_queue.pop(0)
             self._failed_merge_pairs.clear()
+            self._unfreeze_summon("批次合成")
         elif tag == "main_c_ready":
             # 数量已达标：清空技能选择计数，开始新一轮「选 N 次 → 检查数量」；
             # 同时丢弃可能残留的批次状态（培养已结束，批次不再有意义）
