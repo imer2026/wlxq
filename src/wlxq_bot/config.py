@@ -523,7 +523,8 @@ class InviteConfig(BaseModel):
 
     # 帮助者关卡进度阈值：低于踢掉请离，不低于留下开局
     min_stage_progress: int = Field(default=475, ge=1)
-    # 请离后冷却秒数，之后重走邀请点击链
+    # 请离后等房间回空（邀请文字重现）的兜底秒数：回空立即回等待态继续
+    # 检查进房 + 轻量邀请（全量大轮回不因请离重置）；超时未回空才重走邀请链
     kick_cooldown_seconds: float = Field(default=60.0, ge=0.0)
     # 等待无人进房的重发间隔秒数：全量邀请链（邀请→一键邀请→好友→
     # 公会招募→一键邀请→关弹窗）的重发周期

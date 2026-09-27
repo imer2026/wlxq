@@ -521,3 +521,136 @@ class TestInviteReinviteCadence:
         )
         assert action.tag == "invite_waiting"
         assert to_state == State.INVITE_WAITING
+
+class TestInviteCooldownReturn:
+    """请离后回流等待（2026-09-28 用户定案）：房间回空即回等待态。
+
+    60s 全量大轮回锚在上次全量邀请（_invite_full_since），不因请离重置；
+    回空后继续检查进房 + 轻量邀请；kick_cooldown_seconds 内未回空才重走
+    邀请链兜底（截止自冷却首帧起算）。非房间画面（锚点缺失）冻结回空判定。
+    测试模拟 runner：decide_action 返回目标态后手动提交 ctx.current_state。
+    """
+
+    def _cooldown_task(self, invite=None, clock=None) -> CoopTask:
+        task = _make_invite_task(invite=invite, clock=clock)
+        task.ctx.current_state = State.INVITE_COOLDOWN
+        task._invite_full_since = 0.0  # 全量邀请 T=0 发出（大轮回锚点）
+        return task
+
+    @staticmethod
+    def _room_obs(text_visible: bool) -> dict:
+        return {
+            "invite_start_ready_visible": True,  # 房间屏锚点（灰色未准备按钮）
+            "invite_text_visible": text_visible,
+        }
+
+    def test_cooldown_enables_invite_observation(self):
+        """冷却态走 invite_waiting 观察模式，并带房间锚点/× 识别 flags。"""
+        from wlxq_bot.perception.coop import _INTERFACE_FLAGS_BY_STATE
+
+        task = _make_invite_task()
+        assert task.observation_mode() is None  # INVITE_CLICK 无专项识别
+        task.ctx.current_state = State.INVITE_COOLDOWN
+        assert task.observation_mode() == "invite_waiting"
+        flags = _INTERFACE_FLAGS_BY_STATE[State.INVITE_COOLDOWN]
+        assert {"close_button", "invite_start_ready", "invite_start_not_ready"} <= flags
+
+    def test_room_empty_returns_to_waiting_without_reinvite_chain(self):
+        """踢生效（文字重现）→ 立即回 INVITE_WAITING，不重走点击链。"""
+        clock = _FakeClock()
+        task = self._cooldown_task(clock=clock)
+        clock.now = 26.0  # 踢后下一帧房间已回空
+        action, to_state = task.decide_action(
+            _observation(self._room_obs(True)), _window_ctx()
+        )
+        assert action.tag == "invite_cooldown_room_empty"
+        assert to_state == State.INVITE_WAITING
+        assert task._invite_cooldown_until is None
+        assert task._invite_full_since == 0.0  # 大轮回未重置
+        # 回等待态首帧：轻量/全量都未到期 → 普通等待（不是 invite_reinvite）
+        task.ctx.current_state = State.INVITE_WAITING
+        clock.now = 27.0
+        action2, to_state2 = task.decide_action(
+            _observation(self._room_obs(True)), _window_ctx()
+        )
+        assert action2.tag == "invite_waiting"
+        assert to_state2 == State.INVITE_WAITING
+
+    def test_full_cycle_due_after_kick_not_from_kick(self):
+        """T=24 进房、T=26 踢：全量重邀仍在 T=60 到期（大轮回），而非踢后 +60s。"""
+        clock = _FakeClock()
+        task = self._cooldown_task(clock=clock)
+        clock.now = 26.0
+        _, to_state = task.decide_action(
+            _observation(self._room_obs(True)), _window_ctx()
+        )
+        assert to_state == State.INVITE_WAITING
+        task.ctx.current_state = State.INVITE_WAITING
+        clock.now = 60.0  # 自 T=0 全量起算到期；若自踢时刻起算要到 T=86
+        action, to_state2 = task.decide_action(
+            _observation(self._room_obs(True)), _window_ctx()
+        )
+        assert action.tag == "invite_reinvite"
+        assert to_state2 == State.INVITE_CLICK
+
+    def test_light_reinvite_resumes_after_return(self):
+        """回空后轻量邀请按节奏恢复：回等待态 15s 后发轻量短链。"""
+        clock = _FakeClock()
+        task = self._cooldown_task(clock=clock)
+        clock.now = 26.0
+        task.decide_action(_observation(self._room_obs(True)), _window_ctx())
+        task.ctx.current_state = State.INVITE_WAITING
+        clock.now = 26.5  # 等待态首帧重置轻量计时（wait_since≈26.5）
+        first, _ = task.decide_action(_observation(self._room_obs(True)), _window_ctx())
+        assert first.tag == "invite_waiting"
+        clock.now = 42.0  # 距计时重置 15s
+        action, to_state = task.decide_action(
+            _observation(self._room_obs(True)), _window_ctx()
+        )
+        assert action.tag == "invite_reinvite_light"
+        assert to_state == State.INVITE_CLICK
+
+    def test_join_during_return_is_evaluated_not_reinvited(self):
+        """回等待态后有人进房（文字消失+锚点在）→ 打开帮助者信息层评估。"""
+        clock = _FakeClock()
+        task = self._cooldown_task(clock=clock)
+        clock.now = 26.0
+        task.decide_action(_observation(self._room_obs(True)), _window_ctx())
+        task.ctx.current_state = State.INVITE_WAITING
+        clock.now = 40.0
+        action, to_state = task.decide_action(
+            _observation(self._room_obs(False)), _window_ctx()
+        )
+        assert action.tag == "invite_open_helper_info"
+        assert to_state == State.INVITE_WAITING
+
+    def test_timeout_without_empty_rewalks_chain(self):
+        """kick_cooldown_seconds 内文字未重现 → 兜底回 INVITE_CLICK 重走全量链。"""
+        clock = _FakeClock()
+        invite = InviteConfig(kick_cooldown_seconds=60.0)
+        task = self._cooldown_task(invite=invite, clock=clock)
+        clock.now = 26.0  # 冷却首帧起算截止 86s
+        action, to_state = task.decide_action(
+            _observation(self._room_obs(False)), _window_ctx()
+        )
+        assert action.tag == "invite_cooldown"
+        assert to_state == State.INVITE_COOLDOWN
+        clock.now = 86.1
+        action2, to_state2 = task.decide_action(
+            _observation(self._room_obs(False)), _window_ctx()
+        )
+        assert action2.tag == "invite_cooldown_done"
+        assert to_state2 == State.INVITE_CLICK
+        assert task._invite_step == 0  # 全量链从头走
+
+    def test_non_room_screen_freezes_empty_check(self):
+        """锚点缺失（加载页/过渡）不判回空：即使文字误报可见也不回流。"""
+        clock = _FakeClock()
+        task = self._cooldown_task(clock=clock)
+        clock.now = 30.0
+        action, to_state = task.decide_action(
+            _observation({"invite_text_visible": True}), _window_ctx()
+        )
+        assert action.tag == "invite_cooldown"
+        assert to_state == State.INVITE_COOLDOWN
+        assert task._invite_cooldown_until is not None  # 未消费冷却

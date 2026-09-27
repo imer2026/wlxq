@@ -101,7 +101,14 @@ INVITE_START    轮询开局按钮双态模板（invite_start_button_area）：
                 等待预算 ready_timeout_seconds（自判合格起算，0=一直等）：
                 超时仍未开局 → 点【请离】→ INVITE_COOLDOWN
                 （连续 max_consecutive_kicks 次保守停止）
-INVITE_COOLDOWN 等 kick_cooldown_seconds → 回 INVITE_CLICK 重发邀请
+INVITE_COOLDOWN 请离后回流等待（2026-09-28 用户定案）：房间屏锚点（金/灰
+                按钮）下「邀请」文字重现 = 踢生效、槽位回空 → 立即回
+                INVITE_WAITING 继续检查进房 + 轻量邀请；60s 全量大轮回
+                （自上次全量邀请起算）不因请离重置，请离不打断轻量节奏
+                （回等待态首帧重置轻量计时）。
+                锚点缺失（加载页/过渡画面）冻结回空判定。
+                kick_cooldown_seconds 内文字未重现（踢未生效或新帮助者
+                已占槽）→ 回 INVITE_CLICK 重走邀请链从头复核房间状态
 ```
 
 **房间屏模型（2026-09-26 退出帧修正）**：组队房间只有一张屏（彩虹 N 层

@@ -128,7 +128,12 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     State.INVITE_START: frozenset(
         {"invite_start_ready", "invite_start_not_ready", "invite_button_label"}
     ),
-    State.INVITE_COOLDOWN: frozenset(),
+    # 冷却回流态（2026-09-28）：回空判定与 INVITE_WAITING 同源——邀请文字
+    # 重现（槽位回空）需以金/灰按钮（房间屏锚点）为前提，锚点缺失时冻结
+    # 判定；close_button 供 invite_waiting 观察模式的进度 OCR 门控
+    State.INVITE_COOLDOWN: frozenset(
+        {"close_button", "invite_start_ready", "invite_start_not_ready"}
+    ),
     State.ENTER_MATCH: frozenset({"ready_button"}),
     State.SELECT_OPENING_SKILLS: frozenset(
         {"select_skill_button", "summon_button", "tan_chuang", "return_button"}
@@ -1641,6 +1646,10 @@ class CoopPerception:
                 gold = self._read_gold(latest_ctx, latest_frame)
                 if gold is not None:
                     raw_data["gold"] = gold
+                # 多帧路径必须喂帧：金币等待循环每轮全走本路径且无动作后
+                # 单帧验证，只读不喂会让信箱断粮、快照冻结在最后好值
+                # （2026-09-27 实机：冻在 173 整整 30s，只能等超龄放行）
+                self._submit_gold_frame(latest_ctx, latest_frame, State.BUILD_MAIN_C, raw_data)
         observation = Observation(
             frame_id=latest_frame_id,
             source_frame_ids=tuple(source_frame_ids or [latest_frame_id]),

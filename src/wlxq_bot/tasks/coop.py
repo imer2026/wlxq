@@ -387,12 +387,18 @@ class CoopTask(Task):
         wait = Action(kind="wait", duration=0.3, verification="immediate", reason="占位动作")
         return [
             Transition("find_coop", State.FIND_COOP, State.ENTER_MATCH, wait),
-            # 邀请者组队链（spec §6）：点击链 → 等待过滤 → 等准备开局；冷却回点击链
+            # 邀请者组队链（spec §6）：点击链 → 等待过滤 → 等准备开局；
+            # 冷却回流：回空回等待态，超时未回空才回点击链（2026-09-28 定案）
             Transition("invite_click", State.INVITE_CLICK, State.INVITE_WAITING, wait),
             Transition("invite_filter", State.INVITE_WAITING, State.INVITE_START, wait),
             Transition("invite_kick", State.INVITE_WAITING, State.INVITE_COOLDOWN, wait),
             Transition("invite_reentry", State.INVITE_START, State.ENTER_MATCH, wait),
-            Transition("invite_cooldown", State.INVITE_COOLDOWN, State.INVITE_CLICK, wait),
+            Transition(
+                "invite_cooldown_back", State.INVITE_COOLDOWN, State.INVITE_WAITING, wait
+            ),
+            Transition(
+                "invite_cooldown_reclick", State.INVITE_COOLDOWN, State.INVITE_CLICK, wait
+            ),
             Transition("ready", State.ENTER_MATCH, State.SELECT_OPENING_SKILLS, wait),
             Transition("select_opening", State.SELECT_OPENING_SKILLS, State.BUILD_MAIN_C, wait),
             Transition("cultivate_loop", State.BUILD_MAIN_C, State.BUILD_MAIN_C, wait),
@@ -553,10 +559,11 @@ class CoopTask(Task):
 
     def observation_mode(self) -> str | None:
         if self.ctx.current_state in _INVITE_TEAM_STATES:
-            # 邀请者组队态（spec §6）：等待态用限域 OCR 读「邀请」文字与
-            # 帮助者关卡进度；其余组队态无专项识别（开局按钮走全局 locator
-            # 标志，见 perception._INTERFACE_FLAGS_BY_STATE 的 INVITE_START）
-            if self.ctx.current_state == State.INVITE_WAITING:
+            # 邀请者组队态（spec §6）：等待态与冷却回流态共用限域识别——
+            # 冷却改回流等待（2026-09-28 定案）后，回空判定同样需要「邀请」
+            # 文字模板与房间锚点；点击链/开局等待态无专项识别（开局按钮走
+            # 全局 locator 标志，见 perception._INTERFACE_FLAGS_BY_STATE）
+            if self.ctx.current_state in (State.INVITE_WAITING, State.INVITE_COOLDOWN):
                 return "invite_waiting"
             return None
         if self._transform_stage is not None:
@@ -997,7 +1004,7 @@ class CoopTask(Task):
             if kick is None:
                 return None
             logger.info(
-                "请离低进度帮助者（第 %d/%d 个），%ds 冷却后重邀",
+                "请离低进度帮助者（第 %d/%d 个），回空即回等待态（%ds 未回空才重走邀请链）",
                 self._invite_kick_count,
                 self._invite.max_consecutive_kicks,
                 int(self._invite.kick_cooldown_seconds),
@@ -1008,9 +1015,9 @@ class CoopTask(Task):
                     target=kick,
                     duration=0.08,
                     post_delay=0.5,
-                    # INVITE_COOLDOWN 态不识别任何标志，next_frame 无画面特征
-                    # 可验证必然白等 5 帧（2026-09-25 20:05 日志）；冷却后重走
-                    # 邀请链从头复核房间状态，点击生效性由那条链兜底
+                    # INVITE_COOLDOWN 为回流等待态：回空即回 INVITE_WAITING，
+                    # kick 未生效时超时重走邀请链从头复核房间状态，点击
+                    # 生效性由那条链兜底
                     verification="immediate",
                     tag="invite_kick_helper",
                     reason="请离低于阈值的帮助者",
@@ -1056,9 +1063,10 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         """请离当前帮助者进冷却；连续请离达上限返回 None（保守停止）。
 
-        验证用 immediate：INVITE_COOLDOWN 态不识别任何标志，next_frame 没有
-        可验证的画面特征必然白等 5 帧（实机 2026-09-25 20:05 日志）；冷却后
-        重走邀请链会从头复核房间状态，点击是否生效由那条链兜底。
+        验证用 immediate：冷却回流态的迁移不依赖单击帧画面（回空判定由
+        INVITE_COOLDOWN 逐帧做），next_frame 无可验证特征必然白等 5 帧；
+        kick 未生效时超时重走邀请链会从头复核房间状态，点击是否生效由
+        那条链兜底。
         """
         if self._invite_kick_count >= self._invite.max_consecutive_kicks:
             logger.error(
@@ -1071,7 +1079,7 @@ class CoopTask(Task):
         if kick is None:
             return None
         logger.info(
-            "等待帮助者准备超时，请离（第 %d/%d 个），%ds 冷却后重邀",
+            "等待帮助者准备超时，请离（第 %d/%d 个），回空即回等待态（%ds 未回空才重走邀请链）",
             self._invite_kick_count,
             self._invite.max_consecutive_kicks,
             int(self._invite.kick_cooldown_seconds),
@@ -1171,10 +1179,36 @@ class CoopTask(Task):
         observation: Observation,
         window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
-        """请离后冷却：到时重走 5 步点击链。"""
+        """请离后回流等待（2026-09-28 用户定案）：房间回空即回等待态。
+
+        60s 全量大轮回锚在上次全量邀请（_invite_full_since），不因请离重置。
+        请离后持续观察：邀请文字在房间屏锚点（金/灰按钮）下重现 = 踢已生效、
+        槽位回空，立即回 INVITE_WAITING 继续检查进房 + 轻量邀请（_invite_wait_since
+        由等待态首帧重置，轻量链按节奏照常发出）。文字超 kick_cooldown_seconds
+        仍不重现（踢未生效或新帮助者已占槽）才重走邀请链从头复核房间状态。
+        锚点缺失（加载页/过渡画面）冻结回空判定——非房间画面同样读不到
+        邀请文字，缺失不构成回空或占位证据（2026-09-26 实机教训）。
+        """
         now = self._clock()
         if self._invite_cooldown_until is None:
             self._invite_cooldown_until = now + self._invite.kick_cooldown_seconds
+        in_room_screen = observation.flag(
+            "invite_start_ready_visible"
+        ) or observation.flag("invite_start_not_ready_visible")
+        if in_room_screen and observation.flag("invite_text_visible"):
+            self._invite_cooldown_until = None
+            self._invite_wait_since = None
+            logger.info("请离生效，房间回空，回等待态继续检查进房与轻量邀请（大轮回不重置）")
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.3,
+                    verification="immediate",
+                    tag="invite_cooldown_room_empty",
+                    reason="请离生效，房间回空，继续等待新帮助者（大轮回不重置）",
+                ),
+                State.INVITE_WAITING,
+            )
         remaining = self._invite_cooldown_until - now
         if remaining > 0:
             return (
@@ -1183,20 +1217,24 @@ class CoopTask(Task):
                     duration=min(remaining, 2.0),
                     verification="immediate",
                     tag="invite_cooldown",
-                    reason=f"请离后冷却，{remaining:.0f}s 后重新邀请",
+                    reason=f"请离后等房间回空，{remaining:.0f}s 内未回空则重走邀请链",
                 ),
                 State.INVITE_COOLDOWN,
             )
         self._invite_cooldown_until = None
         self._invite_step = 0
         self._invite_wait_since = None
+        logger.warning(
+            "请离后 %ds 未确认房间回空，重走邀请链复核房间状态",
+            int(self._invite.kick_cooldown_seconds),
+        )
         return (
             Action(
                 kind="wait",
                 duration=0.2,
                 verification="immediate",
                 tag="invite_cooldown_done",
-                reason="冷却结束，重新发起邀请",
+                reason="冷却超时未回空，重新发起邀请",
             ),
             State.INVITE_CLICK,
         )

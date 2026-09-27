@@ -570,7 +570,7 @@ class State(str, Enum):
     INVITE_CLICK = "invite_click"        # 5 步邀请点击链
     INVITE_WAITING = "invite_waiting"    # 等待进房 + 帮助者过滤
     INVITE_START = "invite_start"        # 等帮助者准备并点开局
-    INVITE_COOLDOWN = "invite_cooldown"  # 请离后冷却，超时重走点击链
+    INVITE_COOLDOWN = "invite_cooldown"  # 请离后等房间回空，回等待态；超时重走点击链
     ENTER_MATCH = "enter_match"
     SELECT_OPENING_SKILLS = "select_opening_skills"
     BUILD_MAIN_C = "build_main_c"
