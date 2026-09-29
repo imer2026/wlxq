@@ -117,6 +117,7 @@
 - [ ] `opening_summons=5` 与技能系统解锁的关系（强袭实机值 7）：召唤 5 次后技能系统是否解锁；不解锁则开局卡在选技能前。
 - [ ] 猴子分类器：种子模型 monkey-v3 已产出（两局 1611 张、十类）；import 002 其余 7 局建议组待人工审核后重训正式模型并切换 default.yaml。
 - [ ] 猴子技能卡采集（skills.yaml 尚无猴子段）：已降级为非阻塞——skill_priority 只锁天使大/雪姬大两档（2026-09-23 定案），其余随便选走自动档；挂机时顺路开 skill_collection 采集建册即可。
+- [ ] **阵容换血：雪姬 → 狐狸（2026-09-28 定案并全部落地，待实机复验）**。已完成：skills.yaml 狐狸段 9 条（用户截图转写）；default.yaml 换血配置（monkey 档案 required_lineup_heroes/hero_keep_counts/transform_sacrifice_order/skill_priority 第 2 档千狐魅影/**档案级 lineup_others=[angel,fox,death_knight]**——档案覆盖语义见 config.py，全局 lineup_others 仍是雪姬阵容供强袭号继承，勿改回全局 fox，会炸强袭启动校验）；monkey-v5 分类器（12 类含 fox、validation 总体 99.46%、fox 435 张全对）已切配置。遗留：052/056/102 三局非狐狸格子未走候选流补标。**实机首跑验证**：狐狸格识别、门禁（天使+狐狸）、保留数合成、牺牲序死骑→狐狸、技能第 2 档千狐魅影。
 - [ ] `board.initiator` 14 格首次实机复核（Debug Recorder 标注图对照，偏差明显再 pick --rect 重测；当前为排6B 反推的半推导参数）。
 - [ ] 等待帮助者点准备的超时默认 60s 请离重来（ready_timeout_seconds）是否符合实战节奏。
 - [ ] 邀请链第 2 步【一键邀请】（2026-09-23 流程变更新增）与好友页【一键邀请】同坐标的双击节奏实机验证。

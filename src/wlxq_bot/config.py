@@ -90,6 +90,20 @@ class LoggingConfig(BaseModel):
     retention_days: int = Field(default=7, ge=1)
 
 
+def _parse_hero_identifier_list(value: Any, label: str) -> list[str]:
+    """把配置中的英雄标识列表规范化；非法标识（非小写英文/数字/下划线）报错。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        items = [str(item).strip() for item in value if str(item).strip()]
+    for item in items:
+        if re.fullmatch(r"[a-z][a-z0-9_]*", item) is None:
+            raise ValueError(f"{label} 含非法英雄标识: {item!r}")
+    return items
+
+
 class MainCProfile(BaseModel):
     display_name: str
     hero_template_dir: str
@@ -112,8 +126,8 @@ class MainCProfile(BaseModel):
     skill_selection_cap: int = Field(default=0, ge=0, le=100)
     # 技能选择优先级（标题 OCR 主路径）：档位号 → 技能名数组，数字越小越优先；
     # 同档多张随机点一张。第 8 档（主C其他技能）与第 11 档（清单剩余技能）
-    # 启动时自动计算，配置了会被忽略。未配置时技能选择走原有图标识别流程。
-    # 技能名需与 configs/skills.yaml 一致
+    # 对未显式配置的技能启动时自动兜底，显式配置优先。未配置时技能选择走
+    # 原有图标识别流程。技能名需与 configs/skills.yaml 一致
     skill_priority: dict[int, list[str]] = Field(default_factory=dict)
     # 主C未列入 skill_priority 的技能是否优先于其他英雄技能（第 8 档 vs
     # 第 11 档，强袭需要）；false = 主C未列技能与其余技能同档随机——
@@ -142,6 +156,16 @@ class MainCProfile(BaseModel):
     # 变身碰辅助模式：按此顺序选牺牲英雄（取第一个在场数 > 保留数的）赌变出
     # 缺的辅助；触发条件为阵容不齐 + 棋盘满 + 无安全合成。空 = 强袭的碰主C模式
     transform_sacrifice_order: list[str] = Field(default_factory=list)
+    # 本局携带阵容（主C之外的固定队友）档案覆盖，与 hero_classifier.lineup_others
+    # 同语义（识别白名单、模型类别启动校验、技能档位阵容过滤）。各账号的游戏内
+    # 阵容相互独立，阵容分叉的号在档案里显式声明（如猴子号 2026-09-28 雪姬→狐狸）；
+    # 空 = 继承全局 hero_classifier.lineup_others
+    lineup_others: list[str] = Field(default_factory=list)
+
+    @field_validator("lineup_others", mode="before")
+    @classmethod
+    def _validate_lineup_others(cls, value: Any) -> list[str]:
+        return _parse_hero_identifier_list(value, "MainCProfile.lineup_others")
 
 
 class DifficultyProfile(BaseModel):
@@ -247,20 +271,6 @@ class SkillCollectionConfig(BaseModel):
     hero_icons: dict[str, list[str]] = Field(default_factory=dict)
     # 离线图标匹配置信度低于该值的卡归为 unknown
     min_icon_confidence: float = Field(default=0.70, ge=0.0, le=1.0)
-
-
-def _parse_hero_identifier_list(value: Any, label: str) -> list[str]:
-    """把配置中的英雄标识列表规范化；非法标识（非小写英文/数字/下划线）报错。"""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        items = [item.strip() for item in value.split(",") if item.strip()]
-    else:
-        items = [str(item).strip() for item in value if str(item).strip()]
-    for item in items:
-        if re.fullmatch(r"[a-z][a-z0-9_]*", item) is None:
-            raise ValueError(f"{label} 含非法英雄标识: {item!r}")
-    return items
 
 
 class RunConfig(BaseModel):
@@ -567,6 +577,15 @@ class DefaultConfig(BaseModel):
             if unknown:
                 raise ValueError(
                     f"hero_classifier.lineup_others 引用了未定义的英雄: {unknown}；"
+                    f"已知英雄: {sorted(known)}"
+                )
+        # 档案级阵容覆盖同样只允许引用已定义英雄
+        for name, profile in self.main_c_profiles.items():
+            known = set(self.main_c_profiles)
+            unknown = [h for h in profile.lineup_others if h not in known]
+            if unknown:
+                raise ValueError(
+                    f"main_c_profiles.{name}.lineup_others 引用了未定义的英雄: {unknown}；"
                     f"已知英雄: {sorted(known)}"
                 )
         return self

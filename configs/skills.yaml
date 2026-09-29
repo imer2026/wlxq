@@ -131,3 +131,24 @@ skills:
     description: 棍舞过程中，50%概率对周围随机怪物进行一次劈棍
   - name: 大闹天宫
     description: 最高星悟空天降金箍棒造成伤害后，分化双倍数量小猴攻击怪物（强化词条越多，伤害越高）
+  狐狸:
+  - name: 千狐魅影
+    description: 大招！最高星妲己显露真身，爱心会幻化成狐狸从左右屏边出现，星级越高狐狸持续越久
+  - name: 盈天灵珠
+    description: 爱心变大30%，魅惑时间+1.2s
+  - name: 摄魂之力
+    description: 妲己伤害+60%，魅惑时间+2s
+  - name: 狐灵惑心
+    description: 被魅惑到的怪物受到伤害提升20%
+  - name: 回风珠返
+    description: 最高星妲己爱心碰墙壁会反弹，爱心持续时间延长60%
+  - name: 爆炸范围
+    description: 妲己爱心交错爆炸的范围提升30%，伤害提升80%
+  - name: 灵魂震爆
+    description: 最高星妲己的爱心交错时会爆炸，造成240%伤害并魅惑怪物
+  - name: 狐尾爱心
+    description: 交错爆炸时，会炸出5颗狐尾爱心
+  - name: 九尾爱心
+    description: 狐尾爱心提升至9颗
+  - name: 职业控制
+    description: 最高星控制英雄冷却缩短50%

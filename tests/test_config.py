@@ -578,3 +578,41 @@ class TestWildcardMergeAndVariants:
         assert run.wildcard_merge_heroes == ["angel_phantom"]
         with pytest.raises(ValidationError, match="非法英雄标识"):
             RunConfig(wildcard_merge_heroes=["9bad"])
+
+    def test_repo_default_yaml_lineup_others_account_split(self) -> None:
+        """阵容分叉（2026-09-28）：monkey 档案显式狐狸阵容，全局默认仍是雪姬阵容。
+
+        强袭号没换阵容且其模型无 fox 类——全局若仍是 fox 会让默认 run 启动校验
+        直接失败（回归：英雄格模型缺少本局阵容类别: fox）。
+        """
+        cfg = load_default_config(Path("configs/default.yaml"))
+        assert cfg.hero_classifier.lineup_others == ["angel", "snow", "death_knight"]
+        assert cfg.main_c_profiles["monkey"].lineup_others == [
+            "angel",
+            "fox",
+            "death_knight",
+        ]
+        # 未声明档案的 lineup_others 为空，语义 = 继承全局
+        assert cfg.main_c_profiles["assault"].lineup_others == []
+
+    def test_main_c_profile_lineup_others_rejects_bad_identifier(self) -> None:
+        from wlxq_bot.config import MainCProfile
+
+        with pytest.raises(ValidationError, match="非法英雄标识"):
+            MainCProfile(
+                display_name="x",
+                hero_template_dir="h",
+                lineup_others=["9bad"],
+            )
+
+    def test_runner_lineup_others_profile_overrides_global(self) -> None:
+        """runner 取阵容：档案显式声明优先，未声明继承全局。"""
+        from pathlib import Path
+
+        from wlxq_bot.runner import Runner
+
+        cfg = load_default_config(Path("configs/default.yaml"))
+        runner = Runner.__new__(Runner)
+        runner.default_config = cfg
+        assert runner._lineup_others_for("monkey") == ["angel", "fox", "death_knight"]
+        assert runner._lineup_others_for("assault") == ["angel", "snow", "death_knight"]

@@ -305,8 +305,8 @@ main_c_profiles:
     skill_selection_cap: 9
     # 技能选择优先级（标题 OCR 主路径）：档位号 → 技能名数组，数字越小越优先；
     # 同档多张随机点一张。第 8 档（强袭其他技能）与第 11 档（清单剩余技能）
-    # 启动时自动计算；技能名需与 configs/skills.yaml 一致。删除本节即回退
-    # 原有图标识别+随机选卡流程
+    # 对未显式配置的技能启动时自动兜底；技能名需与 configs/skills.yaml 一致。
+    # 删除本节即回退原有图标识别+随机选卡流程
     skill_priority:
       1: [天穹支援]
       2: [传导共振]
@@ -321,10 +321,11 @@ main_c_profiles:
   monkey:
     display_name: 猴子
     hero_template_dir: heroes/monkey
-    # 正式模型（2026-09-27，9 局 7426 张、12 类含 empty/unavailable；validation
-    # 202609212119 整局隔离 1104 张：总体 99.28%，10 英雄组合全部 ≥99.5%；
-    # unavailable 92% 偏低系特效锁定格边界，运行时有落位护栏兜底）
-    hero_classifier_model: outputs/hero_classifier/monkey-v4/hero_classifier.onnx
+    # 正式模型（2026-09-28 阵容换血雪姬→狐狸后重训；12 类=empty/unavailable+
+    # monkey/angel/fox/death_knight/angel_phantom 各 star1/2，snow 已随阵容移除；
+    # validation=202609212119+狐狸局 202609282102 整局隔离 1305 张：总体 99.46%、
+    # fox 435 张全对、unavailable 94% 偏低系特效锁定格边界，运行时有落位护栏兜底）
+    hero_classifier_model: outputs/hero_classifier/monkey-v5/hero_classifier.onnx
     skill_icon_templates: []
     # ---- 邀请者打法（spec 2026-09-21-initiator-monkey-design.md）----
     # 主C门禁 1 星即达标；开局召唤 5 个后点「准备完成」，对局内每批 3 个召唤凑阵容
@@ -333,34 +334,41 @@ main_c_profiles:
     summon_batch_size: 3
     # 邀请者不合 3 星：产物星级 ≥3 的合并一律不做（棋盘占满也不做）
     forbid_star3_merge: true
-    # 保留数：天使/雪姬/猴子至少 1 个在场才可合并消耗；死骑 0（可自由合）
+    # 保留数：天使/狐狸/猴子至少 1 个在场才可合并消耗；死骑 0（可自由合）
     hero_keep_counts:
       angel: 1
-      snow: 1
+      fox: 1
       death_knight: 0
-    # 阵容门禁：天使 + 雪姬在场（猴子看星级门禁）才转纯选技能
-    required_lineup_heroes: [angel, snow]
+    # 阵容门禁：天使 + 狐狸在场（猴子看星级门禁）才转纯选技能
+    # （2026-09-28 阵容换血：雪姬 → 狐狸）
+    required_lineup_heroes: [angel, fox]
     # 幻天使是天使的形态（game-rules.md）：棋盘上有幻天使即算有天使
     lineup_variant_groups:
       angel: [angel_phantom]
-    # 卡住时变身碰辅助：牺牲顺序死骑 → 雪姬（仅数量≥2 时）；天使/猴子永不在列
-    transform_sacrifice_order: [death_knight, snow]
-    # 技能优先级（2026-09-23 用户定案）：只锁两档——天使大、雪姬大；
+    # 本号携带阵容（2026-09-28 阵容换血雪姬→狐狸）：覆盖全局 lineup_others，
+    # 识别白名单/模型类别启动校验/技能档位过滤均按本值
+    lineup_others: [angel, fox, death_knight]
+    # 卡住时变身碰辅助：牺牲顺序死骑 → 狐狸（保留数 1 → 仅数量≥2 时可牺牲）；
+    # 天使/猴子永不在列
+    transform_sacrifice_order: [death_knight, fox]
+    # 技能优先级（2026-09-23 用户定案）：只锁两档——天使大、狐狸大；
     # 其他技能随便选：第 8 档（猴子其他技能）与第 11 档（清单剩余技能）
     # 启动时自动算到最低优先级，同档随机点一张
-    # 三档模型（2026-09-25 定案）：天使大/雪姬大 + 其他（主C未列技能
+    # 三档模型（2026-09-25 定案）：天使大/狐狸大 + 其他（主C未列技能
     # 不优先，与其余技能同档随机）
     prefer_main_c_skills: false
-    # 技能优先级（2026-09-25 用户定案）：1~7 档显式；未列出的技能全部
-    # 落同一档随机（prefer_main_c_skills=false 使主C未列技能也并入）
+    # 技能优先级（2026-09-25 用户定案，2026-09-29 增第 8 档乱点天宫）：
+    # 1~8 档显式；未列出的技能全部落同一档随机（prefer_main_c_skills=false
+    # 使主C未列技能也并入第 11 档）
     skill_priority:
       1: [神圣契约]
-      2: [冰雪凤鸣]
+      2: [千狐魅影]
       3: [圣羽加持]
       4: [江海翻, 天地倾]
       5: [称心如意]
-      6: [大闹天宫]
-      7: [乱点天宫]
+      6: [狐尾爱心, 九尾爱心, 职业控制]
+      7: [大闹天宫]
+      8: [乱点天宫]
 
   angel:
     display_name: 天使
@@ -410,8 +418,10 @@ invite:
 
 # 英雄格分类器数据制作配置
 hero_classifier:
-  # 主 C 之外、本局固定携带的队友英雄；crop 时据此与 main_c 一起预建
-  # labeled/<英雄>/star1~star4 标注目录。切换 lineup 时改这里即可。
+  # 主 C 之外、本局固定携带的队友英雄的**全局默认**：主C档案未声明
+  # lineup_others 时用于识别白名单/模型类别启动校验/技能档位过滤；crop
+  # 数据制作也读这里。各账号游戏内阵容相互独立，阵容分叉的号在
+  # main_c_profiles.<主C>.lineup_others 显式覆盖（如 monkey 2026-09-28 换狐狸）。
   # 必须是 main_c_profiles 中已定义的英雄标识。
   lineup_others: [angel, snow, death_knight]
   # 阵容英雄的棋盘形态变体：幻天使是天使的形态而非新英雄，不建 main_c_profiles

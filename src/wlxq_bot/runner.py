@@ -312,7 +312,7 @@ class Runner:
             hero_cell_classifier=hero_cell_classifier,
             allowed_heroes={
                 mc,
-                *self.default_config.hero_classifier.lineup_others,
+                *self._lineup_others_for(mc),
                 *self.default_config.hero_classifier.lineup_variants,
             },
             skill_collector=skill_collector,
@@ -341,7 +341,7 @@ class Runner:
             skill_refresh_enabled=run_config.skill_refresh_enabled,
         )
 
-        required_heroes = {mc, *self.default_config.hero_classifier.lineup_others}
+        required_heroes = {mc, *self._lineup_others_for(mc)}
         missing_model_heroes = sorted(required_heroes - set(perception.available_heroes))
         if missing_model_heroes:
             raise RuntimeError(
@@ -1263,6 +1263,15 @@ class Runner:
         if not profile.hero_classifier_model.strip():
             raise RuntimeError(f"主C {main_c} 未配置 hero_classifier_model")
 
+    def _lineup_others_for(self, main_c: str) -> list[str]:
+        """本局携带阵容（主C之外）：档案显式声明优先，否则回退全局配置。
+
+        各账号的游戏内阵容相互独立（2026-09-28 猴子号雪姬→狐狸、强袭号仍雪姬），
+        全局 hero_classifier.lineup_others 只作未声明档案的默认值。
+        """
+        profile_lineup = self.default_config.main_c_profiles[main_c].lineup_others
+        return profile_lineup or self.default_config.hero_classifier.lineup_others
+
     def _load_hero_cell_classifier(self, main_c: str) -> HeroCellClassifier:
         """加载当前主 C 专用 ONNX 模型及其同名 metadata。"""
         model_path = Path(self.default_config.main_c_profiles[main_c].hero_classifier_model)
@@ -1318,13 +1327,13 @@ class Runner:
             hero_cell_classifier=self._load_hero_cell_classifier(main_c),
             allowed_heroes={
                 main_c,
-                *self.default_config.hero_classifier.lineup_others,
+                *self._lineup_others_for(main_c),
                 *self.default_config.hero_classifier.lineup_variants,
             },
         )
         required = {
             main_c,
-            *self.default_config.hero_classifier.lineup_others,
+            *self._lineup_others_for(main_c),
             *self.default_config.hero_classifier.lineup_variants,
         }
         missing = sorted(required - set(perception.available_heroes))
@@ -1433,10 +1442,9 @@ class Runner:
                 return None, None, None
             # 本局阵容英雄的中文名：对局商店只刷阵容英雄的技能，档位自动
             # 计算时过滤掉非阵容英雄（如猴子局里的强袭）的技能
-            hc = self.default_config.hero_classifier
             lineup_names = {
                 self.default_config.main_c_profiles[h].display_name
-                for h in ({mc, *hc.lineup_others} & set(self.default_config.main_c_profiles))
+                for h in ({mc, *self._lineup_others_for(mc)} & set(self.default_config.main_c_profiles))
             }
             skill_tiers = compute_skill_tiers(
                 profile.skill_priority, name_to_hero, profile.display_name,

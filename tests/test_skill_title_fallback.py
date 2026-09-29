@@ -316,15 +316,44 @@ class TestComputeSkillTiers:
         assert tiers["陨星刻印"] == 11
         assert tiers["职业控制"] == 11
 
-    def test_configured_tier_8_11_ignored(self) -> None:
+    def test_configured_tier_8_11_explicit_wins(self) -> None:
+        """显式配置的第 8/11 档生效，自动兜底只填未显式配置的技能。"""
         tiers = compute_skill_tiers(
-            {8: ["某技能"], 11: ["另一技能"], 1: ["天穹支援"]},
-            {"天穹支援": "强袭", "某技能": "强袭", "另一技能": "死骑"},
+            {1: ["天穹支援"], 8: ["陨星刻印"], 11: ["粒子增幅"]},
+            {
+                "天穹支援": "强袭",
+                "粒子增幅": "强袭",
+                "陨星刻印": "天使",
+                "职业控制": "雪姬",
+            },
             "强袭",
         )
-        # 第 8/11 档自动计算:某技能是强袭 → 8;另一技能非强袭 → 11
-        assert tiers["某技能"] == 8
-        assert tiers["另一技能"] == 11
+        # 陨星刻印(天使)显式第 8 档，而非自动兜底的 11；
+        # 粒子增幅(主C)显式第 11 档，而非主C兜底的 8
+        assert tiers["陨星刻印"] == 8
+        assert tiers["粒子增幅"] == 11
+        # 未显式配置的技能仍走自动兜底
+        assert tiers["职业控制"] == 11
+
+    def test_explicit_tier8_monkey_skill_precedes_rest_pool(self) -> None:
+        """回归（2026-09-29）：猴子 8: [乱点天宫] 不再被忽略——主C兜底为
+        第 11 档（prefer_main_c_skills=false）时显式第 8 档仍生效。"""
+        tiers = compute_skill_tiers(
+            {7: ["大闹天宫"], 8: ["乱点天宫"]},
+            {
+                "大闹天宫": "猴子",
+                "乱点天宫": "猴子",
+                "万化随形": "猴子",
+                "千狐魅影": "狐狸",
+            },
+            "猴子",
+            main_c_rest_tier=11,
+        )
+        assert tiers["大闹天宫"] == 7
+        assert tiers["乱点天宫"] == 8
+        # 未列入的猴子技能与其余阵容技能仍落兜底第 11 档
+        assert tiers["万化随形"] == 11
+        assert tiers["千狐魅影"] == 11
 
 
 class TestRecordNewSkill:
