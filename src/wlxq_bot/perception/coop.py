@@ -154,6 +154,10 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
             "tan_chuang",
             "return_button",
             "zeng_song_ji_neng",
+            # 90秒狐狸随机升级可能在本状态期间把3星狐狸升成4星、弹赠送技能页
+            # （2026-10-02 实机截图 02:03）：提示条不在本状态识别时，页面遮住
+            # 【选技能】图会被误判"技能页已关闭"盲点按钮空转到局结束
+            "merge_gift_skill_title",
         }
     ),
     State.HANDLE_RESULT: frozenset({"return_button"}),

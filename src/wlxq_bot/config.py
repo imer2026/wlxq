@@ -120,6 +120,20 @@ class MainCProfile(BaseModel):
     # 2星主C出现后一直选技能到对局结束）
     topup_after_skill_selections: int = Field(default=0, ge=0, le=100)
     topup_hero_count: int = Field(default=0, ge=0, le=12)
+    # 数量回补达标后追加「3星主C培养」环节（非强制，2026-09-30 用户定案）：
+    # 仅第二阶段回补路径进入（选满 N 次技能回培养后数量达标）；留场合并 2 星
+    # 对碰 3 星（类型随机，可能直接出主C）+ 变身 3 星非主C 转化；达成 /
+    # 变身用尽（本环节内消耗）/ 死局任一满足即回选技能，本局不再复查。
+    # 环节内合并优先、召唤只用于凑材料；材料规则：非主C对任意可用，主C对
+    # 仅富余时可用——合成类型随机、产物可能不是主C，按「消耗 2 个后数量
+    # 仍 ≥ topup_hero_count」的最坏情况判定（2026-10-01 用户修正）
+    star3_topup_enabled: bool = False
+    # 3星环节出口「凑 lineup 英雄」子环节（2026-10-01 用户定案）：达成 / 放弃·
+    # 变身用尽退出时（死局退出不凑），若场上没有该英雄则追加——有空位先召唤、
+    # 满盘合「非主C且非该英雄」的对子腾格、满盘无对且还有变身次数再变身
+    # （目标不含主C与该英雄，防把刚养出的 3 星主C变没）；满盘+无对+无变身
+    # = 放弃凑，回选技能。达标 = 场上 ≥1 只该英雄（任意星级）。空 = 不启用
+    star3_topup_after_hero: str = ""
     # 局内（不含开局赠送）技能选择的总次数上限：达到后不再花金币选技能，等待
     # 对局结束进结算。0 = 不限制（一直选到对局结束）。
     # 强袭为 4（回补前）+ 5（回补后）= 9（2026-08-16 实机规则）
@@ -166,6 +180,14 @@ class MainCProfile(BaseModel):
     @classmethod
     def _validate_lineup_others(cls, value: Any) -> list[str]:
         return _parse_hero_identifier_list(value, "MainCProfile.lineup_others")
+
+    @field_validator("star3_topup_after_hero", mode="before")
+    @classmethod
+    def _validate_topup_after_hero(cls, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if normalized and re.fullmatch(r"[a-z][a-z0-9_]*", normalized) is None:
+            raise ValueError(f"star3_topup_after_hero 含非法英雄标识: {normalized!r}")
+        return normalized
 
 
 class DifficultyProfile(BaseModel):

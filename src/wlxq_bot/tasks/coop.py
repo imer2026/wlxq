@@ -34,7 +34,11 @@ from wlxq_bot.models import (
 from wlxq_bot.perception.locator import hotspot_to_client_point, roi_column_centers
 from wlxq_bot.perception.pet_difficulty import match_targets
 from wlxq_bot.tasks.base import Task, TaskContext
-from wlxq_bot.tasks.strategy import CultivationStrategy, build_strategy
+from wlxq_bot.tasks.strategy import (
+    CultivationStrategy,
+    TransformGiveupKey,
+    build_strategy,
+)
 from wlxq_bot.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -352,8 +356,11 @@ class CoopTask(Task):
         # 本局已用变身次数（按钮确认消失后扣减；重置点与技能刷新一致）
         self._transform_used_count = 0
         self._transform_poll_deadline = 0.0
-        # 放弃记忆：放弃变身时的棋盘签名；棋盘未演化前不再触发（防死循环）
-        self._transform_skip_signature: tuple | None = None
+        # 变身放弃记忆：按目标英雄记（类型+星级+格位，2026-10-03 用户定案）。
+        # 旧实现记整盘棋盘签名，棋盘任一演化即解除，皮肤升级的不可变身
+        # 英雄每次复活白烧一轮点击+轮询；改按英雄记后只有该英雄自身变化
+        # （被合掉/升星）才由棋盘识别清掉记录
+        self._transform_failed_targets: set[TransformGiveupKey] = set()
         self._main_skill_selections = 0
         # 本局局内技能选择总次数（回补重置不清零；达到档案上限后停止选技能）
         self._main_skill_selections_total = 0
@@ -363,6 +370,14 @@ class CoopTask(Task):
         # 本局主C数量已确认达标（回补补够或首次培养时数量就已够）：数量在选技能
         # 期间不会减少，2026-09-07 用户策略——本局内不再回培养复查数量，一直选技能
         self._topup_done = False
+        # 3星主C培养环节（数量达标后的非强制追加，2026-09-30 用户定案）：
+        # done=本局已达成/放弃不再进入；active=当前帧留场培养（合并优先）；
+        # transform_entry=环节开始时已用变身次数（供「变身用尽」放弃判定）
+        self._star3_done = False
+        self._star3_active = False
+        self._star3_transform_entry: int | None = None
+        # 3星环节出口的「凑 lineup 英雄」子环节（2026-10-01 用户定案）
+        self._star3_after_active = False
         # 邀请者模式从 INVITE_CLICK 起步（发起邀请），不走 FIND_COOP 抢合作
         if self._invite_mode:
             self.ctx.current_state = State.INVITE_CLICK
@@ -448,6 +463,27 @@ class CoopTask(Task):
                     ),
                     state,
                 )
+            # 4星赠送技能页监控（2026-10-02 实机）：90秒狐狸随机升级把3星狐狸
+            # 升成4星也会弹此页（此前唯一入口是本机合成4星，BUILD 状态内处理）。
+            # 页面常驻且遮住技能页/棋盘——在选技能状态等非 BUILD 状态下不识别
+            # 提示条就会被误判"技能页已关闭"，盲点按钮空转到局结束。识别到即
+            # 优先选卡，状态原样返回、原流程无感续上；BUILD 不从此处走（已有
+            # _awaiting_merge_gift 确认流 + 兜底块，避免双逻辑）。击杀奖励弹窗
+            # 可能盖在赠送页上，保持其更高优先级
+            if state is not State.BUILD_MAIN_C and observation.flag(
+                "merge_gift_skill_page_visible"
+            ):
+                logger.info(
+                    "局内出现4星赠送技能页（当前状态 %s），优先选卡", state.name
+                )
+                gift_action = self._merge_gift_skill_pick(
+                    observation,
+                    window_ctx,
+                    state,
+                    reason="4星赠送技能页，随机选一个技能",
+                )
+                if gift_action is not None:
+                    return gift_action
         # 结算阶段出现【双倍奖励】确认弹窗（多为结算瞬间误点「双倍奖励」触发，
         # 实机确认 2026-08-16）：优先点击取消回到正常结算，再继续点赞/领宝箱
         if state in _SETTLEMENT_STATES and observation.flag("double_reward_dialog_visible"):
@@ -1274,15 +1310,12 @@ class CoopTask(Task):
         missing = self._strategy.lineup_missing(board)
         if not missing:
             return None  # 阵容已齐：门禁未达只因主C星级，无变身意义
-        if (
-            self._run_config.transform_enabled
-            and self._transform_locator is not None
-            and self._transform_skip_signature is None
-        ):
+        if self._run_config.transform_enabled and self._transform_locator is not None:
             target = self._strategy.select_transform_assist(
                 board,
                 self._transform_used_count,
                 self._run_config.transform_max_per_round,
+                exclude_targets=self._transform_failed_targets,
             )
             if target is not None:
                 self._transform_stage = "poll"
@@ -3279,6 +3312,38 @@ class CoopTask(Task):
             to_state,
         )
 
+    def _merge_gift_skill_pick(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+        to_state: State,
+        *,
+        reason: str,
+    ) -> tuple[Action, State] | None:
+        """4星赠送技能页选卡（优先档 → 主C图标 → 三列兜底）。
+
+        页面有两个触发入口、共用本选卡链：合成 4 星（BUILD 的合并后等待流
+        与兜底块）和 90 秒狐狸随机升级（decide_action 顶部监控，2026-10-02
+        实机）。tag 沿用 merge_gift_skill_*，验证与等待态清理均复用既有逻辑。
+        """
+        priority_action = self._skill_priority_action(
+            observation, "merge_gift_skill_priority", to_state
+        )
+        if priority_action is not None:
+            return priority_action
+        if observation.skill_candidates:
+            return self._choose_skill_action(
+                observation.skill_candidates,
+                "merge_gift_skill_candidate",
+                to_state,
+            )
+        return self._skill_fallback_action(
+            "merge_gift_skill_fallback",
+            to_state,
+            window_ctx,
+            reason=reason,
+        )
+
     # ------------------------------------------------------------------
     # 主 C 培养
     # ------------------------------------------------------------------
@@ -3379,21 +3444,10 @@ class CoopTask(Task):
             or observation.flag("select_skill_button_visible")
             or observation.skill_candidates
         ):
-            priority_action = self._skill_priority_action(
-                observation, "merge_gift_skill_priority", State.BUILD_MAIN_C
-            )
-            if priority_action is not None:
-                return priority_action
-            if observation.skill_candidates:
-                return self._choose_skill_action(
-                    observation.skill_candidates,
-                    "merge_gift_skill_candidate",
-                    State.BUILD_MAIN_C,
-                )
-            return self._skill_fallback_action(
-                "merge_gift_skill_fallback",
-                State.BUILD_MAIN_C,
+            return self._merge_gift_skill_pick(
+                observation,
                 window_ctx,
+                State.BUILD_MAIN_C,
                 reason="合成4星赠送技能页，随机选一个技能",
             )
 
@@ -3522,15 +3576,22 @@ class CoopTask(Task):
                 detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
             # 等金币恢复的空档同样优先合成（2026-09-13 用户策略，与批次
             # 召唤等待期同一策略）：批次最后一次召唤发完后金币转红会落到
-            # 这里，棋盘占满时正应合成腾格子而不是干等。两个例外不合成：
-            # 棋盘已达标（金币恢复后直接转选技能，别再动棋盘）；回补阶段
-            # 有空位（合成减少英雄数量，与「有空位先召唤占位」冲突）。
-            # 无合法对再原地等待。
-            if not self._strategy.main_c_ready(
-                board, require_hero_count=self._topup_active
-            ) and not (
-                self._topup_active and board.capacity.available > 0
-            ):
+            # 这里，棋盘占满时正应合成腾格子而不是干等。三个例外不合成：
+            # 棋盘已达标且不在3星环节（金币恢复后直接转选技能，别再动棋盘）；
+            # 回补阶段有空位（合成减少英雄数量，与「有空位先召唤占位」冲突；
+            # 3星环节内合并优先，此例外不适用）。无合法对再原地等待。
+            # _star3_active 由上一帧培养决策置位，环节首帧金币转红时晚一个
+            # 等待周期才合并，无碍（gold_red_wait 内环节不变化）
+            gold_wait_merge_denied = (
+                not self._star3_active
+                and (
+                    self._strategy.main_c_ready(
+                        board, require_hero_count=self._topup_active
+                    )
+                    or (self._topup_active and board.capacity.available > 0)
+                )
+            )
+            if not gold_wait_merge_denied:
                 merge = self._gold_wait_merge_action(observation, "召唤金币不足")
                 if merge is not None:
                     return merge
@@ -3574,73 +3635,188 @@ class CoopTask(Task):
             )
         self._last_board_signature = signature
 
-        if self._strategy.main_c_ready(board, require_hero_count=self._topup_active):
-            # 数量已达标：本局内不再回培养复查数量（选技能期间数量不会减少）
-            if self._strategy.hero_count_satisfied(board):
-                self._topup_done = True
-            return (
-                Action(
-                    kind="wait",
-                    duration=0.2,
-                    verification="immediate",
-                    tag="main_c_ready",
-                    reason=self._strategy.ready_reason(
-                        board, require_hero_count=self._topup_active
+        # 变身放弃记忆按目标英雄记（2026-10-03 用户定案）：场上已不存在该
+        # 英雄（被合掉/升星变化）的记录随之清除，新英雄重新给机会；棋盘
+        # 其他格的演化（召唤/合成/识别漂移）不再复活已放弃的目标——放在
+        # 所有变身决策点之前，与旧的整盘签名清除同位置
+        if self._transform_failed_targets:
+            live = {
+                (h.hero_type, h.star_level, h.position) for h in board.heroes
+            }
+            stale = self._transform_failed_targets - live
+            if stale:
+                self._transform_failed_targets -= stale
+                logger.info(
+                    "变身放弃记忆清除（英雄已不在场上）：%s",
+                    "、".join(
+                        f"{hero_type}{star}星@{pos}" for hero_type, star, pos in stale
                     ),
-                ),
-                State.SELECT_MAIN_C_SKILLS,
-            )
+                )
+
+        if self._strategy.main_c_ready(board, require_hero_count=self._topup_active):
+            if self._strategy.hero_count_satisfied(board):
+                # 3星环节只属于第二阶段（选满 N 次技能回培养的回补路径）：
+                # 第一阶段数量碰巧达标时直接回选技能、本局不进环节——
+                # 否则批次合成刚出 2 星强袭且数量 ≥4 时会在第一阶段留场
+                # （2026-10-01 实机事故）
+                if self._topup_active and self._star3_after_active:
+                    # 凑 lineup 英雄子环节（2026-10-01 用户定案）：3星环节
+                    # 达成/变身用尽退出后尽量保证目标英雄在场，召唤优先、
+                    # 满盘合准入对腾格、满盘无对再变身；退出即回选技能
+                    exit_action = self._topup_after_exit_action(board)
+                    if exit_action is not None:
+                        return exit_action
+                    # 未退出：落到下方动作选择（有空位召唤优先，满盘走受限合成/
+                    # 变身），不留场培养
+                elif self._topup_active and self._star3_stage_should_run():
+                    exit_now, star3_reason = self._strategy.star3_stage_exit(
+                        board,
+                        board.find_merge_candidates(
+                            self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+                        ),
+                        self._failed_merge_pairs,
+                        transform_used=self._transform_used_count,
+                        transform_used_in_stage=self._transform_used_in_stage(),
+                        failed_targets=self._transform_failed_targets,
+                    )
+                    if exit_now:
+                        # 死局前先试低星变身解锁（2026-10-01 用户定案）：变身
+                        # 对任意星级英雄可用（星级不变类型必变），满盘无对无
+                        # ≥3星材料时变一只非通配、守数量底线的 1/2星 英雄赌
+                        # 凑出新对；候选/星级规则见 select_deadlock_transform。
+                        # 次数走每局预算并计入「变身用尽」放弃判定；无候选或
+                        # 变身不可用（含按英雄放弃记忆记满候选）才真死局退出
+                        if "死局" in star3_reason and self._transform_usable_now():
+                            unlock_target = self._strategy.select_deadlock_transform(
+                                board,
+                                wildcard_heroes=self._wildcard_heroes,
+                                exclude_targets=self._transform_failed_targets,
+                            )
+                            if unlock_target is not None:
+                                return self._emit_transform(
+                                    unlock_target,
+                                    "卡死解锁低星变身",
+                                    "点击英雄弹出变身按钮（卡死解锁）",
+                                )
+                        # 达成/放弃：环节主体结束，本局不再复查（2026-09-30 用户定案）
+                        self._star3_done = True
+                        self._topup_done = True
+                        self._star3_active = False
+                        after_hero = self._strategy.star3_topup_after_hero
+                        if (
+                            after_hero
+                            and "死局" not in star3_reason
+                            and not self._strategy.has_hero(board, after_hero)
+                        ):
+                            # 出口追加「凑 lineup 英雄」子环节（2026-10-01 用户
+                            # 定案）：达成/变身用尽且场上无目标英雄才进；死局
+                            # 退出不进（满盘无对无变身，进了也是立刻放弃）。
+                            # 变身用尽时子环节同样没有变身可用，只剩召唤/合成。
+                            # 入口帧立即做一次退出判定：满盘+无对+无变身的
+                            # 边界直接放弃回选技能，不落到满盘点召唤的坏动作
+                            self._star3_after_active = True
+                            logger.info(
+                                "3星环节出口进入凑%s子环节（%s，场上无%s）",
+                                after_hero,
+                                star3_reason,
+                                after_hero,
+                            )
+                            exit_action = self._topup_after_exit_action(board)
+                            if exit_action is not None:
+                                return exit_action
+                            # 不返回：落到下方动作选择（召唤优先）
+                        else:
+                            logger.info("3星强袭培养环节结束：%s", star3_reason)
+                            return (
+                                Action(
+                                    kind="wait",
+                                    duration=0.2,
+                                    verification="immediate",
+                                    tag="main_c_ready",
+                                    reason=(
+                                        f"{self._strategy.ready_reason(board, require_hero_count=self._topup_active)}"
+                                        f"（3星环节：{star3_reason}）"
+                                    ),
+                                ),
+                                State.SELECT_MAIN_C_SKILLS,
+                            )
+                        # 进入子环节：落到下方动作选择
+                    else:
+                        # 留场培养：数量达标也不回选技能，落入下方变身/合成/召唤；
+                        # 记录环节开始时的变身次数，供「变身用尽」放弃判定
+                        if self._star3_transform_entry is None:
+                            self._star3_transform_entry = self._transform_used_count
+                        self._star3_active = True
+                        logger.info("3星强袭培养环节：留场培养（%s）", star3_reason)
+                else:
+                    # 数量已达标回选技能。达标标志只在第二阶段（经回补路径
+                    # 进来，_topup_active=True）置位——第一阶段数量碰巧达标
+                    # 不短路第二阶段：选满 N 次技能后仍回培养走 3星环节和
+                    # 凑 lineup 英雄子环节（2026-10-01 实机局：变身出 3星
+                    # 强袭+数量达标在第一阶段置位标志，整局跳过凑狐狸，
+                    # 用户定案"第一阶段要在第二阶段凑"）；无环节档案的第二
+                    # 阶段在此置位防「回补↔选技能」空转
+                    self._topup_done = self._topup_active
+                    self._star3_active = False
+                    return (
+                        Action(
+                            kind="wait",
+                            duration=0.2,
+                            verification="immediate",
+                            tag="main_c_ready",
+                            reason=self._strategy.ready_reason(
+                                board, require_hero_count=self._topup_active
+                            ),
+                        ),
+                        State.SELECT_MAIN_C_SKILLS,
+                    )
+            else:
+                # 首次培养只看星级（数量未达标）：星级门禁放行回选技能
+                self._star3_active = False
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.2,
+                        verification="immediate",
+                        tag="main_c_ready",
+                        reason=self._strategy.ready_reason(
+                            board, require_hero_count=self._topup_active
+                        ),
+                    ),
+                    State.SELECT_MAIN_C_SKILLS,
+                )
 
         # ---- 变身触发（设计文档 §4.1：次数未满 + 3星非主C）----
         # 免费且可能直接提星/凑数量，优先于批次召唤/合成；2026-09-17 用户
         # 变更：不再要求「无达标主C」——主C已达标（含回补阶段）时，2星对
         # 合并产出3星非主C的下一轮棋盘识别即检查触发；locator 未接线（模板
-        # 缺失降级）或开关关闭时整分支跳过；放弃记忆未解除（棋盘签名未演化）
-        # 时抑制触发，防止「放弃 → 立刻再触发」死循环
-        if (
-            self._transform_skip_signature is not None
-            and self._board_signature(board) != self._transform_skip_signature
-        ):
-            # 棋盘已演化（召唤/合成改变了英雄集合）：解除放弃记忆的抑制
-            self._transform_skip_signature = None
+        # 缺失降级）或开关关闭时整分支跳过；按英雄放弃记忆（2026-10-03）
+        # 在选目标时排除——按钮超时等失败的目标本局不再重选，棋盘其他
+        # 演化不复活（旧整盘签名记法会被无关演化复活，皮肤升级的不可
+        # 变身英雄每次白烧 ~6 秒）
         if (
             self._run_config.transform_enabled
             and self._transform_locator is not None
-            and self._transform_skip_signature is None
+            # 凑 lineup 英雄子环节召唤优先（2026-10-01 用户定案）：有空位先
+            # 召唤（金币门控），满盘才把变身当碰运气的手段
+            and not (self._star3_after_active and board.capacity.available > 0)
         ):
             transform_target = self._strategy.select_transform(
                 board,
                 self._transform_used_count,
                 self._run_config.transform_max_per_round,
+                exclude_heroes=(
+                    (self._strategy.star3_topup_after_hero,)
+                    if self._star3_after_active
+                    else ()
+                ),
+                exclude_targets=self._transform_failed_targets,
             )
             if transform_target is not None:
-                self._transform_stage = "poll"
-                self._transform_target = transform_target
-                self._transform_button_pos = None
-                self._transform_reclicks = 0
-                self._transform_verify_attempts = 0
-                self._transform_poll_deadline = (
-                    self._clock() + self._run_config.transform_button_appear_timeout_seconds
-                )
-                logger.info(
-                    "触发变身：%s%d星 %s 变身碰主C（本局已用 %d/%d 次）",
-                    transform_target.hero_type,
-                    transform_target.star_level,
-                    _hero_location(transform_target),
-                    self._transform_used_count,
-                    self._run_config.transform_max_per_round,
-                )
-                return (
-                    Action(
-                        kind="click",
-                        target=transform_target.position,
-                        duration=0.08,
-                        post_delay=self._run_config.transform_button_poll_interval_seconds,
-                        verification="immediate",
-                        tag="transform_click_hero",
-                        reason="点击3星非主C英雄，弹出变身按钮",
-                    ),
-                    State.BUILD_MAIN_C,
+                return self._emit_transform(
+                    transform_target,
+                    "变身碰主C",
+                    "点击3星非主C英雄，弹出变身按钮",
                 )
 
         # ---- 批次规划（2026-09-10 用户策略）：识别一次、动作攒批、批后统一识别 ----
@@ -3657,7 +3833,25 @@ class CoopTask(Task):
                 self._effective_batch_size(),
                 board.capacity.available,
             )
-        if self._run_config.batch_summon_enabled and batch_limit > 0:
+        # 3星环节合并优先（2026-09-30 用户定案）：有可用合成对时召唤让位，
+        # 先合成碰 3 星（类型随机），无对才召唤凑材料。可用对 = 非主C对 +
+        # 富余主C对（消耗 2 个后数量仍 ≥ topup_hero_count，2026-10-01 修正）
+        star3_candidates: list[MergeCandidate] | None = None
+        star3_merge_first = False
+        if self._star3_active:
+            star3_candidates = board.find_merge_candidates(
+                self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+            )
+            star3_merge_first = self._strategy.star3_has_mergeable_pair(
+                board, star3_candidates, self._failed_merge_pairs
+            )
+            if star3_merge_first:
+                logger.info("3星强袭培养环节：合并优先，召唤让位")
+        if (
+            self._run_config.batch_summon_enabled
+            and batch_limit > 0
+            and not star3_merge_first
+        ):
             self._batch_summon_remaining = batch_limit
             self._batch_planned_occupancy = board.capacity.occupied
             self._batch_clicks_sent = 0
@@ -3669,13 +3863,29 @@ class CoopTask(Task):
                 observation.frame_id,
             )
             return self._batch_summon_action(observation, window_ctx)
-        candidates = board.find_merge_candidates(
-            self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+        candidates = (
+            star3_candidates
+            if star3_candidates is not None
+            else board.find_merge_candidates(
+                self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+            )
         )
+        if self._star3_after_active:
+            # 凑 lineup 英雄子环节：只合「不含目标英雄 + 非主C或富余主C」
+            # 的对子（2026-10-02 富余主C对放行：主C+主C ≥6、幻天使+主C ≥5，
+            # 按对内主C消耗数判，产物随机有 1/4 直接是目标英雄）
+            candidates = [
+                c for c in candidates if self._strategy.topup_after_pair_allowed(board, c)
+            ]
         # 回补阶段（2026-09-07 用户策略）：棋盘有空位时直接召唤不合成——
         # 合成要拖动加验证耗时，先召唤占满空位更快；棋盘占满且数量未达标
-        # 才合成腾格子。批次合成遵循同一优先级
-        topup_fill_first = self._topup_active and board.capacity.available > 0
+        # 才合成腾格子。批次合成遵循同一优先级。3星环节内反转：合并优先
+        # （尽快出 3 星），召唤只用于凑材料
+        topup_fill_first = (
+            self._topup_active
+            and not self._star3_active
+            and board.capacity.available > 0
+        )
         if self._run_config.batch_merge_enabled and not topup_fill_first:
             # 批末归因：上一批中仍原样存在的对记入失败记忆（拖动未生效）
             self._attribute_merge_batch(candidates)
@@ -3688,8 +3898,14 @@ class CoopTask(Task):
         pair = None
         if not topup_fill_first:
             # 合成/避让/失败对跳过等策略决策由 CultivationStrategy 负责；
-            # 返回 None 表示本次不合并，落入下方召唤分支
-            pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
+            # 返回 None 表示本次不合并，落入下方召唤分支。3星环节内启用
+            # 富余主C对（保 topup_hero_count，2026-10-01 用户修正）
+            pair = self._strategy.select_merge(
+                board,
+                candidates,
+                self._failed_merge_pairs,
+                star3_stage=self._star3_active,
+            )
         if pair is not None:
             return self._merge_drag_action(pair)
 
@@ -3718,8 +3934,10 @@ class CoopTask(Task):
         point = self._hotspot_point("add_hero", window_ctx)
         if point is None:
             return None
-        if self._topup_active and board.capacity.available > 0:
+        if self._topup_active and not self._star3_active and board.capacity.available > 0:
             reason = "回补阶段棋盘有空位，直接召唤不合成"
+        elif self._star3_active:
+            reason = "3星环节无对可合，召唤凑材料"
         else:
             reason = "无合法合成对，召唤1个英雄"
         if gold is not None:
@@ -3744,6 +3962,115 @@ class CoopTask(Task):
             State.BUILD_MAIN_C,
         )
 
+    def _star3_stage_should_run(self) -> bool:
+        """3星主C培养环节是否需要进入/留场（启用且本局未达成/放弃）。"""
+        return self._strategy.star3_topup_enabled and not self._star3_done
+
+    def _transform_used_in_stage(self) -> int:
+        """本环节内已消耗的变身次数（进入前用掉的不计入放弃判定）。"""
+        if self._star3_transform_entry is None:
+            return 0
+        return max(0, self._transform_used_count - self._star3_transform_entry)
+
+    def _transform_usable_now(self) -> bool:
+        """当前帧变身是否可用（开关/接线/预算三者同时满足）。
+
+        按英雄放弃记忆（2026-10-03）不在此拦——目标级排除在选目标时进行：
+        部分目标被记不挡其他目标/低星解锁候选；全部被记时选目标返回 None，
+        等价于旧整盘签名的「变身不可用」，走既有保守出口。
+        """
+        return (
+            self._run_config.transform_enabled
+            and self._transform_locator is not None
+            and self._transform_used_count < self._run_config.transform_max_per_round
+        )
+
+    def _emit_transform(
+        self, target: BoardHero, log_reason: str, click_reason: str
+    ) -> tuple[Action, State]:
+        """进入变身动作状态机（点格 → 按钮 → 稳定 → 验证）并返回首动作。
+
+        变身碰主C（≥3星）与卡死解锁低星变身共用同一动作流程与预算计数。
+        """
+        self._transform_stage = "poll"
+        self._transform_target = target
+        self._transform_button_pos = None
+        self._transform_reclicks = 0
+        self._transform_verify_attempts = 0
+        self._transform_poll_deadline = (
+            self._clock() + self._run_config.transform_button_appear_timeout_seconds
+        )
+        logger.info(
+            "触发变身：%s%d星 %s %s（本局已用 %d/%d 次）",
+            target.hero_type,
+            target.star_level,
+            _hero_location(target),
+            log_reason,
+            self._transform_used_count,
+            self._run_config.transform_max_per_round,
+        )
+        return (
+            Action(
+                kind="click",
+                target=target.position,
+                duration=0.08,
+                post_delay=self._run_config.transform_button_poll_interval_seconds,
+                verification="immediate",
+                tag="transform_click_hero",
+                reason=click_reason,
+            ),
+            State.BUILD_MAIN_C,
+        )
+
+    def _topup_after_exit_action(self, board: BoardSnapshot) -> tuple[Action, State] | None:
+        """凑 lineup 英雄子环节退出判定；退出时返回回选技能动作，否则 None。
+
+        达成（目标英雄在场）或放弃（满盘+无准入对+无变身）即结束子环节；
+        子环节期间每帧培养决策入口与本环节入口帧各调用一次。
+        """
+        exit_now, after_reason = self._strategy.topup_after_stage_exit(
+            board,
+            board.find_merge_candidates(
+                self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+            ),
+            self._failed_merge_pairs,
+            transform_usable=self._transform_usable_now(),
+            failed_targets=self._transform_failed_targets,
+        )
+        if not exit_now:
+            return None
+        # 放弃前先试低星变身解锁（2026-10-01 用户定案）：变一只非通配、
+        # 非目标英雄有 1/3 直接变出目标英雄当场达成，没中也可能凑出新对；
+        # 无候选或变身不可用才真放弃退出
+        if "放弃" in after_reason and self._transform_usable_now():
+            unlock_target = self._strategy.select_deadlock_transform(
+                board,
+                wildcard_heroes=self._wildcard_heroes,
+                exclude_heroes=(self._strategy.star3_topup_after_hero,),
+                exclude_targets=self._transform_failed_targets,
+            )
+            if unlock_target is not None:
+                return self._emit_transform(
+                    unlock_target,
+                    "卡死解锁低星变身",
+                    "点击英雄弹出变身按钮（卡死解锁）",
+                )
+        self._star3_after_active = False
+        logger.info("凑lineup英雄子环节结束：%s", after_reason)
+        return (
+            Action(
+                kind="wait",
+                duration=0.2,
+                verification="immediate",
+                tag="main_c_ready",
+                reason=(
+                    f"{self._strategy.ready_reason(board, require_hero_count=self._topup_active)}"
+                    f"（凑英雄：{after_reason}）"
+                ),
+            ),
+            State.SELECT_MAIN_C_SKILLS,
+        )
+
     def _gold_wait_merge_action(
         self,
         observation: Observation,
@@ -3764,7 +4091,23 @@ class CoopTask(Task):
         candidates = board.find_merge_candidates(
             self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
         )
-        pair = self._strategy.select_merge(board, candidates, self._failed_merge_pairs)
+        if self._star3_after_active:
+            # 与培养主路径同一限制：子环节合「不含目标英雄 + 非主C或富余
+            # 主C」的对（2026-10-02 富余主C对放行）
+            candidates = [
+                c for c in candidates if self._strategy.topup_after_pair_allowed(board, c)
+            ]
+        # 3星环节内启用富余主C对（按对内主C消耗数判底线，2026-10-02）
+        # 金币不足例外（2026-10-01 用户定案）：召唤被金币门控拦住时
+        # 「有空位→召唤不花幻天使」的前提不成立，幻天使通配对让位可合；
+        # 3星对规避与主C保数量照旧
+        pair = self._strategy.select_merge(
+            board,
+            candidates,
+            self._failed_merge_pairs,
+            star3_stage=self._star3_active,
+            allow_wildcard_with_space=True,
+        )
         if pair is None:
             return None
         logger.info("%s，等待恢复期间优先合成", context)
@@ -3892,10 +4235,10 @@ class CoopTask(Task):
                     State.BUILD_MAIN_C,
                 )
             logger.warning(
-                "变身按钮轮询超时（游戏侧次数已尽或按钮未渲染），放弃本次变身，"
+                "变身按钮轮询超时（游戏侧次数已尽或英雄不可变身），放弃本次变身，"
                 "不扣次数（计数失步自愈兜底）"
             )
-            self._remember_transform_giveup(observation)
+            self._remember_transform_giveup(target)
             self._clear_transform_state()
             return None
 
@@ -3944,7 +4287,7 @@ class CoopTask(Task):
                     State.BUILD_MAIN_C,
                 )
             logger.warning("变身按钮点击未生效（原位按钮仍在），放弃本次变身，不扣次数")
-            self._remember_transform_giveup(observation)
+            self._remember_transform_giveup(target)
             self._clear_transform_state()
             return None
 
@@ -3999,23 +4342,32 @@ class CoopTask(Task):
             "变身验证 %d 次未确认（类型未变或英雄缺失），放弃验证，继续常规决策",
             cfg.transform_verify_attempts,
         )
-        self._remember_transform_giveup(observation)
+        self._remember_transform_giveup(target)
         self._clear_transform_state()
         return None
 
-    def _remember_transform_giveup(self, observation: Observation) -> None:
-        """放弃变身时记住棋盘签名：棋盘演化前不再触发（防死循环）。
+    def _remember_transform_giveup(self, target: BoardHero) -> None:
+        """按目标英雄记变身放弃（2026-10-03 用户定案）：本局不再对它变身。
 
-        单帧观察（poll/confirm 阶段）无棋盘快照，退回最近一次多帧识别
-        记录的签名（触发时的棋盘）。
+        旧实现记整盘棋盘签名、棋盘任一演化（召唤/合成/识别漂移）即解除，
+        皮肤升级的不可变身英雄（点击永不弹按钮，与常规产出外观无差别）
+        每次复活白烧一轮「点击+轮询+重点击」约 6 秒。改按（类型, 星级,
+        格位）记失败英雄：棋盘其他演化不复活；该英雄自身变化（被合掉/
+        升星）时由棋盘识别清掉记录；本局重置时整体清空。三个放弃路径
+        （按钮超时/按钮点击未生效/验证失败）共用；计数失步自愈语义不变
+        ——游戏侧次数真尽时逐英雄被记，等价于变身不可用，走既有保守出口。
         """
-        signature = (
-            self._board_signature(observation.board)
-            if observation.board is not None
-            else self._last_board_signature
+        key = (target.hero_type, target.star_level, target.position)
+        if key in self._transform_failed_targets:
+            return
+        self._transform_failed_targets.add(key)
+        logger.info(
+            "变身放弃记忆：%s%d星 @%s 记为不可变身（本局不再对它触发，"
+            "英雄自身变化才解除）",
+            target.hero_type,
+            target.star_level,
+            target.position,
         )
-        if signature is not None:
-            self._transform_skip_signature = signature
 
     def _match_in_transform_window(
         self,
@@ -4069,11 +4421,13 @@ class CoopTask(Task):
                 detail = f"现有 {gold.get('current')} < 召唤 {gold.get('summon_cost')}"
             # 等金币恢复的空档优先合成（2026-09-13 用户策略）：合成不花
             # 金币，正好利用等待时间；但回补阶段棋盘有空位时不合成——
-            # 合成减少英雄数量，与「有空位先召唤占位」的回补策略冲突；
-            # 无合法对再原地等待
+            # 合成减少英雄数量，与「有空位先召唤占位」的回补策略冲突
+            # （3星环节内合并优先，此例外不适用）；无合法对再原地等待
             board = observation.board
-            topup_fill_first = self._topup_active and (
-                board is not None and board.capacity.available > 0
+            topup_fill_first = (
+                self._topup_active
+                and not self._star3_active
+                and (board is not None and board.capacity.available > 0)
             )
             if not topup_fill_first:
                 merge = self._gold_wait_merge_action(
@@ -4244,9 +4598,11 @@ class CoopTask(Task):
         if action.tag == "summon_hero":
             return self._boards_changed(before.board, after.board)
         if action.tag == "merge_heroes":
-            # 4星赠送技能页已弹出即证明 3+3 合成生效（页面只由本机合成 4 星
-            # 触发），且页面遮住棋盘会使常规棋盘验证必然失败——2026-08-21
-            # 实机日志确认此路径
+            # 4星赠送技能页已弹出即证明 3+3 合成生效，且页面遮住棋盘会使常规
+            # 棋盘验证必然失败——2026-08-21 实机日志确认此路径。注意 2026-10-02
+            # 起页面另有 90 秒狐狸升级触发入口：3+3 拖动的验证帧恰好撞上狐狸页
+            # 会把未生效的合成误判生效（窗口约 1 秒、需恰有 3 星狐狸在场，概率
+            # 极低，误判的后果只是少重试一次合并）
             if after.flag("merge_gift_skill_page_visible"):
                 return True
             if not self._boards_changed(before.board, after.board) or after.board is None:
@@ -4478,9 +4834,13 @@ class CoopTask(Task):
             self._skill_refresh_button_waits = 0
             self._topup_active = False
             self._topup_done = False
+            self._star3_done = False
+            self._star3_active = False
+            self._star3_transform_entry = None
+            self._star3_after_active = False
             self._summon_retry_at = None
             self._transform_used_count = 0
-            self._transform_skip_signature = None
+            self._transform_failed_targets.clear()
             self._clear_transform_state()
             # 点过准备 = 本会话已完成难度勾选（无论程序选的还是手动选的）
             self._difficulty_done_session = True
@@ -4551,6 +4911,8 @@ class CoopTask(Task):
             # 同时丢弃可能残留的批次状态（培养已结束，批次不再有意义）
             self._main_skill_selections = 0
             self._topup_active = False
+            self._star3_active = False
+            self._star3_after_active = False
             self._batch_summon_remaining = 0
             self._batch_merge_queue = []
             self._pending_merge_batch_signatures = []
@@ -4637,6 +4999,8 @@ class CoopTask(Task):
                 # 对局继续、金币随击杀恢复，选满 4 次技能后会再尝试回补
                 logger.warning("回补阶段召唤未生效（可能金币不足），暂停回补，回选技能继续对局")
                 self._topup_active = False
+                self._star3_active = False
+                self._star3_after_active = False
                 self._main_skill_selections = 0
             else:
                 # 培养阶段：等待一段时间（金币恢复）再重新尝试召唤
@@ -4710,8 +5074,12 @@ class CoopTask(Task):
         self._skill_refresh_button_waits = 0
         self._topup_active = False
         self._topup_done = False
+        self._star3_done = False
+        self._star3_active = False
+        self._star3_transform_entry = None
+        self._star3_after_active = False
         self._transform_used_count = 0
-        self._transform_skip_signature = None
+        self._transform_failed_targets.clear()
         self._clear_transform_state()
 
     @staticmethod

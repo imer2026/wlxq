@@ -414,6 +414,29 @@ class BoardSnapshot:
             used.add(i)
             used.add(partner_index)
 
+        # 阶段 3：通配饿死兜底（2026-10-02）——同星非通配搭档全被阶段 1
+        # 同类项配对占用时，通配英雄与已占用搭档重叠配对追加为候选。重叠
+        # 无害：选择层每动作只取一对，批次层有位置去重；排序上通配对排在
+        # 同类项之后，仅当同类对被富余规则滤掉（如强袭 5 只 + 幻天使满盘，
+        # 主C对破底线而幻天使+主C只消耗 1 只）时才会被选中。
+        for i, hero_a in enumerate(self.heroes):
+            if i in used or hero_a.hero_type not in wildcard_heroes:
+                continue
+            for j, hero_b in enumerate(self.heroes):
+                if j == i or hero_b.hero_type in wildcard_heroes:
+                    continue
+                if hero_b.star_level == hero_a.star_level:
+                    candidates.append(
+                        MergeCandidate(
+                            hero_a=hero_a,
+                            hero_b=hero_b,
+                            is_main_c=_is_main_c_pair(hero_a, hero_b),
+                            is_wildcard=True,
+                        )
+                    )
+                    used.add(i)
+                    break
+
         # 非主 C 优先（is_main_c=False 排前面）；稳定排序保持同类项在前、通配在后
         candidates.sort(key=lambda c: c.is_main_c)
         return candidates

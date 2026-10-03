@@ -326,7 +326,8 @@ class TestFindMergeCandidatesWildcard:
         assert candidates[0].is_wildcard is True
 
     def test_same_type_preferred_over_wildcard(self) -> None:
-        """同类项对优先：两个正常天使先配对，幻天使插不进去。"""
+        """同类项对优先：两个正常天使先配对；幻天使只能作阶段 3 重叠
+        后备（2026-10-02），排序上排在同类项对之后。"""
         snapshot = BoardSnapshot(
             frame_id=1,
             heroes=[
@@ -339,12 +340,14 @@ class TestFindMergeCandidatesWildcard:
         candidates = snapshot.find_merge_candidates(
             main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
         )
-        assert len(candidates) == 1
         assert candidates[0].is_wildcard is False
         assert {candidates[0].hero_a.hero_type, candidates[0].hero_b.hero_type} == {"angel"}
+        # 饿死兜底：幻天使与已配对天使重叠配对，排后
+        assert len(candidates) == 2
+        assert candidates[1].is_wildcard is True
 
     def test_wildcard_prefers_non_wildcard_partner(self) -> None:
-        """幻天使优先与非幻英雄配对，第二个幻天使留作后备。"""
+        """幻天使优先与非幻英雄配对；第二个幻天使只能作阶段 3 重叠后备。"""
         snapshot = BoardSnapshot(
             frame_id=1,
             heroes=[
@@ -357,9 +360,12 @@ class TestFindMergeCandidatesWildcard:
         candidates = snapshot.find_merge_candidates(
             main_c="assault", wildcard_heroes=frozenset({"angel_phantom"})
         )
-        assert len(candidates) == 1
         pair = candidates[0]
         assert "snow" in {pair.hero_a.hero_type, pair.hero_b.hero_type}
+        assert pair.is_wildcard is True
+        # 饿死兜底：第二只幻天使与同一雪姬重叠配对，排后
+        assert len(candidates) == 2
+        assert candidates[1].is_wildcard is True
 
     def test_wildcard_with_main_c_marks_main_c(self) -> None:
         """幻天使+主C → is_main_c=True（受 avoid_main_c_merge 保护）。"""

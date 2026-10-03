@@ -702,6 +702,106 @@ class TestClosePopup:
 
 
 # ---------------------------------------------------------------------------
+# decide_action - 4星赠送技能页监控（90秒狐狸满星等非合并触发）
+# ---------------------------------------------------------------------------
+
+
+class TestMergeGiftPageMonitor:
+    """非 BUILD 状态弹出4星赠送技能页：decide_action 顶部优先选卡。
+
+    2026-10-02 实机：90秒狐狸随机升级把3星狐狸升成4星弹此页，此前唯一入口
+    是本机合成 4 星（BUILD 状态内处理）。提示条原本只在 BUILD 识别，选技能
+    状态下页面遮住【选技能】图被误判"技能页已关闭"，盲点按钮空转到局结束。
+    """
+
+    def _gift_obs(self, frame_id: int = 1, **raw_extra) -> Observation:
+        raw: dict = {"merge_gift_skill_page_visible": True}
+        raw.update(raw_extra)
+        return Observation(frame_id=frame_id, raw_data=raw)
+
+    def test_gift_page_during_skill_selection_picks_by_priority(self):
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        obs = self._gift_obs(
+            skill_card_options=[
+                {"column": 0, "name": "圣羽加持", "tier": 9, "known": True, "position": (100, 600)},
+                {"column": 1, "name": "天穹支援", "tier": 1, "known": True, "position": (460, 600)},
+                {"column": 2, "name": "星辰护盾", "tier": 11, "known": True, "position": (820, 600)},
+            ]
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "merge_gift_skill_priority"
+        assert action.target == (460, 600)
+        # 状态原样返回：选完卡页面关闭，技能选购流程无感续上
+        assert to_state == State.SELECT_MAIN_C_SKILLS
+
+    def test_gift_page_without_options_falls_back_to_columns(self):
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        decision = task.decide_action(self._gift_obs(), make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "merge_gift_skill_fallback"
+        # 赠送页保持默认间隔（0）：验证帧需完整识别页面收起，过早截图反而多等
+        assert action.post_delay == 0.0
+        assert to_state == State.SELECT_MAIN_C_SKILLS
+
+    def test_kill_popup_takes_priority_over_gift_page(self):
+        # 击杀奖励弹窗可能盖在赠送页上：先关弹窗，下一帧再选卡
+        task = make_task()
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        match = MatchResult("buttons/tan_chuang.png", (400, 1100), 0.9)
+        obs = Observation(
+            frame_id=1,
+            raw_data={
+                "merge_gift_skill_page_visible": True,
+                "tan_chuang_visible": True,
+                "tan_chuang_match": match,
+            },
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "close_popup"
+
+    def test_gift_page_in_build_keeps_existing_path(self):
+        # BUILD 不走顶部监控（已有 _awaiting_merge_gift 确认流 + 兜底块），
+        # 重构后行为不变：直接落兜底块选卡
+        task = make_task()
+        task.ctx.current_state = State.BUILD_MAIN_C
+        decision = task.decide_action(self._gift_obs(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "merge_gift_skill_fallback"
+        assert decision[1] == State.BUILD_MAIN_C
+
+    def test_gift_page_not_monitored_outside_match_states(self):
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        decision = task.decide_action(
+            Observation(
+                frame_id=1,
+                raw_data={
+                    "merge_gift_skill_page_visible": True,
+                    "home_page_visible": True,
+                },
+            ),
+            make_window_ctx(),
+        )
+        assert decision is None or not decision[0].tag.startswith("merge_gift")
+
+    def test_gift_pick_verified_by_page_close(self):
+        # 验证闭环依赖提示条标志在本状态可见：选卡前页面在、选卡后收起即生效
+        task = make_task()
+        action = Action(kind="click", tag="merge_gift_skill_priority", target=(460, 600))
+        before = Observation(frame_id=1, raw_data={"merge_gift_skill_page_visible": True})
+        after = Observation(frame_id=2)  # 选完卡页面关闭
+        assert task.verify_action(action, before, after)
+        still_visible = Observation(frame_id=2, raw_data={"merge_gift_skill_page_visible": True})
+        assert not task.verify_action(action, before, still_visible)
+
+
+# ---------------------------------------------------------------------------
 # decide_action - BUILD_MAIN_C
 # ---------------------------------------------------------------------------
 
@@ -1588,8 +1688,42 @@ class TestOtherStates:
         assert decision[0].kind == "wait"
         assert decision[0].reason == "等待下一次金币检查"
 
-    def test_first_entry_with_enough_count_skips_topup(self):
-        """首次培养时数量就已达标：main_c_ready 即置位，本局不再回补复查。"""
+    def test_gold_wait_merges_wildcard_pair_with_space(self):
+        """金币不足例外（2026-10-01 定案）：等金币恢复期间幻天使对让位可合
+        ——有空位但召唤被金币门控拦住，「保留幻天使等召唤」前提不成立。
+        回归实机 22:27 frame=151：占用 8/9、金币 52<130、场上幻天使2星+
+        死骑2星一对，干等 2 分钟。"""
+        profile = MainCProfile(
+            display_name="强袭",
+            hero_template_dir="heroes/assault",
+            avoid_main_c_merge=True,
+        )
+        task = make_task(main_c_profile=profile)
+        task._wildcard_heroes = frozenset({"angel_phantom"})
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        board = make_board(
+            [
+                make_hero("angel_phantom", star=2, pos=(100, 100)),
+                make_hero("death_knight", star=2, pos=(200, 100)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+            ]
+        )
+        obs = Observation(
+            frame_id=1,
+            board=board,
+            raw_data={"gold": {"current": 52, "summon_cost": 130, "summon_red": False}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+
+    def test_first_entry_with_enough_count_still_enters_topup_once(self):
+        """首次培养数量已达标：第一阶段不置位标志（2026-10-01 晚定案——
+        第一阶段达标不短路第二阶段），选满 4 次仍回培养；第二阶段（无环节
+        档案）达标访问时置位，本局不再回补——防「回补↔选技能」空转。"""
         profile = MainCProfile(
             display_name="强袭",
             hero_template_dir="heroes/assault",
@@ -1611,8 +1745,10 @@ class TestOtherStates:
         assert decision is not None
         assert decision[0].tag == "main_c_ready"
         task.on_action_verified(*decision)
-        assert task._topup_done is True
+        # 第一阶段不置位
+        assert task._topup_done is False
 
+        # 选满 4 次 → 仍回培养（第二阶段发生）
         task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
         for _ in range(4):
             task.on_action_verified(
@@ -1620,6 +1756,25 @@ class TestOtherStates:
                 State.SELECT_MAIN_C_SKILLS,
             )
         decision = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_topup"
+
+        # 第二阶段达标访问：置位标志，本局不再回补
+        task.on_action_verified(*decision)
+        assert task._topup_active is True
+        task.ctx.current_state = State.BUILD_MAIN_C
+        decision = task.decide_action(Observation(frame_id=3, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        task.on_action_verified(*decision)
+        assert task._topup_done is True
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        for _ in range(4):
+            task.on_action_verified(
+                Action(kind="click", tag="main_skill_candidate", target=(1, 1)),
+                State.SELECT_MAIN_C_SKILLS,
+            )
+        decision = task.decide_action(Observation(frame_id=4), make_window_ctx())
         assert decision is not None
         assert decision[0].tag != "main_c_topup"
 
@@ -2788,6 +2943,743 @@ class TestOtherStates:
         assert join_decision is not None
         assert join_decision[0].kind == "grab_coop"
         assert join_decision[0].tag == "find_coop_grab"
+
+
+class TestStar3TopupStage:
+    """3星主C培养环节（数量回补达标后的非强制追加，2026-09-30 用户定案）。
+
+    强袭补到 4 个后留在培养阶段：合成 2 星对碰 3 星（类型随机）+ 变身
+    3 星非主C 转化；达成 / 变身用尽（本环节内消耗）/ 死局即回选技能。
+    环节内合并优先（召唤只用于凑材料）、合成材料只用非主C对。
+    """
+
+    def _profile(self, **overrides) -> MainCProfile:
+        fields = {
+            "display_name": "强袭",
+            "hero_template_dir": "heroes/assault",
+            "avoid_main_c_merge": True,
+            "topup_after_skill_selections": 4,
+            "topup_hero_count": 4,
+            "star3_topup_enabled": True,
+        }
+        fields.update(overrides)
+        return MainCProfile(**fields)
+
+    def _stage_task(self, **profile_overrides) -> CoopTask:
+        task = make_task(main_c_profile=self._profile(**profile_overrides))
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        return task
+
+    def _count4_board(self) -> BoardSnapshot:
+        """强袭数量已达 4（2+1+1+1），另有一对非主C 1 星，棋盘有空位。"""
+        return make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("snow", star=1, pos=(500, 500)),
+                make_hero("snow", star=1, pos=(600, 600)),
+            ]
+        )
+
+    def test_holds_board_after_count_reached_and_merges_first(self):
+        """数量到 4 后留下培养：有空位也优先合并非主C对（环节内合并优先）。"""
+        task = self._stage_task()
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._count4_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+        # 留场标记已置位
+        assert task._star3_active is True
+
+    def test_exits_immediately_on_3star_assault(self):
+        """达成：场上已有 3 星强袭，直接回选技能并记录环节完成。"""
+        task = self._stage_task()
+        board = make_board(
+            [
+                make_hero("assault", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("snow", star=1, pos=(500, 500)),
+                make_hero("snow", star=1, pos=(600, 600)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_done is True
+        assert task._topup_done is True
+
+    def test_exits_when_transform_exhausted_in_stage(self):
+        """放弃·变身用尽：本环节内消耗过变身且预算归零仍无 3 星强袭。"""
+        task = self._stage_task()
+        task._transform_used_count = 2
+        task._star3_transform_entry = 1  # 环节开始时已用 1 次 → 环节内用掉 1 次
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._count4_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_done is True
+
+    def test_exits_dead_board_instead_of_merging_main_c(self):
+        """死局退出：占满只剩主C对也不合（保数量），回选技能。"""
+        task = self._stage_task()
+        heroes = [
+            make_hero("assault", star=2, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 200)),
+            make_hero("assault", star=1, pos=(300, 300)),
+            make_hero("assault", star=1, pos=(400, 400)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=4, occupied=4)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_done is True
+
+    def test_summons_to_build_material_when_no_pairs(self):
+        """环节内无对可合但有空位：召唤凑材料（继续培养，不退出）。"""
+        task = self._stage_task()
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("snow", star=1, pos=(500, 500)),
+                make_hero("death_knight", star=1, pos=(600, 600)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "summon_hero"
+        assert task._star3_done is False
+
+    def test_gold_wait_still_merges_in_stage(self):
+        """环节内等金币恢复期间照常合成（合成不花金币，环节合并优先）。
+
+        _star3_active 由培养决策置位；金币门控在决策之前，环节首帧金币
+        转红会多等一个周期（见实现注释），这里测稳态。
+        """
+        task = self._stage_task()
+        task._star3_active = True
+        obs = Observation(
+            frame_id=1,
+            board=self._count4_board(),
+            raw_data={"gold": {"current": 0, "summon_cost": 80, "summon_red": True}},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+
+    def test_batch_summon_deferred_when_pairs_exist(self):
+        """批次召唤让位：环节内有非主C对时先合成（批次或单动作），不点召唤。"""
+        task = make_task(main_c_profile=self._profile(), batch_enabled=True)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._count4_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag in {"merge_heroes", "batch_merge"}
+
+    def test_pre_star3_topup_keeps_summon_first(self):
+        """数量未达标（<4）的回补阶段保持原策略：有空位先召唤不合成。"""
+        task = self._stage_task()
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(500, 500)),
+                make_hero("snow", star=1, pos=(600, 600)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "summon_hero"
+
+    def test_star3_done_resets_for_new_round(self):
+        """环节完成标志只对本局有效：准备/被踢重进后复位。"""
+        task = make_task()
+        task._star3_done = True
+        task._star3_active = True
+        task._star3_transform_entry = 1
+        task.on_action_verified(
+            Action(kind="click", tag="ready_match", target=(1, 1)),
+            State.SELECT_OPENING_SKILLS,
+        )
+        assert task._star3_done is False
+        assert task._star3_active is False
+        assert task._star3_transform_entry is None
+        task._star3_done = True
+        task._star3_active = True
+        task._star3_transform_entry = 1
+        task._reset_for_home_reentry()
+        assert task._star3_done is False
+        assert task._star3_active is False
+        assert task._star3_transform_entry is None
+
+    def test_disabled_profile_keeps_old_exit(self):
+        """档案未开环节：数量达标仍按旧行为直接回选技能。"""
+        task = self._stage_task(star3_topup_enabled=False)
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._count4_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+
+    def test_stage1_count_satisfied_skips_star3(self):
+        """第一阶段数量已达标不进环节（实机 2026-10-01 frame=61 事故）：
+        星级门禁直接回选技能——环节只属于第二阶段（选满 4 次技能回补后）。
+        且不置位达标标志：第一阶段达标不短路第二阶段（2026-10-01 晚实机
+        局 20:45 frame=98——变身出 3星强袭+数量达标把标志置位，整局跳过
+        3星环节和凑狐狸；用户定案"第一阶段要在第二阶段凑"）。"""
+        task = self._stage_task()
+        task._topup_active = False  # 第一阶段（未走过「选满4次技能→回培养」）
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._count4_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_active is False
+        assert task._star3_done is False
+        task.on_action_verified(*decision)
+        # 第一阶段不置位：选满 4 次技能后第二阶段照常发生
+        assert task._topup_done is False
+
+    def test_stage1_satisfied_still_topup_after_four_skills(self):
+        """第一阶段数量达标 → 选满 4 次技能后仍回培养进第二阶段（回归：
+        2026-10-01 晚前实现把达标标志在第一阶段置位，第二阶段被短路）。"""
+        task = make_task(main_c_profile=self._profile())
+        task.ctx.current_state = State.SELECT_MAIN_C_SKILLS
+        task._main_skill_selections = self._profile().topup_after_skill_selections
+        task._topup_done = False
+        decision = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_topup"
+        assert decision[1] == State.BUILD_MAIN_C
+
+    def test_stage2_star3_assault_count_topup_continues(self):
+        """第二阶段回补：3 星强袭在场但数量 3 < 4——数量回补不跳过，
+        继续召唤凑第 4 个（2026-10-01 用户定案：强袭数量就要 4 个；
+        实机 frame=455 场景，我曾误加"3星在场跳过凑数"短路已撤销）。"""
+        task = self._stage_task()
+        board = make_board(
+            [
+                make_hero("assault", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),  # 数量 3 < 4
+                make_hero("snow", star=1, pos=(500, 500)),
+                make_hero("death_knight", star=1, pos=(600, 600)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        # 棋盘有空位：按回补规则召唤（不退出、也不做 3 星培养动作）
+        assert decision[0].tag == "summon_hero"
+        assert task._star3_active is False
+        assert task._star3_done is False
+
+    def test_stage2_surplus_assault_pairs_merge_before_dead_exit(self):
+        """第二阶段富余强袭对可合（实机 frame=150 案例）：7 个强袭含 2 星对、
+        棋盘占满无空位——合并强袭对碰 3 星（保 ≥4），不死局退出。"""
+        task = self._stage_task()
+        heroes = [
+            # 7 强袭：3×2星（互成对）+ 4×1星
+            make_hero("assault", star=2, pos=(100, 100)),
+            make_hero("assault", star=2, pos=(200, 200)),
+            make_hero("assault", star=2, pos=(300, 300)),
+            make_hero("assault", star=1, pos=(400, 400)),
+            make_hero("assault", star=1, pos=(500, 500)),
+            make_hero("assault", star=1, pos=(600, 600)),
+            make_hero("assault", star=1, pos=(700, 700)),
+            # 2 个非主C，互不成对、无 3 星（无可变身对象）
+            make_hero("snow", star=2, pos=(800, 800)),
+            make_hero("angel", star=1, pos=(900, 900)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=9, occupied=9)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+        assert task._star3_done is False
+
+
+class TestTopupAfterStage:
+    """凑 lineup 英雄子环节（3星环节出口追加，2026-10-01 用户定案）。
+
+    达成/变身用尽退出且场上无目标英雄：有空位先召唤、满盘合准入对（非主C
+    且不含目标英雄）腾格、满盘无对且变身可用再变身；满盘+无对+无变身放弃。
+    死局退出不进子环节。
+    """
+
+    def _profile(self, **overrides) -> MainCProfile:
+        fields = {
+            "display_name": "强袭",
+            "hero_template_dir": "heroes/assault",
+            "avoid_main_c_merge": True,
+            "topup_after_skill_selections": 4,
+            "topup_hero_count": 4,
+            "star3_topup_enabled": True,
+            "star3_topup_after_hero": "fox",
+        }
+        fields.update(overrides)
+        return MainCProfile(**fields)
+
+    def _after_task(self, *, transform: bool = False, **profile_overrides) -> CoopTask:
+        task = make_task(
+            main_c_profile=self._profile(**profile_overrides),
+            transform_button_locator=TRANSFORM_LOCATOR if transform else None,
+        )
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        return task
+
+    def test_entered_on_achieve_and_summons_first(self):
+        """达成 3星强袭且场上无狐狸：进子环节，有空位召唤优先。"""
+        task = self._after_task(transform=True)
+        board = make_board(
+            [
+                make_hero("assault", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                # 3 星死骑在场：子环节召唤优先，不当变身目标
+                make_hero("death_knight", star=3, pos=(500, 500)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "summon_hero"
+        assert task._star3_after_active is True
+        assert task._star3_done is True
+        assert task._topup_done is True
+
+    def test_not_entered_when_hero_already_present(self):
+        """达成退出时狐狸已在场：不进子环节，直接回选技能。"""
+        task = self._after_task()
+        board = make_board(
+            [
+                make_hero("assault", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("fox", star=1, pos=(500, 500)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_after_active is False
+
+    def test_not_entered_on_deadlock_exit(self):
+        """死局退出（满盘只剩主C对）：不进子环节，直接回选技能。"""
+        task = self._after_task()
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 200)),
+            make_hero("assault", star=1, pos=(300, 300)),
+            make_hero("assault", star=1, pos=(400, 400)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=4, occupied=4)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_after_active is False
+
+    def test_entered_on_transform_exhausted_exit(self):
+        """放弃·变身用尽退出（棋盘还活着）：同样进子环节召唤。"""
+        task = self._after_task()
+        task._transform_used_count = 2
+        task._star3_transform_entry = 1
+        board = make_board(
+            [
+                make_hero("assault", star=2, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("angel", star=1, pos=(500, 500)),
+                make_hero("death_knight", star=1, pos=(600, 600)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "summon_hero"
+        assert task._star3_after_active is True
+
+    def test_exits_to_skills_when_fox_appears(self):
+        """子环节中场上出现狐狸：达标退出回选技能并清标志。"""
+        task = self._after_task()
+        task._star3_after_active = True
+        task._star3_done = True
+        board = make_board(
+            [
+                make_hero("assault", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("fox", star=1, pos=(500, 500)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_after_active is False
+
+    def test_full_board_merges_allowed_pair(self):
+        """满盘：合准入对（天使对）腾格，不合主C对。"""
+        task = self._after_task()
+        task._star3_after_active = True
+        task._star3_done = True
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 200)),
+            make_hero("assault", star=1, pos=(300, 300)),
+            make_hero("assault", star=1, pos=(400, 400)),
+            make_hero("assault", star=1, pos=(450, 450)),
+            make_hero("assault", star=1, pos=(500, 500)),
+            make_hero("angel", star=1, pos=(600, 600)),
+            make_hero("angel", star=1, pos=(700, 700)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=8, occupied=8)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+        # 拖的是天使对，不是主C对
+        assert decision[0].target != decision[0].end
+
+    def test_full_board_uses_transform_when_no_pair(self):
+        """满盘无准入对 + 变身可用且有 3 星目标：变身碰狐狸。"""
+        task = self._after_task(transform=True)
+        task._star3_after_active = True
+        task._star3_done = True
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 200)),
+            make_hero("assault", star=1, pos=(300, 300)),
+            make_hero("assault", star=1, pos=(400, 400)),
+            make_hero("death_knight", star=3, pos=(500, 500)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=5, occupied=5)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_click_hero"
+
+    def test_full_board_gives_up_without_pair_or_transform(self):
+        """满盘 + 无准入对 + 无变身：入口帧即放弃回选技能（不点满盘召唤）。"""
+        task = self._after_task(transform=True)
+        # 变身预算用尽 → transform_usable=False
+        task._transform_used_count = task._run_config.transform_max_per_round
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 200)),
+            make_hero("assault", star=1, pos=(300, 300)),
+            make_hero("assault", star=1, pos=(400, 400)),
+            make_hero("death_knight", star=1, pos=(500, 500)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=5, occupied=5)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_after_active is False
+
+    def test_summon_first_with_transform_target_and_space(self):
+        """有空位时召唤优先：即使有 3 星可变身对象也不先变身。"""
+        task = self._after_task(transform=True)
+        task._star3_after_active = True
+        task._star3_done = True
+        board = make_board(
+            [
+                make_hero("assault", star=3, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("death_knight", star=3, pos=(500, 500)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "summon_hero"
+
+
+class TestDeadlockUnlock:
+    """卡死解锁低星变身（2026-10-01 用户定案）。
+
+    3星环节死局出口与凑 lineup 英雄子环节放弃出口，退出前先试低星变身
+    （候选/星级规则见 strategy.select_deadlock_transform）；变身不可用
+    （未接线/预算尽/放弃记忆抑制）或无候选才真退出。
+    """
+
+    def _profile(self, **overrides) -> MainCProfile:
+        fields = {
+            "display_name": "强袭",
+            "hero_template_dir": "heroes/assault",
+            "avoid_main_c_merge": True,
+            "topup_after_skill_selections": 4,
+            "topup_hero_count": 4,
+            "star3_topup_enabled": True,
+            "star3_topup_after_hero": "fox",
+        }
+        fields.update(overrides)
+        return MainCProfile(**fields)
+
+    def _task(self, *, transform: bool = True) -> CoopTask:
+        task = make_task(
+            main_c_profile=self._profile(),
+            transform_button_locator=TRANSFORM_LOCATOR if transform else None,
+        )
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        # 裸 RunConfig 的通配集为空，注入实机 default.yaml 配置
+        task._wildcard_heroes = frozenset({"angel_phantom"})
+        return task
+
+    @staticmethod
+    def _frame1199_board() -> BoardSnapshot:
+        """实机 frame 1199 复刻：满盘 9/9，强袭 4 只两对（被数量底线拦）、
+        非主C无同星对、无 ≥3星变身材料 → 真死局形状。"""
+        heroes = [
+            make_hero("death_knight", star=2, pos=(100, 100)),
+            make_hero("angel", star=2, pos=(200, 100)),
+            make_hero("assault", star=2, pos=(300, 100)),
+            make_hero("death_knight", star=1, pos=(400, 100)),
+            make_hero("assault", star=2, pos=(500, 100)),
+            make_hero("assault", star=1, pos=(600, 100)),
+            make_hero("assault", star=1, pos=(700, 100)),
+            make_hero("fox", star=2, pos=(800, 100)),
+            make_hero("fox", star=1, pos=(900, 100)),
+        ]
+        return BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=9, occupied=9)
+        )
+
+    def test_stage_deadlock_transforms_low_star_instead_of_exit(self):
+        """frame 1199 复刻回归：死局 → 变 2星多数派格位序第一只（死骑），
+        环节不退出、进入变身动作状态机。"""
+        task = self._task()
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._frame1199_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "transform_click_hero"
+        assert decision[0].target == (100, 100)
+        assert task._star3_done is False
+        assert task._topup_done is False
+        assert task._transform_stage == "poll"
+
+    def test_stage_deadlock_exits_when_transform_not_wired(self):
+        """变身未接线（模板缺失降级）：解锁不可用，按原死局退出回选技能。"""
+        task = self._task(transform=False)
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._frame1199_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_done is True
+        assert task._transform_stage is None
+
+    def test_stage_deadlock_exits_when_budget_exhausted(self):
+        """变身预算用尽（局内早已花完）：解锁不可用，死局退出。"""
+        task = self._task()
+        task._transform_used_count = task._run_config.transform_max_per_round
+        decision = task.decide_action(
+            Observation(frame_id=1, board=self._frame1199_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+
+    def test_stage_deadlock_exits_when_all_unlock_targets_given_up(self):
+        """按英雄放弃记忆记满全部解锁候选（按钮逐一超时，如皮肤升级产物）：
+        解锁无候选，死局退出回选技能——等价旧整盘签名抑制，且不挡
+        未失败的目标（2026-10-03 记法变更）。"""
+        task = self._task()
+        task.decide_action(
+            Observation(frame_id=1, board=self._frame1199_board()), make_window_ctx()
+        )
+        assert task._transform_failed_targets == set()  # 前置：本盘未放弃过
+        # 模拟低星解锁候选逐一按钮超时被记
+        task._transform_failed_targets = {
+            ("death_knight", 2, (100, 100)),
+            ("angel", 2, (200, 100)),
+            ("death_knight", 1, (400, 100)),
+            ("fox", 2, (800, 100)),
+            ("fox", 1, (900, 100)),
+        }
+        task._transform_stage = None
+        task._transform_target = None
+        task._transform_used_count = 0
+        decision = task.decide_action(
+            Observation(frame_id=2, board=self._frame1199_board()), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+
+    def test_substage_giveup_transforms_low_star_instead_of_exit(self):
+        """子环节放弃出口：变 1星多数派格位序第一只（天使），子环节继续
+        （1/3 直接变出狐狸当场达标）。"""
+        task = self._task()
+        task._star3_after_active = True
+        task._star3_done = True
+        task._topup_done = True
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 100)),
+            make_hero("assault", star=1, pos=(300, 100)),
+            make_hero("assault", star=1, pos=(400, 100)),
+            make_hero("angel", star=2, pos=(500, 100)),
+            make_hero("death_knight", star=2, pos=(600, 100)),
+            make_hero("angel", star=1, pos=(700, 100)),
+            make_hero("death_knight", star=1, pos=(800, 100)),
+            make_hero("monkey", star=1, pos=(900, 100)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=9, occupied=9)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "transform_click_hero"
+        assert decision[0].target == (700, 100)
+        assert task._star3_after_active is True
+        assert task._transform_stage == "poll"
+
+    def test_substage_giveup_exits_when_pool_empty(self):
+        """子环节放弃且无低星候选（只剩通配与数量 4 的主C）：真放弃退出。"""
+        task = self._task()
+        task._star3_after_active = True
+        task._star3_done = True
+        task._topup_done = True
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 100)),
+            make_hero("assault", star=1, pos=(300, 100)),
+            make_hero("assault", star=1, pos=(400, 100)),
+            make_hero("angel_phantom", star=1, pos=(500, 100)),
+            make_hero("angel_phantom", star=2, pos=(600, 100)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=6, occupied=6)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_after_active is False
+
+    def test_substage_full_board_merges_surplus_main_pair(self):
+        """frame 629 复刻回归（2026-10-02 富余主C对放行）：强袭 6 只满盘 →
+        合 assault2 对（消耗 2 剩 4，产物 3星随机有 1/4 是狐狸），不再放弃。"""
+        task = self._task()
+        task._star3_after_active = True
+        task._star3_done = True
+        task._topup_done = True
+        assault2_positions = {(200, 100), (300, 100), (500, 100)}
+        heroes = [
+            make_hero("angel", star=1, pos=(100, 100)),
+            make_hero("assault", star=2, pos=(200, 100)),
+            make_hero("assault", star=2, pos=(300, 100)),
+            make_hero("assault", star=3, pos=(400, 100)),
+            make_hero("assault", star=2, pos=(500, 100)),
+            make_hero("assault", star=1, pos=(600, 100)),
+            make_hero("death_knight", star=1, pos=(700, 100)),
+            make_hero("assault", star=1, pos=(800, 100)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=8, occupied=8)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+        assert {decision[0].target, decision[0].end} <= assault2_positions
+        assert task._star3_after_active is True
+
+    def test_substage_five_assaults_still_gives_up_without_phantom(self):
+        """强袭 5 只无幻天使：主C对消耗 2 破底线仍不合 → 放弃（原行为锁）。"""
+        task = self._task(transform=False)
+        task._star3_after_active = True
+        task._star3_done = True
+        task._topup_done = True
+        heroes = [
+            make_hero("assault", star=3, pos=(100, 100)),
+            make_hero("assault", star=2, pos=(200, 100)),
+            make_hero("assault", star=2, pos=(300, 100)),
+            make_hero("assault", star=1, pos=(400, 100)),
+            make_hero("assault", star=1, pos=(500, 100)),
+            make_hero("angel", star=1, pos=(600, 100)),
+            make_hero("death_knight", star=1, pos=(700, 100)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=7, occupied=7)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._star3_after_active is False
+
+    def test_stage_full_board_merges_phantom_main_pair_at_five(self):
+        """环节内满盘 + 强袭 5 只 + 幻天使：幻天使+强袭对只消耗 1，
+        可合（原先按消耗 2 拦死），环节留场不死局。"""
+        task = self._task()
+        heroes = [
+            make_hero("assault", star=2, pos=(100, 100)),
+            make_hero("assault", star=1, pos=(200, 100)),
+            make_hero("assault", star=1, pos=(300, 100)),
+            make_hero("assault", star=1, pos=(400, 100)),
+            make_hero("assault", star=1, pos=(500, 100)),
+            make_hero("angel_phantom", star=1, pos=(600, 100)),
+            make_hero("angel", star=2, pos=(700, 100)),
+            make_hero("death_knight", star=2, pos=(800, 100)),
+        ]
+        board = BoardSnapshot(
+            frame_id=1, heroes=heroes, capacity=BoardCapacity(total_slots=8, occupied=8)
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "drag"
+        assert decision[0].tag == "merge_heroes"
+        assert (600, 100) in {decision[0].target, decision[0].end}
+        assert task._star3_active is True
+        assert task._star3_done is False
 
 
 # ---------------------------------------------------------------------------
@@ -4986,10 +5878,12 @@ class TestTransformSequence:
         }
         assert task._transform_stage is None
         assert task._transform_used_count == 0
-        assert task._transform_skip_signature is not None
+        assert task._transform_failed_targets == {("snow", 3, (100, 100))}
 
-    def test_giveup_suppression_lifts_when_board_evolves(self):
-        """棋盘演化（如召唤新英雄）后放弃记忆解除，变身可再次触发。"""
+    def test_giveup_memory_survives_unrelated_board_evolution(self):
+        """按英雄放弃记忆（2026-10-03 用户定案）：棋盘无关演化（召唤/合成/
+        识别漂移）不复活已放弃的目标——旧整盘签名记法每演化一次就复活
+        重烧 ~6s（实机 01:46 局皮肤升级 fox3 共 7 次）。"""
         task = self._ready_task()
         self._enter_poll(task)
         task._transform_poll_deadline = 0.0
@@ -5000,7 +5894,7 @@ class TestTransformSequence:
         )
         assert decision is not None
         assert decision[0].tag != "transform_click_hero"
-        # 召唤后棋盘多了一个英雄：签名变化，解除抑制
+        # 召唤后棋盘多了英雄：snow3 仍在场且仍被记，不再对它触发
         board2 = make_board(
             [
                 make_hero("snow", star=3, pos=(100, 100)),
@@ -5008,11 +5902,34 @@ class TestTransformSequence:
             ]
         )
         decision = task.decide_action(
-            Observation(frame_id=1, board=board2), make_window_ctx()
+            Observation(frame_id=2, board=board2), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag != "transform_click_hero"
+        assert task._transform_failed_targets == {("snow", 3, (100, 100))}
+
+    def test_giveup_memory_lifts_when_hero_changes(self):
+        """被记的英雄自身变化（合掉/升星/换英雄）：记录随之清除，
+        新出现的可变身目标重新给机会。"""
+        task = self._ready_task()
+        self._enter_poll(task)
+        task._transform_poll_deadline = 0.0
+        task._transform_reclicks = task._run_config.transform_button_reclick_max
+        board = make_board([make_hero("snow", star=3, pos=(100, 100))])
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        assert task._transform_failed_targets == {("snow", 3, (100, 100))}
+        # snow3 离场（如被合掉），angel3 入场：记录被棋盘识别清掉，可再触发
+        board2 = make_board([make_hero("angel", star=3, pos=(300, 300))])
+        decision = task.decide_action(
+            Observation(frame_id=2, board=board2), make_window_ctx()
         )
         assert decision is not None
         assert decision[0].tag == "transform_click_hero"
-        assert task._transform_skip_signature is None
+        assert decision[0].target == (300, 300)
+        assert task._transform_failed_targets == set()
 
     # ---- confirm ----
 
@@ -5069,7 +5986,7 @@ class TestTransformSequence:
         assert decision[0].tag not in {"transform_click_button", "transform_reclick_button"}
         assert task._transform_stage is None
         assert task._transform_used_count == 0
-        assert task._transform_skip_signature is not None
+        assert task._transform_failed_targets == {("snow", 3, (100, 100))}
 
     # ---- verify ----
 
@@ -5114,10 +6031,10 @@ class TestTransformSequence:
         assert decision is not None
         assert decision[0].tag not in {
             "transform_verify_retry",
-            "transform_click_hero",  # 放弃记忆抑制立刻再触发
+            "transform_click_hero",  # 放弃记忆按英雄记：snow3 不再触发
         }
         assert task._transform_stage is None
-        assert task._transform_skip_signature is not None
+        assert task._transform_failed_targets == {("snow", 3, (100, 100))}
 
     def test_verify_empty_board_waits(self):
         task = self._ready_task()
@@ -5142,11 +6059,11 @@ class TestTransformSequence:
         task = self._ready_task()
         self._enter_verify(task)
         task._transform_used_count = 2
-        task._transform_skip_signature = (("snow", 3, (100, 100)),)
+        task._transform_failed_targets = {("snow", 3, (100, 100))}
         task.on_action_verified(Action(kind="wait", tag="ready_match"), State.ENTER_MATCH)
         assert task._transform_used_count == 0
         assert task._transform_stage is None
-        assert task._transform_skip_signature is None
+        assert task._transform_failed_targets == set()
 
 
 # ---------------------------------------------------------------------------

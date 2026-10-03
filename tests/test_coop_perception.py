@@ -679,7 +679,12 @@ class TestInterfaceFlagGating:
                 "tan_chuang.png",
                 "fan_hui.png",
             },
-            State.SELECT_MAIN_C_SKILLS: {"xuan_ze_ji_neng.png", "tan_chuang.png", "fan_hui.png"},
+            State.SELECT_MAIN_C_SKILLS: {
+                "xuan_ze_ji_neng.png",
+                "4_xing_e_wai_ji_neng.png",
+                "tan_chuang.png",
+                "fan_hui.png",
+            },
             State.HANDLE_RESULT: {"fan_hui.png"},
             State.CHECK_ROUND_LIMIT: {"fan_hui.png"},
         }

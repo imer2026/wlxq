@@ -580,10 +580,12 @@ class TestWildcardMergeAndVariants:
             RunConfig(wildcard_merge_heroes=["9bad"])
 
     def test_repo_default_yaml_lineup_others_account_split(self) -> None:
-        """阵容分叉（2026-09-28）：monkey 档案显式狐狸阵容，全局默认仍是雪姬阵容。
+        """阵容分叉（monkey 9-28、assault 10-01 换狐狸）：两个档案显式狐狸阵容，
+        全局默认仍是雪姬阵容。
 
-        强袭号没换阵容且其模型无 fox 类——全局若仍是 fox 会让默认 run 启动校验
-        直接失败（回归：英雄格模型缺少本局阵容类别: fox）。
+        angel/snow/death_knight 档案未声明阵容、继承全局，其模型（snow-helper
+        等）无 fox 类——全局若改成 fox 会让这些档案的启动校验直接失败（回归：
+        英雄格模型缺少本局阵容类别: fox）。
         """
         cfg = load_default_config(Path("configs/default.yaml"))
         assert cfg.hero_classifier.lineup_others == ["angel", "snow", "death_knight"]
@@ -592,8 +594,13 @@ class TestWildcardMergeAndVariants:
             "fox",
             "death_knight",
         ]
+        assert cfg.main_c_profiles["assault"].lineup_others == [
+            "angel",
+            "fox",
+            "death_knight",
+        ]
         # 未声明档案的 lineup_others 为空，语义 = 继承全局
-        assert cfg.main_c_profiles["assault"].lineup_others == []
+        assert cfg.main_c_profiles["angel"].lineup_others == []
 
     def test_main_c_profile_lineup_others_rejects_bad_identifier(self) -> None:
         from wlxq_bot.config import MainCProfile
@@ -615,4 +622,5 @@ class TestWildcardMergeAndVariants:
         runner = Runner.__new__(Runner)
         runner.default_config = cfg
         assert runner._lineup_others_for("monkey") == ["angel", "fox", "death_knight"]
-        assert runner._lineup_others_for("assault") == ["angel", "snow", "death_knight"]
+        assert runner._lineup_others_for("assault") == ["angel", "fox", "death_knight"]
+        assert runner._lineup_others_for("angel") == ["angel", "snow", "death_knight"]

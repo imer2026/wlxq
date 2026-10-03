@@ -447,21 +447,22 @@ def compute_skill_tiers(
 ) -> dict[str, int]:
     """按主C的优先级配置计算 {技能名: 档位}。
 
-    - 配置里的 1~11 档均为显式数组;第 8、11 档另有启动时自动兜底，只填
-      未被显式档覆盖的技能，显式配置优先
-    - 自动兜底：主C清单里未被显式档覆盖的技能 → main_c_rest_tier（默认
-      第 8 档；可改为 11：主C未列技能与其余技能同档随机，如猴子的
-      天使大/狐狸大/其他三档模型）；第 11 档 = 阵容英雄的其余技能。传入
-      lineup_hero_names（本局阵容英雄的中文名集合）时第 11 档只收阵容
-      英雄的技能——对局商店只刷本局阵容的技能，非阵容英雄（如猴子局里的
-      强袭）的技能留在清单但不进任何档位
+    - 配置里的 1~12 档均为显式数组;第 12 档只作显式最低档(低于第 11 档
+      随机池,无自动兜底);第 8、11 档另有启动时自动兜底,只填
+      未被显式档覆盖的技能,显式配置优先
+    - 自动兜底:主C清单里未被显式档覆盖的技能 → main_c_rest_tier(默认
+      第 8 档;可改为 11:主C未列技能与其余技能同档随机,如猴子的
+      天使大/狐狸大/其他三档模型);第 11 档 = 阵容英雄的其余技能。传入
+      lineup_hero_names(本局阵容英雄的中文名集合)时第 11 档只收阵容
+      英雄的技能——对局商店只刷本局阵容的技能,非阵容英雄(如猴子局里的
+      强袭)的技能留在清单但不进任何档位
     - 配置里清单查不到的名字保留生效并打警告(防手滑写错字)
     """
     tier_of: dict[str, int] = {}
     for tier, names in sorted(priority_cfg.items()):
         tier = int(tier)
-        if not 1 <= tier <= 11:
-            logger.warning("skill_priority 档位 %d 超出 1~11,忽略: %s", tier, names)
+        if not 1 <= tier <= 12:
+            logger.warning("skill_priority 档位 %d 超出 1~12,忽略: %s", tier, names)
             continue
         for name in names:
             name = str(name).strip()

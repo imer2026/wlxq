@@ -335,6 +335,24 @@ class TestComputeSkillTiers:
         # 未显式配置的技能仍走自动兜底
         assert tiers["职业控制"] == 11
 
+    def test_tier12_explicit_lowest_and_13_ignored(self) -> None:
+        """回归（2026-10-01）：第 12 档可作为显式最低档（低于第 11 档
+        随机池），13 及以上忽略后仍落自动兜底档。"""
+        tiers = compute_skill_tiers(
+            {11: ["千狐魅影"], 12: ["盈天灵珠"], 13: ["摄魂之力"]},
+            {
+                "千狐魅影": "狐狸",
+                "盈天灵珠": "狐狸",
+                "摄魂之力": "狐狸",
+                "职业控制": "天使",
+            },
+            "强袭",
+        )
+        assert tiers["千狐魅影"] == 11
+        assert tiers["盈天灵珠"] == 12
+        # 13 档被忽略 → 摄魂之力按未配置处理，非主C阵容技能落第 11 档
+        assert tiers["摄魂之力"] == 11
+
     def test_explicit_tier8_monkey_skill_precedes_rest_pool(self) -> None:
         """回归（2026-09-29）：猴子 8: [乱点天宫] 不再被忽略——主C兜底为
         第 11 档（prefer_main_c_skills=false）时显式第 8 档仍生效。"""
