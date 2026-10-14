@@ -292,6 +292,8 @@ class Runner:
             DebugRecorder(
                 self.default_config.vision.debug_dir,
                 exit_frame_buffer_size=self.default_config.vision.exit_frame_buffer_size,
+                exit_keep_last=self.default_config.vision.exit_keep_last,
+                exit_retention_days=self.default_config.vision.exit_retention_days,
             )
             if self.default_config.vision.debug
             else None
@@ -321,6 +323,7 @@ class Runner:
             new_skill_dir=new_skill_dir,
             gold_cache=gold_cache,
             difficulty_kind=mode_profile.entry.difficulty.kind,
+            difficulty_debug_screenshots=self.default_config.vision.difficulty_debug_screenshots,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -544,6 +547,8 @@ class Runner:
             DebugRecorder(
                 self.default_config.vision.debug_dir,
                 exit_frame_buffer_size=self.default_config.vision.exit_frame_buffer_size,
+                exit_keep_last=self.default_config.vision.exit_keep_last,
+                exit_retention_days=self.default_config.vision.exit_retention_days,
             )
             if self.default_config.vision.debug
             else None
@@ -556,6 +561,7 @@ class Runner:
             self.default_config.run.default_main_c,
             debug_recorder=debug_recorder,
             difficulty_kind=mode_profile.entry.difficulty.kind,
+            difficulty_debug_screenshots=self.default_config.vision.difficulty_debug_screenshots,
             locator_aliases={
                 "ready_button": mode_profile.match.ready_button,
                 "return_button": mode_profile.settlement.return_button,
@@ -1042,6 +1048,16 @@ class Runner:
                 grab_result = grab_coordinator.run()
                 if grab_result.found:
                     logger.info("抢合作成功，回到主循环识别并点击准备按钮")
+                    continue
+                if grab_result.reason == "kicked_home":
+                    # 抢进组队大厅后被房主请离、回到首页（2026-10-05 实机）：
+                    # 本局未开始，清进度后重走招募入口，不保守停止
+                    logger.warning(
+                        "frame=%d 抢合作期间被踢回首页（kicked_home），"
+                        "重置进度重新走招募",
+                        ctx.frame_id,
+                    )
+                    task.reset_after_grab_kick()
                     continue
                 logger.warning("抢合作未发现准备按钮，停止 reason=%s", grab_result.reason)
                 if grab_result.reason == "window_lost":

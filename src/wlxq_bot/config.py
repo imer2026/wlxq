@@ -53,6 +53,14 @@ class VisionConfig(BaseModel):
     max_consecutive_failures: int = 5
     # 任务非正常退出时落盘的主循环截图张数（环形缓冲）；0 关闭
     exit_frame_buffer_size: int = Field(default=20, ge=0, le=60)
+    # exit 目录保留策略（目录统一存 <debug_dir>/exit/，按目录名时间戳判定）：
+    # 超过该天数的整目录删除，0 关闭
+    exit_retention_days: int = Field(default=7, ge=0)
+    # 只按个数保留时间戳最新的 N 个 exit 目录，0 关闭；与天数任一命中即删
+    exit_keep_last: int = Field(default=0, ge=0)
+    # 难度弹窗识别调试截图（difficulty_roi 裁剪 + difficulty 整帧标注，读难度
+    # 弹窗的每帧都落盘）：默认关，排查难度误判时再打开
+    difficulty_debug_screenshots: bool = False
 
 
 class InputConfig(BaseModel):
@@ -315,6 +323,19 @@ class RunConfig(BaseModel):
     # 同类项对在前、通配对棋盘占满才用（2026-09-13 用户定案，spec
     # docs/superpowers/specs/2026-09-13-angel-phantom-split-design.md）
     wildcard_merge_heroes: list[str] = Field(default_factory=list)
+    # 召唤拒判（2026-10-06 用户定案）：连续 N 次召唤点击后召唤费用读数不变
+    # = 一发都没有落位（棋盘满时游戏直接拒绝召唤），判定棋盘已满，停用召唤
+    # 出口交由合成/变身/干等。依据游戏的拒绝行为而非识别占用，识别抖动
+    # （战斗特效/飘字造成的假空格）不再触发召唤空转（2026-10-06 实机 102
+    # 连点零落位事故，费用全程钉死 215）
+    summon_refusal_limit: int = Field(default=3, ge=1, le=10)
+    # 召唤费用封顶值：费用到顶后成功召唤也不再变化，费用判据在该段失明；
+    # 读数等于封顶时计数冻结（不增不清），避免把成功召唤误判成拒绝
+    summon_cost_cap: int = Field(default=660, ge=1)
+    # 判满后无合成对/无变身可用时的干等决策连击上限：计满保守停止。棋盘
+    # 签名看门狗按识别结果计数，识别抖动会让签名一直变化绕过它，这里按
+    # 动作计数兜底（判满依据是游戏拒绝行为，不依赖识别）
+    summon_full_wait_limit: int = Field(default=15, ge=1, le=200)
 
     @field_validator("wildcard_merge_heroes", mode="before")
     @classmethod
@@ -447,9 +468,11 @@ class RunConfig(BaseModel):
     # 后重新识别；连续 wait_max 次仍未命中才放弃刷新、直接选卡。0 = 不等待
     skill_refresh_button_wait_seconds: float = Field(default=1.0, gt=0.0, le=10.0)
     skill_refresh_button_wait_max: int = Field(default=3, ge=0, le=10)
-    # 等待开局期间连续这么多帧识别到首页标记，才判定本局被取消/被踢回首页
-    # （加载画面可能与首页有短暂相似，单帧命中不能直接判定）
-    home_return_confirm_frames: int = Field(default=2, ge=1, le=10)
+    # 连续这么多帧/拍识别到首页标记，才判定被踢回首页（加载画面可能与首页
+    # 有短暂相似，单帧命中不能直接判定）。两处消费同一配置：等待开局期间
+    # （约 0.5s/帧）与抢合作检查线程的被踢检测（约 1s/拍）；2026-10-05 用户
+    # 定案从 2 提到 4——进房过场偶现首页样画面，确认拍数再放宽一档
+    home_return_confirm_frames: int = Field(default=4, ge=1, le=10)
     # 组队大厅点准备后：准备按钮消失且底部导航连续这么多帧读到「返回」（=
     # 落在领地页），才判定本局被踢/房间解散（2026-09-25 实机：被队长请离后
     # 落点为领地页，toast「你被队长请离了」）；单帧 OCR 误读不能直接判定

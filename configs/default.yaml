@@ -34,10 +34,19 @@ vision:
   # 退出帧缓冲：主循环保留最近 N 张截图（内存常驻约 N×4.8MB，927x1727 客户区，
   # 20 张约 96MB，只存引用不复制，无 CPU 开销），
   # 任务非正常退出（保守停止、失败/步数上限、异常崩溃）时批量落盘到
-  # screenshots/debug/exit_<状态>_<时间戳>/；正常完成（COMPLETED）和
+  # screenshots/debug/exit/exit_<状态>_<时间戳>/；正常完成（COMPLETED）和
   # 用户主动停止（Esc、Ctrl+C）不保存；
   # 落盘路径以 WARNING 打进日志，便于事后排查「当时画面是什么」
   exit_frame_buffer_size: 20
+  # exit 目录保留策略：退出帧目录统一存 screenshots/debug/exit/，按目录名
+  # 时间戳清理——超过 exit_retention_days 天的整目录删除（0 关闭）；
+  # exit_keep_last 只按个数保留时间戳最新的 N 个（0 关闭），两项任一命中即删；
+  # debug 顶层历史遗留的 exit_* 目录会在下次运行时自动挪进 exit/ 子目录
+  exit_retention_days: 7
+  exit_keep_last: 0
+  # 难度弹窗识别调试截图（difficulty_roi 裁剪 + difficulty 整帧标注）：默认关，
+  # 排查难度误判（如 8 识别成 5）时临时打开
+  difficulty_debug_screenshots: false
   # 连续识别失败达到该阈值后暂停任务
   max_consecutive_failures: 5
 
@@ -102,6 +111,18 @@ run:
   # 通配合并英雄（赖子）：幻天使可与任意同星级英雄合并；同类项对优先、
   # 棋盘占满才使用（2026-09-13 定案，spec 2026-09-13-angel-phantom-split）
   wildcard_merge_heroes: [angel_phantom]
+  # 召唤拒判（2026-10-06 定案）：连续 summon_refusal_limit 次召唤点击后
+  # 召唤费用读数不变 = 游戏在满盘上拒绝召唤（一发都没落位），判定棋盘
+  # 已满，停用召唤出口交由合成/变身/干等；费用变化或合成成功自动解除。
+  # 依据游戏拒绝行为而非识别占用，识别抖动的假空格不再触发召唤空转
+  # （2026-10-06 实机 102 连点零落位事故，费用全程钉死 215）
+  summon_refusal_limit: 3
+  # 召唤费用封顶值：读数等于该值时计数冻结（封顶后成功召唤费用也不变，
+  # 费用判据在该段无定义，不增不清避免误判）
+  summon_cost_cap: 660
+  # 判满后无对可合/无变身可用的干等决策连击上限：计满保守停止（识别抖动
+  # 会让棋盘签名一直变化绕过签名看门狗，这里按动作计数兜底）
+  summon_full_wait_limit: 15
   # 召唤点击后棋盘始终未变化（多为金币不足）时的重试等待（秒）：等待后重新
   # 尝试召唤；回补阶段的召唤失败不等待，直接放弃回补回选技能
   summon_retry_delay_seconds: 15.0
@@ -112,7 +133,7 @@ run:
   # 组队对局模式：coop（合作模式）| pet（保卫宠物）；CLI --mode 覆盖本次运行
   mode: coop
   # 首次进入招募时需要勾选的合作难度（编号指彩虹难度）；按从小到大（如 1→10）依次点击
-  coop_difficulties: '1-14'
+  coop_difficulties: '1-16'
   # 游戏本次会话已手动选过难度时置 true（或 run --skip-difficulty-selection）：
   # 首局招募只跳过「勾选难度等级」，难度弹窗仍打开并关闭一次以刷新最新合作邀请
   skip_difficulty_selection: false
@@ -290,7 +311,13 @@ main_c_profiles:
     # 复制，snow 不入）。validation=狐狸 231 局整局隔离 814 张 + newart 复制
     # 1507 张：总体 99.01%、狐狸四星 854/854 全对（单局隔离口径）；
     # newart test 97.35%（v6 同测 96.6%）。回滚雪姬阵容=模型指回 v6
-    hero_classifier_model: outputs/hero_classifier/assault-helper-v7/hero_classifier.onnx
+    # 2026-10-05 重训 v8：v7 数据 + DK4/天使4星补标注（两局 489 张）+
+    # 202608122014 污染 DK4 隔离 + 202608122010 挪验证并修正 7 张陈年
+    # 错标（6 张 angel1 实为 4星天使、1 张 DK1 实为 DK4）。validation
+    # 2797 张：总体 99.07%、DK4 82/82、天使4星 7/7、DK1→DK4 0/158、
+    # 天使1→4 0/35（v7 同标签：DK4 82/82 系训练局背题、天使4星召回仅
+    # 1/7）。v7 仍留 outputs/hero_classifier/assault-helper-v7/ 可回滚
+    hero_classifier_model: outputs/hero_classifier/assault-helper-v8/hero_classifier.onnx
     # 本号携带阵容（2026-10-01 阵容换血雪姬→狐狸）：覆盖全局 lineup_others，
     # 识别白名单/模型类别启动校验/技能档位过滤均按本值；全局 lineup_others
     # 仍是雪姬阵容，供 angel/snow/death_knight 档案继承，勿改
@@ -348,10 +375,36 @@ main_c_profiles:
       # skills.yaml 新增的未配置技能仍会落第 11 档自动兜底（与狐狸 4 张
       # 同档随机），新增时需留意补档
       11: [千狐魅影, 狐尾爱心, 九尾爱心, 职业控制]
-      12: [盈天灵珠, 摄魂之力, 狐灵惑心, 回风珠返, 爆炸范围, 灵魂震爆,
-        神明怒火, 圣灵庇护, 圣羽增持, 陨星刻印, 流星坠落, 战神化身, 巨大流星,
-        死灵战神, 灵魂剑气, 亡灵护主, 强化打击, 免伤护盾, 双重打击, 反弹护盾,
-        暴力斩击, 剑气强化, 护盾增幅, 高速打击, 剑气增伤, 控制痛击, 血量传承]
+      12:
+        [
+          盈天灵珠,
+          摄魂之力,
+          狐灵惑心,
+          回风珠返,
+          爆炸范围,
+          灵魂震爆,
+          神明怒火,
+          圣灵庇护,
+          圣羽增持,
+          陨星刻印,
+          流星坠落,
+          战神化身,
+          巨大流星,
+          死灵战神,
+          灵魂剑气,
+          亡灵护主,
+          强化打击,
+          免伤护盾,
+          双重打击,
+          反弹护盾,
+          暴力斩击,
+          剑气强化,
+          护盾增幅,
+          高速打击,
+          剑气增伤,
+          控制痛击,
+          血量传承,
+        ]
 
   monkey:
     display_name: 猴子
@@ -402,7 +455,7 @@ main_c_profiles:
       4: [江海翻, 天地倾]
       5: [称心如意]
       6: [狐尾爱心, 九尾爱心, 职业控制]
-      7: [大闹天宫]
+      7: [大闹天宫, 狐灵惑心]
       8: [乱点天宫]
 
   angel:
@@ -512,7 +565,7 @@ mode_profiles:
       weekly_buff_text: 知道
       difficulty:
         kind: ocr
-        targets: [普通, 中等]
+        targets: [普通, 中等, 困难]
     match:
       ready_button: pet_ready_button
       leave_team: pet_leave_team

@@ -523,12 +523,14 @@ class TestInviteReinviteCadence:
         assert to_state == State.INVITE_WAITING
 
 class TestInviteCooldownReturn:
-    """请离后回流等待（2026-09-28 用户定案）：房间回空即回等待态。
+    """请离后回流等待：回到房间屏即回等待态（2026-10-06 用户定案）。
 
     60s 全量大轮回锚在上次全量邀请（_invite_full_since），不因请离重置；
-    回空后继续检查进房 + 轻量邀请；kick_cooldown_seconds 内未回空才重走
-    邀请链兜底（截止自冷却首帧起算）。非房间画面（锚点缺失）冻结回空判定。
-    测试模拟 runner：decide_action 返回目标态后手动提交 ctx.current_state。
+    回房间屏后由等待态终判——文字可见=回空走重邀节奏，文字缺失=占槽
+    （新人进房或踢未生效）重读 occupant 进度分流；锚点缺失（加载页/过渡）
+    冻结判定，kick_cooldown_seconds 内一直不回房间屏才重走邀请链兜底
+    （截止自冷却首帧起算）。测试模拟 runner：decide_action 返回目标态后
+    手动提交 ctx.current_state。
     """
 
     def _cooldown_task(self, invite=None, clock=None) -> CoopTask:
@@ -624,20 +626,44 @@ class TestInviteCooldownReturn:
         assert action.tag == "invite_open_helper_info"
         assert to_state == State.INVITE_WAITING
 
-    def test_timeout_without_empty_rewalks_chain(self):
-        """kick_cooldown_seconds 内文字未重现 → 兜底回 INVITE_CLICK 重走全量链。"""
+    def test_occupied_slot_returns_to_waiting_for_progress_reread(self):
+        """踢后新人占槽（锚点在+文字缺失）→ 立即回等待态重读进度，不干等 60s。
+
+        2026-10-06 实机：新人快速占槽致旧逻辑干等满 60s 才重走邀请链。
+        """
+        clock = _FakeClock()
+        task = self._cooldown_task(clock=clock)
+        clock.now = 27.0  # 踢后下一帧槽位已被新人占住
+        action, to_state = task.decide_action(
+            _observation(self._room_obs(False)), _window_ctx()
+        )
+        assert action.tag == "invite_cooldown_occupied"
+        assert to_state == State.INVITE_WAITING
+        assert task._invite_cooldown_until is None
+        assert task._invite_full_since == 0.0  # 大轮回未重置
+        # 回等待态首帧：等待态自己判占槽 → 开帮助者信息层重读 occupant 进度
+        task.ctx.current_state = State.INVITE_WAITING
+        clock.now = 27.5
+        action2, to_state2 = task.decide_action(
+            _observation(self._room_obs(False)), _window_ctx()
+        )
+        assert action2.tag == "invite_open_helper_info"
+        assert to_state2 == State.INVITE_WAITING
+
+    def test_timeout_without_room_screen_rewalks_chain(self):
+        """锚点一直不回（画面卡在过渡/加载）→ 兜底回 INVITE_CLICK 重走全量链。"""
         clock = _FakeClock()
         invite = InviteConfig(kick_cooldown_seconds=60.0)
         task = self._cooldown_task(invite=invite, clock=clock)
         clock.now = 26.0  # 冷却首帧起算截止 86s
         action, to_state = task.decide_action(
-            _observation(self._room_obs(False)), _window_ctx()
+            _observation({}), _window_ctx()
         )
         assert action.tag == "invite_cooldown"
         assert to_state == State.INVITE_COOLDOWN
         clock.now = 86.1
         action2, to_state2 = task.decide_action(
-            _observation(self._room_obs(False)), _window_ctx()
+            _observation({}), _window_ctx()
         )
         assert action2.tag == "invite_cooldown_done"
         assert to_state2 == State.INVITE_CLICK

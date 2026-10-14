@@ -1266,6 +1266,30 @@ class TestOtherStates:
         task.ctx.current_state = State.ENTER_MATCH
         assert task.decide_action(Observation(frame_id=1), make_window_ctx()) is None
 
+    def test_reset_after_grab_kick_restarts_recruit_from_territory(self):
+        """抢合作循环内被踢回首页（协调器 kicked_home，2026-10-05 实机）：
+        Runner 调 reset_after_grab_kick 清进度，下一帧从领地入口重走招募，
+        而不是停在 JOIN_COOP 对着首页空点 join_coop。"""
+        task = make_task()
+        task._recruit_step = _RecruitStep.JOIN_COOP
+        task._summon_count = 5
+        task._home_return_count = 1
+
+        task.reset_after_grab_kick()
+
+        assert task._recruit_step == _RecruitStep.OPEN_TERRITORY
+        assert task._summon_count == 0
+        assert task._home_return_count == 0
+
+        # 下一帧 FIND_COOP：首页落点导航读「领地」→ 正常点领地
+        task.ctx.current_state = State.FIND_COOP
+        follow_up = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert follow_up is not None
+        assert follow_up[0].tag == "open_territory"
+
     def test_ready_click_defers_to_stray_popup_close(self):
         """组队大厅弹窗开着时点准备被模态层吞掉（2026-09-25 实机）：
         先关弹窗（× 消失即验证），下一帧再点准备。"""
@@ -2949,8 +2973,9 @@ class TestStar3TopupStage:
     """3星主C培养环节（数量回补达标后的非强制追加，2026-09-30 用户定案）。
 
     强袭补到 4 个后留在培养阶段：合成 2 星对碰 3 星（类型随机）+ 变身
-    3 星非主C 转化；达成 / 变身用尽（本环节内消耗）/ 死局即回选技能。
-    环节内合并优先（召唤只用于凑材料）、合成材料只用非主C对。
+    3 星非主C 转化；达成 / 变身用尽（整局预算归零即退，2026-10-05 单门
+    定案）/ 死局即回选技能。环节内合并优先（召唤只用于凑材料）、合成
+    材料只用非主C对。
     """
 
     def _profile(self, **overrides) -> MainCProfile:
@@ -3017,11 +3042,10 @@ class TestStar3TopupStage:
         assert task._star3_done is True
         assert task._topup_done is True
 
-    def test_exits_when_transform_exhausted_in_stage(self):
-        """放弃·变身用尽：本环节内消耗过变身且预算归零仍无 3 星强袭。"""
+    def test_exits_when_transform_exhausted(self):
+        """放弃·变身用尽：整局预算归零即退（2026-10-05 单门定案）。"""
         task = self._stage_task()
         task._transform_used_count = 2
-        task._star3_transform_entry = 1  # 环节开始时已用 1 次 → 环节内用掉 1 次
         decision = task.decide_action(
             Observation(frame_id=1, board=self._count4_board()), make_window_ctx()
         )
@@ -3118,21 +3142,17 @@ class TestStar3TopupStage:
         task = make_task()
         task._star3_done = True
         task._star3_active = True
-        task._star3_transform_entry = 1
         task.on_action_verified(
             Action(kind="click", tag="ready_match", target=(1, 1)),
             State.SELECT_OPENING_SKILLS,
         )
         assert task._star3_done is False
         assert task._star3_active is False
-        assert task._star3_transform_entry is None
         task._star3_done = True
         task._star3_active = True
-        task._star3_transform_entry = 1
         task._reset_for_home_reentry()
         assert task._star3_done is False
         assert task._star3_active is False
-        assert task._star3_transform_entry is None
 
     def test_disabled_profile_keeps_old_exit(self):
         """档案未开环节：数量达标仍按旧行为直接回选技能。"""
@@ -3316,7 +3336,6 @@ class TestTopupAfterStage:
         """放弃·变身用尽退出（棋盘还活着）：同样进子环节召唤。"""
         task = self._after_task()
         task._transform_used_count = 2
-        task._star3_transform_entry = 1
         board = make_board(
             [
                 make_hero("assault", star=2, pos=(100, 100)),
@@ -5736,7 +5755,62 @@ class TestTransformSequence:
 
     # ---- 触发 ----
 
+    def test_first_phase_skips_low_star_targets(self):
+        """一阶段只变 3/4 星（2026-10-05 用户定案）：低星非主C不是目标。"""
+        task = self._ready_task()
+        assert task._topup_active is False
+        board = make_board([make_hero("snow", star=1, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "transform_click_hero"
+        assert task._transform_stage is None
+
+    def test_topup_segment_skips_low_star_targets(self):
+        """回补段（数量未满 4）与一阶段同门槛：只变 3/4 星，任意星级变身
+        留给 3星环节/凑狐狸子环节（2026-10-05 用户定案）。"""
+        task = self._ready_task()
+        task._topup_active = True
+        board = make_board([make_hero("snow", star=1, pos=(100, 100))])
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "transform_click_hero"
+        assert task._transform_stage is None
+
+    def test_star3_stage_transforms_any_star(self):
+        """3星环节内放开任意星级（2026-10-05 用户定案）：1星非主C也是目标。"""
+        task = make_task(
+            main_c_profile=MainCProfile(
+                display_name="强袭",
+                hero_template_dir="heroes/assault",
+                avoid_main_c_merge=True,
+                topup_after_skill_selections=4,
+                topup_hero_count=4,
+                star3_topup_enabled=True,
+            ),
+            transform_button_locator=TRANSFORM_LOCATOR,
+        )
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._topup_active = True
+        task._star3_active = True
+        board = make_board(
+            [
+                make_hero("assault", star=1, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 200)),
+                make_hero("assault", star=1, pos=(300, 300)),
+                make_hero("assault", star=1, pos=(400, 400)),
+                make_hero("snow", star=1, pos=(500, 500)),
+            ]
+        )
+        decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "transform_click_hero"
+        assert decision[0].target == (500, 500)
+        assert task._transform_stage == "poll"
+
     def test_triggers_click_hero_on_three_star_non_main_c(self):
+        """一阶段 3 星非主C 照常触发（高价值滚动不受阶段门槛限制）。"""
         task = self._ready_task()
         board = make_board([make_hero("snow", star=3, pos=(100, 100))])
         decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
@@ -5813,6 +5887,7 @@ class TestTransformSequence:
 
     def test_no_trigger_when_charges_exhausted(self):
         task = self._ready_task()
+        task._topup_active = True
         task._transform_used_count = 2
         board = make_board([make_hero("snow", star=3, pos=(100, 100))])
         decision = task.decide_action(Observation(frame_id=1, board=board), make_window_ctx())
@@ -6204,3 +6279,175 @@ class TestInviteReadyDone:
         assert task._batch_summon_remaining == 0
         assert task._failed_merge_pairs == set()
 
+
+
+class TestSummonRefusalSuppression:
+    """召唤拒判（2026-10-06 用户定案）：点击后召唤费用不变 = 被游戏拒绝。
+
+    2026-10-06 实机事故：棋盘满时识别抖动造出假空格，bot 102 连点召唤全部
+    被游戏拒绝（费用全程钉死 215、金币一分未扣）无限空转。费用是只有召唤
+    成功才会变化的「安静信号」（金币后台缓存每 ~2s 读按钮区），连续 N 次
+    不变即判定棋盘已满，停用召唤出口；依据游戏拒绝行为而非识别占用，两个
+    阵容（邀请者/强袭）共用同一条通路。
+    """
+
+    GOLD = {"current": 10000, "summon_cost": 215, "summon_red": False}
+
+    @staticmethod
+    def _task(batch_enabled: bool = False) -> CoopTask:
+        task = make_task(minimum_summons=2, batch_enabled=batch_enabled)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = 2
+        return task
+
+    @staticmethod
+    def _obs(board: BoardSnapshot, gold: dict) -> Observation:
+        return Observation(frame_id=1, board=board, raw_data={"gold": dict(gold)})
+
+    @staticmethod
+    def _full_board_no_pairs() -> BoardSnapshot:
+        """12 格全占满且无任何同型同星对（全异类 1 星）。"""
+        types = [
+            "assault", "snow", "monkey", "angel", "death_knight", "fox",
+            "boar", "cat", "dog", "wolf", "bear", "frog",
+        ]
+        return make_board(
+            [make_hero(name, star=1, pos=(100 * index, 100)) for index, name in enumerate(types)]
+        )
+
+    def test_three_unchanged_costs_suppress_summoning(self):
+        """回归（2026-10-06 实机）：满盘召唤连被拒 3 次（费用不变）后停用召唤出口。"""
+        task = self._task()
+        board = self._full_board_no_pairs()
+        for expected_count in (0, 1, 2):
+            decision = task.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+            assert decision is not None
+            assert decision[0].tag == "summon_hero"
+            assert task._summon_refusal_count == expected_count
+            assert task._summon_refusal_armed
+            assert task._summon_cost_baseline == 215
+        # 第 4 次入口：计数到 3 → 判满。识别仍报满盘、无合法对 → 判满干等
+        decision = task.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        assert task._summon_refusal_suppressed
+        assert action.tag == "frozen_board_wait"
+        assert "召唤被拒" in action.reason
+
+    def test_cost_change_resets_count(self):
+        """费用变化 = 有召唤落位：计数清零。"""
+        task = self._task()
+        task._arm_summon_cost_check(dict(self.GOLD))
+        task._evaluate_summon_refusal(dict(self.GOLD))
+        task._arm_summon_cost_check(dict(self.GOLD))
+        task._evaluate_summon_refusal(dict(self.GOLD))
+        assert task._summon_refusal_count == 2
+        task._arm_summon_cost_check(dict(self.GOLD))
+        task._evaluate_summon_refusal({"current": 10000, "summon_cost": 230, "summon_red": False})
+        assert task._summon_refusal_count == 0
+        assert not task._summon_refusal_suppressed
+
+    def test_cost_change_lifts_suppression(self):
+        """判满后费用变化（腾出空位后召唤落位）：解除抑制。"""
+        task = self._task()
+        task._summon_refusal_suppressed = True
+        task._summon_refusal_count = 3
+        task._arm_summon_cost_check(dict(self.GOLD))
+        task._evaluate_summon_refusal({"current": 10000, "summon_cost": 230, "summon_red": False})
+        assert not task._summon_refusal_suppressed
+        assert task._summon_refusal_count == 0
+
+    def test_merge_success_lifts_suppression(self):
+        """合成成功腾出空位（即使费用还没变）：解除抑制，恢复试探召唤。"""
+        task = self._task()
+        task._summon_refusal_suppressed = True
+        task._summon_refusal_count = 3
+        task._summon_full_wait_streak = 2
+        task.on_action_verified(
+            Action(kind="drag", tag="merge_heroes", target=(1, 1), end=(2, 2)),
+            State.BUILD_MAIN_C,
+        )
+        assert not task._summon_refusal_suppressed
+        assert task._summon_refusal_count == 0
+        assert task._summon_full_wait_streak == 0
+
+    def test_missing_cost_read_skips_without_counting(self):
+        """读数缺失（OCR 空读/快照超龄）：跳过不计数也不复位。"""
+        task = self._task()
+        task._arm_summon_cost_check(dict(self.GOLD))
+        task._evaluate_summon_refusal({"current": 10000, "summon_red": False})
+        assert task._summon_refusal_count == 0
+        assert not task._summon_refusal_armed
+        # 未武装时评估是空操作
+        task._evaluate_summon_refusal(dict(self.GOLD))
+        assert task._summon_refusal_count == 0
+
+    def test_cap_cost_freezes_counter(self):
+        """费用读数达封顶值：计数冻结（封顶后成功召唤费用也不变，信号无定义）。"""
+        task = self._task()
+        gold_cap = {"current": 99999, "summon_cost": 660, "summon_red": False}
+        task._arm_summon_cost_check(dict(gold_cap))
+        task._evaluate_summon_refusal(dict(gold_cap))
+        assert task._summon_refusal_count == 0
+        assert not task._summon_refusal_suppressed
+        # 已累计的计数在封顶段保持，不增不清
+        task._summon_refusal_count = 2
+        task._arm_summon_cost_check(dict(gold_cap))
+        task._evaluate_summon_refusal(dict(gold_cap))
+        assert task._summon_refusal_count == 2
+        assert not task._summon_refusal_suppressed
+
+    def test_suppressed_board_skips_batch_summon(self):
+        """判满后批次召唤停用：识别报有空格（假空格）也不再规划批次召唤。"""
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        baseline = self._task(batch_enabled=True)
+        decision = baseline.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
+        suppressed = self._task(batch_enabled=True)
+        suppressed._summon_refusal_suppressed = True
+        decision = suppressed.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag != "batch_summon"
+        # 有合法对：落入合成（费用判据不改变合成优先级）
+        assert decision[0].tag in {"merge_heroes", "batch_merge"}
+
+    def test_full_board_wait_streak_ends_in_conservative_stop(self):
+        """判满干等连击计满：保守停止（识别抖动会骗过棋盘签名看门狗，按动作计数兜底）。"""
+        task = self._task()
+        task._run_config.summon_full_wait_limit = 3
+        task._summon_refusal_suppressed = True
+        board = self._full_board_no_pairs()
+        for _ in range(2):
+            decision = task.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+            assert decision is not None
+            assert decision[0].tag == "frozen_board_wait"
+        assert task._summon_full_wait_streak == 2
+        assert task.decide_action(self._obs(board, self.GOLD), make_window_ctx()) is None
+
+    def test_failed_summon_action_disarms(self):
+        """召唤点击未发出（重试耗尽）：解除武装，不参与费用不变计数。"""
+        task = self._task()
+        task._arm_summon_cost_check(dict(self.GOLD))
+        task.on_action_failed(Action(kind="click", tag="summon_hero", target=(1, 1)))
+        assert not task._summon_refusal_armed
+
+    def test_round_reset_clears_refusal_state(self):
+        """局间重置（结算/被踢共用）：判满状态与计数清零，不带入下一局。"""
+        task = self._task()
+        task._summon_refusal_suppressed = True
+        task._summon_refusal_count = 2
+        task._summon_refusal_armed = True
+        task._summon_cost_baseline = 215
+        task._summon_full_wait_streak = 4
+        task._reset_for_home_reentry()
+        assert not task._summon_refusal_suppressed
+        assert task._summon_refusal_count == 0
+        assert not task._summon_refusal_armed
+        assert task._summon_cost_baseline is None
+        assert task._summon_full_wait_streak == 0

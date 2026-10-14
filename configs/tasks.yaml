@@ -367,6 +367,8 @@ locators:
   # 打开停在普通区后不再命中，导致弹窗开关误判。关闭难度弹窗的正向验证依据：
   # 该图可见=弹窗仍打开，继续点关闭坐标；连续多帧不可见=弹窗已关闭。
   # 不再用难度候选（cai_hong_N）是否可见判定弹窗开关。仅在难度弹窗识别模式下检测。
+  # 2026-10-06 起生产判定改 OCR（见 difficulty_recognition 注释，换汤不换药地
+  # 第三次踩中「行文字当锚点」）：本模板降级为无 OCR reader 时的兜底与测试留档。
   he_zuo_mo_shi:
     strategy: template
     template: buttons/coop_difficulty/he_zuo_mo_shi.png
@@ -822,14 +824,28 @@ skills:
   # 主C技能卡图标模板在 default.yaml 的 main_c_profiles.<主C>.skill_icon_templates 配置；
   # 同一英雄所有技能卡共用一张图标，命中位置即主C技能卡，多个时随机点其一。
 
-# 合作难度弹窗识别配置；文字模板为 cai_hong_1.png～cai_hong_18.png（19 待采集，
-# 1~5/14~18 已按 2026-08-19 实机截图重新裁剪）。逐模板独立匹配，同一行多个
-# 模板命中时保留置信度最高者；不识别勾选框状态（见 tasks/coop.py 开环注释）
+# 合作难度弹窗识别配置。2026-10-14 起勾选候选生产走 OCR：与弹窗开关共享
+# 同一次行读数（dialog_roi，缺省 coop_difficulty_list），「彩虹N层」正则提
+# 编号、位置取文字框中心。当日起因：cai_hong 两位数行模板（10~15）在实机
+# 全部跌破阈值，相近编号模板互相跨匹配出幻影编号（16/17/18）锁死滚动方向，
+# 难度 10/12~15 全部「滚动 15 次仍未识别到」跳过；同期 OCR 行读数每帧全对。
+# 无 OCR reader 时回退逐模板匹配：文字模板 cai_hong_1.png～cai_hong_18.png
+# （19 待采集），candidate_roi/threshold/merge_distance 仅该兜底路径消费；
+# 不识别勾选框状态（见 tasks/coop.py 开环注释）
 difficulty_recognition:
   candidate_roi: coop_difficulty_list
   threshold: 0.78
   # 相似数字模板命中同一行时，按中心点距离合并并保留最高置信度
   merge_distance: 30
+  # 弹窗开关判定（2026-10-06 实机定案改 OCR；2026-10-14 起勾选候选共用本次
+  # 读数）：在本 ROI 内 OCR，读到 ≥2 行含「合作模式」+「层」的行=弹窗打开，
+  # 普通区「合作模式-第N层」与彩虹区「合作模式-彩虹N层」都命中；半行截断
+  # 读成的乱码不含关键词自然排除。要求 ≥2 行是防聊天邀请卡——卡片标题与
+  # 难度行同款文字，弹窗未开时单张卡片飘进列表区域只贡献 1 行，弹窗打开则
+  # 恒有 4~5 行。此前用 he_zuo_mo_shi 模板匹配行文字前缀，弹窗停普通区时
+  # 只有 0.818、骑在 0.82 阈值线下，误判未打开→保守停止。dialog_roi 缺省
+  # 即本 ROI、dialog_min_confidence 缺省 0.5（同时是 OCR 候选的行置信度线），
+  # 无需单独配置
 
 # 技能卡采集（统计阶段）几何参数；比例相对 rois.skill_candidates 裁剪结果。
 # 只影响 datasets/ 下的离线采集存档，不影响任何业务决策

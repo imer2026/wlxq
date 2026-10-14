@@ -50,7 +50,7 @@ from wlxq_bot.perception.locator import (
 )
 from wlxq_bot.perception.mode_tab import ModeTabRow, read_mode_tab_rows
 from wlxq_bot.perception.ocr import tight_text_rows
-from wlxq_bot.perception.pet_difficulty import read_difficulty_rows
+from wlxq_bot.perception.pet_difficulty import DifficultyRow, read_difficulty_rows
 from wlxq_bot.perception.skill_collector import SkillCollector
 from wlxq_bot.perception.vision import Vision
 from wlxq_bot.skill_catalog import find_fuzzy_match, record_new_skill
@@ -128,9 +128,10 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     State.INVITE_START: frozenset(
         {"invite_start_ready", "invite_start_not_ready", "invite_button_label"}
     ),
-    # 冷却回流态（2026-09-28）：回空判定与 INVITE_WAITING 同源——邀请文字
-    # 重现（槽位回空）需以金/灰按钮（房间屏锚点）为前提，锚点缺失时冻结
-    # 判定；close_button 供 invite_waiting 观察模式的进度 OCR 门控
+    # 冷却回流态：与 INVITE_WAITING 同源同 flags——见房间屏锚点（金/灰按钮）
+    # 即回等待态终判（2026-10-06 定案），邀请文字仅用于日志区分回空/占槽；
+    # 锚点缺失（加载页/过渡）冻结判定。close_button 供 invite_waiting
+    # 观察模式的进度 OCR 门控
     State.INVITE_COOLDOWN: frozenset(
         {"close_button", "invite_start_ready", "invite_start_not_ready"}
     ),
@@ -168,6 +169,10 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
 # 多帧识别的默认帧数。每格按精确类别做多数投票，抵抗动态特效和遮挡。
 _DEFAULT_CULTIVATION_FRAMES = 10
 
+# 彩虹难度行的编号提取（合作模式-彩虹N层）。勾选候选自 OCR 行文字解析
+# （2026-10-14 定案）；普通区行（合作模式-第N层）不含「彩虹」天然不命中。
+_CAI_HONG_ROW_RE = re.compile(r"彩虹\s*(\d+)\s*层")
+
 
 class CoopPerception:
     """合作任务识别管线。
@@ -195,6 +200,7 @@ class CoopPerception:
         new_skill_dir: Path | None = None,
         gold_cache: GoldCache | None = None,
         difficulty_kind: str = "template",
+        difficulty_debug_screenshots: bool = False,
         locator_aliases: dict[str, str] | None = None,
         difficulty_reader: Any | None = None,
         territory_nav_roi: str | None = None,
@@ -251,6 +257,9 @@ class CoopPerception:
         # 难度识别方式（模式档案）：template=合作文字模板；ocr=保卫宠物行 OCR。
         # OCR 目标难度（targets）只由任务层 CoopTask 消费，感知层不持有
         self._difficulty_kind = difficulty_kind
+        # 难度识别调试截图（difficulty_roi 裁剪 + difficulty 整帧标注）开关：
+        # 默认关——正常识别没有回看价值，排查难度误判时再打开
+        self._difficulty_debug_screenshots = difficulty_debug_screenshots
         # canonical locator 名 → 模式专属 locator 名（ready_button/return_button/
         # coop_leave_team 三个可被重映射；标志名不变，任务层零改动）
         self._locator_aliases = dict(locator_aliases or {})
@@ -343,8 +352,24 @@ class CoopPerception:
                 self._detect_pet_difficulty_rows(ctx, frame, raw_data)
                 self._detect_pet_difficulty_bar_flag(ctx, frame, raw_data, matches)
             else:
-                self._detect_difficulty_dialog_flag(ctx, frame, raw_data, matches)
-                difficulty_candidates = self._detect_difficulty_candidates(ctx, frame, matches)
+                # 一帧一次 OCR：弹窗开关与勾选候选共享同一次行读数
+                # （2026-10-14 定案，ROI 沿用开关判定的 dialog_roi 语义）；
+                # 无 reader 时两者都走模板兜底
+                rows = self._read_coop_difficulty_rows(
+                    ctx,
+                    frame,
+                    str(
+                        self._cfg.difficulty_recognition.get(
+                            "dialog_roi", "coop_difficulty_list"
+                        )
+                    ),
+                )
+                self._detect_difficulty_dialog_flag(
+                    ctx, frame, raw_data, matches, rows=rows
+                )
+                difficulty_candidates = self._detect_difficulty_candidates(
+                    ctx, frame, matches, rows=rows
+                )
         elif observation_mode == "difficulty_dialog":
             # 关闭/确认关闭难度弹窗：只判定弹窗开关标识，跳过难度候选匹配；
             # 保卫宠物轮询只 OCR 收起栏小区域（控制单帧耗时）
@@ -429,62 +454,102 @@ class CoopPerception:
         ctx: WindowContext,
         frame: Any,
         matches: list,
+        rows: list[DifficultyRow] | None = None,
     ) -> list[DifficultyCandidate]:
-        """识别难度弹窗当前可见的彩虹难度（模板存在的编号，当前 1～18）。
+        """识别难度弹窗当前可见的彩虹难度行（2026-10-14 起生产走 OCR）。
 
-        逐模板独立匹配（2026-08-19 实机定案：不用连续性解码等推断方法，
-        每个编号一张实机截图裁剪的文字模板，各匹配各的）；同一行被多个
-        相似模板命中时按中心点距离合并、保留置信度最高者。
+        生产路径（有 OCR reader）：勾选候选直接解析与弹窗开关共享的行读数
+        ——「彩虹N层」正则提编号、位置取文字框中心，同编号多行留置信度
+        最高者。2026-10-14 实机：cai_hong 两位数行模板（10~15）全部跌破
+        阈值，相近编号模板互相跨匹配出幻影编号（16/17/18）锁死滚动方向，
+        难度 10/12~15 全部「滚动 15 次仍未识别到」跳过；同期 OCR 行读数
+        每帧全对。无 reader 时回退逐模板匹配（2026-08-19 实机定案：不用
+        连续性解码等推断方法，每个编号一张实机截图裁剪的文字模板，各匹配
+        各的）；同一行被多个相似模板命中时按中心点距离合并、保留置信度
+        最高者。
         """
         cfg = self._cfg.difficulty_recognition
         roi_name = str(cfg.get("candidate_roi", "coop_difficulty_list"))
         roi = self._resolve_named_roi(roi_name, ctx)
-        threshold = float(cfg.get("threshold", 0.78))
-        merge_dist = int(cfg.get("merge_distance", 30))
-
-        detected: list[DifficultyCandidate] = []
-        detected_matches: list = []
-        for level, template_path in self._difficulty_template_paths.items():
-            if not template_path.is_file():
-                continue
-            match = self._vision.match_template(
-                frame, str(template_path), roi=roi, threshold=threshold
-            )
-            if match is None:
-                continue
-            detected.append(
-                DifficultyCandidate(
-                    level=level,
-                    position=match.position,
-                    confidence=match.confidence,
-                    template_path=str(template_path),
+        if self._title_reader is not None:
+            if rows is None:
+                # 与弹窗开关同一读数来源（dialog_roi）；candidate_roi 仅
+                # 模板兜底路径与调试图裁剪使用，OCR 候选应与开关同区域
+                rows = self._read_coop_difficulty_rows(
+                    ctx,
+                    frame,
+                    str(cfg.get("dialog_roi", "coop_difficulty_list")),
                 )
-            )
-            detected_matches.append(match)
-
-        # 相似数字模板可能命中同一行，只保留该位置置信度最高的难度。
-        kept: list[DifficultyCandidate] = []
-        kept_matches: list = []
-        for candidate, match in sorted(
-            zip(detected, detected_matches, strict=True),
-            key=lambda item: item[0].confidence,
-            reverse=True,
-        ):
-            if any(
-                (
-                    (candidate.position[0] - other.position[0]) ** 2
-                    + (candidate.position[1] - other.position[1]) ** 2
+            best: dict[int, DifficultyCandidate] = {}
+            for row in rows or []:
+                found = _CAI_HONG_ROW_RE.search(row.text)
+                if not found:
+                    continue
+                candidate = DifficultyCandidate(
+                    level=int(found.group(1)),
+                    position=row.position,
+                    confidence=row.confidence,
+                    template_path=f"ocr:{row.text}",
                 )
-                ** 0.5
-                < merge_dist
-                for other in kept
+                prev = best.get(candidate.level)
+                if prev is None or candidate.confidence > prev.confidence:
+                    best[candidate.level] = candidate
+            result = sorted(best.values(), key=lambda item: item.level, reverse=True)
+            for candidate in result:
+                matches.append(
+                    MatchResult(
+                        f"ocr:cai_hong_{candidate.level}",
+                        candidate.position,
+                        candidate.confidence,
+                    )
+                )
+        else:
+            threshold = float(cfg.get("threshold", 0.78))
+            merge_dist = int(cfg.get("merge_distance", 30))
+            detected: list[DifficultyCandidate] = []
+            detected_matches: list = []
+            for level, template_path in self._difficulty_template_paths.items():
+                if not template_path.is_file():
+                    continue
+                match = self._vision.match_template(
+                    frame, str(template_path), roi=roi, threshold=threshold
+                )
+                if match is None:
+                    continue
+                detected.append(
+                    DifficultyCandidate(
+                        level=level,
+                        position=match.position,
+                        confidence=match.confidence,
+                        template_path=str(template_path),
+                    )
+                )
+                detected_matches.append(match)
+
+            # 相似数字模板可能命中同一行，只保留该位置置信度最高的难度。
+            kept: list[DifficultyCandidate] = []
+            kept_matches: list = []
+            for candidate, match in sorted(
+                zip(detected, detected_matches, strict=True),
+                key=lambda item: item[0].confidence,
+                reverse=True,
             ):
-                continue
-            kept.append(candidate)
-            kept_matches.append(match)
+                if any(
+                    (
+                        (candidate.position[0] - other.position[0]) ** 2
+                        + (candidate.position[1] - other.position[1]) ** 2
+                    )
+                    ** 0.5
+                    < merge_dist
+                    for other in kept
+                ):
+                    continue
+                kept.append(candidate)
+                kept_matches.append(match)
 
-        matches.extend(kept_matches)
-        result = sorted(kept, key=lambda item: item.level, reverse=True)
+            matches.extend(kept_matches)
+            result = sorted(kept, key=lambda item: item.level, reverse=True)
+
         logger.debug(
             "frame=%d 难度弹窗可见=%s ROI=%s",
             ctx.frame_id,
@@ -492,10 +557,11 @@ class CoopPerception:
             roi,
         )
 
-        # 调试记录：保存 ROI 原始裁剪（核对实际像素/边缘裁切）和标注整帧
-        # （每个候选标「难度号:置信度」），便于排查 8 识别成 5 这类误判。
-        # Debug Recorder 不参与决策，失败仅记 DEBUG 日志。
-        if self._debug_recorder is not None:
+        # 调试记录（vision.difficulty_debug_screenshots，默认关）：保存 ROI 原始
+        # 裁剪（核对实际像素/边缘裁切）和标注整帧（每个候选标「难度号:置信度」），
+        # 便于排查 8 识别成 5 这类误判。Debug Recorder 不参与决策，
+        # 失败仅记 DEBUG 日志。
+        if self._debug_recorder is not None and self._difficulty_debug_screenshots:
             try:
                 if roi is not None:
                     rx, ry, rw, rh = roi
@@ -716,18 +782,76 @@ class CoopPerception:
                     raw_data[match_name] = match
         return []
 
+    def _read_coop_difficulty_rows(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        roi_name: str,
+    ) -> list[DifficultyRow] | None:
+        """OCR 读难度弹窗列表行并按关键词/置信度过滤；无 reader 返回 None。
+
+        过滤与弹窗开关判定共用：含「合作模式」+「层」的行才算数（半行截断
+        读成的乱码不含关键词自然排除）。勾选候选与开关判定共享同一次读数，
+        不做两遍 OCR（2026-10-14 定案）。
+        """
+        if self._title_reader is None:
+            return None
+        roi = self._resolve_named_roi(roi_name, ctx)
+        min_confidence = float(self._cfg.difficulty_recognition.get("dialog_min_confidence", 0.5))
+        rows = [
+            row
+            for row in read_difficulty_rows(frame, roi, reader=self._title_reader)
+            if row.confidence >= min_confidence
+            and "合作模式" in row.text
+            and "层" in row.text
+        ]
+        logger.debug(
+            "frame=%d 难度弹窗OCR行=%s",
+            ctx.frame_id,
+            [row.text for row in rows],
+        )
+        return rows
+
     def _detect_difficulty_dialog_flag(
         self,
         ctx: WindowContext,
         frame: Any,
         raw_data: dict[str, Any],
         matches: list,
+        rows: list[DifficultyRow] | None = None,
     ) -> None:
-        """以【合作模式】标题图正向判定难度弹窗是否打开，写入 difficulty_dialog_visible。
+        """正向判定合作难度弹窗是否打开，写入 difficulty_dialog_visible。
 
-        弹窗关闭验证依赖该标志（见 CoopTask._action_close_difficulty_dialog）；
-        难度候选（cai_hong_N）只用于勾选难度，不再判定弹窗开关。
+        生产路径走 OCR：在弹窗列表 ROI 内读行文字，读到 ≥2 行含「合作模式」+
+        「层」的行即判打开——普通区「合作模式-第N层」与彩虹区「合作模式-
+        彩虹N层」都命中。2026-10-06 实机：弹窗停普通区时行文字只有模板 0.818、
+        骑在 0.82 阈值线下造成保守停止；OCR 对两段行文字与字体调整都稳，与
+        保卫宠物收起栏判定（2026-09-06）同一思路。半行截断会读成乱码（如
+        「全作模代彩虹尼」），不含关键词自然被排除，不翻转判定。要求 ≥2 行
+        是防聊天邀请卡：卡片标题与难度行同款文字，弹窗未开时单张卡片只贡献
+        1 行，弹窗打开恒有 4~5 行。未装配 OCR reader 时回退 he_zuo_mo_shi
+        模板匹配（生产恒有 reader，此分支仅供兜底与测试）。弹窗关闭验证依赖
+        该标志（见 CoopTask._action_close_difficulty_dialog）；难度候选
+        （cai_hong_N）只用于勾选难度，不参与弹窗开关判定。
         """
+        if self._title_reader is not None:
+            cfg = self._cfg.difficulty_recognition
+            if rows is None:
+                rows = self._read_coop_difficulty_rows(
+                    ctx, frame, str(cfg.get("dialog_roi", "coop_difficulty_list"))
+                )
+            # ≥2 行才算弹窗：聊天邀请卡标题同款文字（合作模式-彩虹N层），弹窗
+            # 未开时单张卡片飘进列表区域只贡献 1 行，弹窗打开则恒有 4~5 行
+            visible = len(rows) >= 2
+            raw_data["difficulty_dialog_visible"] = visible
+            if visible:
+                best = max(rows, key=lambda row: row.confidence)
+                match = MatchResult(
+                    "ocr:coop_difficulty_row", best.position, best.confidence
+                )
+                matches.append(match)
+                raw_data["difficulty_dialog_match"] = match
+            return
         locator = self._cfg.locators.get("he_zuo_mo_shi")
         match = self._match_locator_template(ctx, frame, locator) if locator else None
         raw_data["difficulty_dialog_visible"] = match is not None
@@ -1363,6 +1487,22 @@ class CoopPerception:
         locator = self._cfg.locators.get(
             self._locator_aliases.get("close_button", "close_button")
         )
+        if not locator:
+            return None
+        return self._match_locator_template(ctx, frame, locator)
+
+    def match_home_page_marker(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+    ) -> MatchResult | None:
+        """仅匹配首页标志模板，供抢合作检查线程检测被踢回首页。
+
+        复用 home_page_marker locator 配置（模板/阈值/ROI），与 observe 的
+        home_page 观察模式同源，避免两处阈值/ROI 漂移；模板未采集的分辨率
+        包返回 None，调用方按未识别处理（不判被踢）。
+        """
+        locator = self._cfg.locators.get("home_page_marker")
         if not locator:
             return None
         return self._match_locator_template(ctx, frame, locator)

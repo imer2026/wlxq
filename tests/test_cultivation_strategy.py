@@ -149,7 +149,8 @@ class TestStar3TopupStage:
     """3星主C培养环节（2026-09-30 用户定案，非强制追加）。
 
     数量回补到 topup_hero_count 后追加：合成 2 星对碰 3 星（类型随机）+
-    变身 3 星非主C 转化；达成 / 变身用尽（本环节内消耗）/ 死局即退出。
+    变身 3 星非主C 转化；达成 / 变身用尽（整局预算归零即退，2026-10-05
+    单门定案）/ 死局即退出。
     """
 
     def _star3_strategy(self, **profile_fields) -> CultivationStrategy:
@@ -172,7 +173,6 @@ class TestStar3TopupStage:
         board: BoardSnapshot,
         *,
         transform_used: int = 0,
-        transform_used_in_stage: int = 0,
         failed_targets: set[tuple[str, int, tuple[int, int]]] = frozenset(),
     ) -> tuple[bool, str]:
         candidates = board.find_merge_candidates(
@@ -183,7 +183,6 @@ class TestStar3TopupStage:
             candidates,
             failed_pairs=set(),
             transform_used=transform_used,
-            transform_used_in_stage=transform_used_in_stage,
             failed_targets=failed_targets,
         )
 
@@ -217,20 +216,20 @@ class TestStar3TopupStage:
         assert exit_now is True
         assert "3星" in reason
 
-    def test_exit_when_transform_exhausted_in_stage(self) -> None:
-        """放弃·变身用尽：本环节内消耗过变身且预算归零仍无 3 星主C。"""
+    def test_exit_when_transform_exhausted(self) -> None:
+        """放弃·变身用尽：整局预算归零即退（2026-10-05 单门定案）。"""
         board = _board([_hero("assault", 2, 100, 100)])
         exit_now, reason = self._exit(
             self._star3_strategy(),
             board,
             transform_used=2,
-            transform_used_in_stage=1,
         )
         assert exit_now is True
         assert "变身" in reason
 
-    def test_continue_when_transform_exhausted_before_entry(self) -> None:
-        """进入前变身已用完不触发放弃：合成仍可能直接出 3 星主C（用户定案）。"""
+    def test_exit_when_transform_exhausted_before_entry(self) -> None:
+        """进场前预算已用完同样立刻退（2026-10-05 定案，推翻 9-30 环节内
+        门槛——实机局 6：空预算留场培养退化成无限召唤）。"""
         board = _board(
             [
                 _hero("assault", 2, 100, 100),
@@ -238,13 +237,13 @@ class TestStar3TopupStage:
                 _hero("snow", 1, 300, 100),
             ]
         )
-        exit_now, _ = self._exit(
+        exit_now, reason = self._exit(
             self._star3_strategy(),
             board,
             transform_used=2,
-            transform_used_in_stage=0,
         )
-        assert exit_now is False
+        assert exit_now is True
+        assert "变身" in reason
 
     def test_continue_with_non_main_pair(self) -> None:
         """有非主C对可合：继续培养。"""
@@ -329,7 +328,6 @@ class TestStar3TopupStage:
             candidates,
             failed_pairs=failed,
             transform_used=0,
-            transform_used_in_stage=0,
             failed_targets=frozenset(),
         )
         assert exit_now is True

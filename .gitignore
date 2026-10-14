@@ -50,6 +50,12 @@ configs/secrets.yaml
 .workbuddy/
 .zcode/
 
+# ZCode 工作区忽略配置（工具生成，顶部自动同步自本文件，不入库）
+.zcodeignore
+
+# 临时调试/分析脚本（工作区草稿，不入库）
+tmp_*.py
+
 # 运行/调试产物（标注图、验证截图、临时输出，可能含真实账号画面）
 outputs/
 

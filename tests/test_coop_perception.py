@@ -363,6 +363,71 @@ class TestDifficultyObservation:
         assert [item.level for item in difficulty.difficulty_candidates] == [10, 9]
         assert vision.rois == [(184, 516, 369, 861), (184, 516, 369, 861)]
 
+    def _build_difficulty_perception(
+        self, tmp_path, debug_dir, difficulty_debug_screenshots: bool
+    ):
+        from wlxq_bot.assets import TemplatePack
+        from wlxq_bot.debug.recorder import DebugRecorder
+
+        pack_root = tmp_path / "pack" / "3000x2000"
+        difficulty_dir = pack_root / "buttons" / "coop_difficulty"
+        difficulty_dir.mkdir(parents=True)
+        (difficulty_dir / "cai_hong_9.png").write_bytes(b"template")
+
+        vision = DifficultyVision({9: MatchResult("cai_hong_9.png", (300, 500), 0.91)})
+        tasks_cfg = TasksConfig(
+            rois={
+                "coop_difficulty_list": {
+                    "x_ratio": 0.2,
+                    "y_ratio": 0.3,
+                    "width_ratio": 0.4,
+                    "height_ratio": 0.5,
+                }
+            },
+            difficulty_recognition={"candidate_roi": "coop_difficulty_list"},
+        )
+        return CoopPerception(
+            vision,
+            TemplatePack(client_size=(3000, 2000), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+            debug_recorder=DebugRecorder(str(debug_dir)),
+            difficulty_debug_screenshots=difficulty_debug_screenshots,
+        )
+
+    def test_debug_screenshots_disabled_by_default(self, tmp_path):
+        """难度调试图默认不落盘：开着 debug_recorder 也不写 difficulty* 文件。"""
+        debug_dir = tmp_path / "debug"
+        debug_dir.mkdir()
+        perception = self._build_difficulty_perception(
+            tmp_path, debug_dir, difficulty_debug_screenshots=False
+        )
+        ctx = _make_window_ctx()
+
+        perception.observe(
+            ctx, np.zeros((1400, 600, 3), dtype=np.uint8), observation_mode="coop_difficulty"
+        )
+
+        assert list(debug_dir.glob("difficulty*.png")) == []
+
+    def test_debug_screenshots_saved_when_enabled(self, tmp_path):
+        """difficulty_debug_screenshots 打开后每帧存 ROI 裁剪 + 整帧标注两张。"""
+        debug_dir = tmp_path / "debug"
+        debug_dir.mkdir()
+        perception = self._build_difficulty_perception(
+            tmp_path, debug_dir, difficulty_debug_screenshots=True
+        )
+        ctx = _make_window_ctx()
+
+        perception.observe(
+            ctx, np.zeros((1400, 600, 3), dtype=np.uint8), observation_mode="coop_difficulty"
+        )
+
+        names = sorted(p.name for p in debug_dir.glob("difficulty*.png"))
+        assert sum(n.startswith("difficulty_roi_") for n in names) == 1
+        assert sum(n.startswith("difficulty_") and not n.startswith("difficulty_roi_") for n in names) == 1
+
 
 class TestHomePageObservation:
     def test_detects_home_page_only_in_requested_mode(self, tmp_path):
@@ -524,6 +589,145 @@ class TestDifficultyDialogFlagObservation:
         assert difficulty.raw_data["difficulty_dialog_match"] == match
         assert "difficulty_dialog_visible" not in normal.raw_data
 
+    def _build_dialog_flag_perception(self, tmp_path, reader):
+        """装了 OCR reader 的感知层（生产路径形态），弹窗 ROI 对齐 tasks.yaml。"""
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "pack" / "3000x2000"
+        pack_root.mkdir(parents=True)
+        tasks_cfg = TasksConfig(
+            rois={
+                "coop_difficulty_dialog_area": {
+                    "x_ratio": 0.30,
+                    "y_ratio": 0.57,
+                    "width_ratio": 0.55,
+                    "height_ratio": 0.30,
+                }
+            },
+            difficulty_recognition={"dialog_roi": "coop_difficulty_dialog_area"},
+        )
+        return CoopPerception(
+            FakeVision([]),
+            TemplatePack(client_size=(3000, 2000), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+            title_reader=reader,
+        )
+
+    def test_dialog_flag_ocr_detects_both_section_rows(self, tmp_path):
+        """OCR 判定弹窗开关：普通区「第N层」与彩虹区「彩虹N层」行都判打开。
+
+        2026-10-06 实机：弹窗停普通区时模板只有 0.818（阈值 0.82 卡线失败），
+        OCR 对两段行文字都稳。
+        """
+
+        class _FakeDialogReader:
+            def __init__(self, lines):
+                self._lines = lines
+
+            def read_with_confidence(self, image):
+                return self._lines
+
+        perception = self._build_dialog_flag_perception(
+            tmp_path,
+            _FakeDialogReader(
+                [
+                    ("合作模式-第1层", 0.85, (450, 80)),
+                    ("合作模式-彩虹4层", 0.84, (450, 260)),
+                ]
+            ),
+        )
+        ctx = _make_window_ctx()
+        frame = np.zeros((1727, 927, 3), dtype=np.uint8)
+
+        difficulty = perception.observe(ctx, frame, observation_mode="coop_difficulty")
+        normal = perception.observe(ctx, frame, observation_mode=None)
+
+        assert difficulty.flag("difficulty_dialog_visible")
+        assert difficulty.raw_data["difficulty_dialog_match"].confidence == 0.85
+        # 正常观察模式不做弹窗判定
+        assert "difficulty_dialog_visible" not in normal.raw_data
+
+    def test_dialog_flag_ocr_detects_rainbow_row_in_close_mode(self, tmp_path):
+        """关闭确认的轻量模式同样走 OCR 判定。"""
+
+        class _FakeDialogReader:
+            def __init__(self, lines):
+                self._lines = lines
+
+            def read_with_confidence(self, image):
+                return self._lines
+
+        perception = self._build_dialog_flag_perception(
+            tmp_path,
+            _FakeDialogReader(
+                [
+                    ("合作模式-彩虹1层", 0.86, (400, 100)),
+                    ("合作模式-彩虹2层", 0.85, (400, 190)),
+                ]
+            ),
+        )
+
+        obs = perception.observe(
+            _make_window_ctx(),
+            np.zeros((1727, 927, 3), dtype=np.uint8),
+            observation_mode="difficulty_dialog",
+        )
+
+        assert obs.flag("difficulty_dialog_visible")
+
+    def test_dialog_flag_ocr_ignores_single_invite_card_line(self, tmp_path):
+        """弹窗未开时飘进列表区域的聊天邀请卡只有 1 行同款标题，不判打开。"""
+
+        class _FakeDialogReader:
+            def __init__(self, lines):
+                self._lines = lines
+
+            def read_with_confidence(self, image):
+                return self._lines
+
+        perception = self._build_dialog_flag_perception(
+            tmp_path,
+            _FakeDialogReader([("合作模式-彩虹12层", 0.88, (450, 300))]),
+        )
+
+        obs = perception.observe(
+            _make_window_ctx(),
+            np.zeros((1727, 927, 3), dtype=np.uint8),
+            observation_mode="coop_difficulty",
+        )
+
+        assert not obs.flag("difficulty_dialog_visible")
+
+    def test_dialog_flag_ocr_rejects_garbled_and_tab_lines(self, tmp_path):
+        """半行乱码与底部页签（无「层」字）都不能把弹窗判成打开。"""
+
+        class _FakeDialogReader:
+            def __init__(self, lines):
+                self._lines = lines
+
+            def read_with_confidence(self, image):
+                return self._lines
+
+        perception = self._build_dialog_flag_perception(
+            tmp_path,
+            _FakeDialogReader(
+                [
+                    ("全作模代彩虹尼", 0.58, (450, 430)),
+                    ("合作模式", 0.74, (300, 500)),
+                ]
+            ),
+        )
+
+        obs = perception.observe(
+            _make_window_ctx(),
+            np.zeros((1727, 927, 3), dtype=np.uint8),
+            observation_mode="coop_difficulty",
+        )
+
+        assert not obs.flag("difficulty_dialog_visible")
+
     def test_difficulty_dialog_mode_skips_candidate_matching(self, tmp_path):
         """关闭弹窗步骤的轻量模式：只识别开关标识，不做 16 个难度候选匹配。"""
         from wlxq_bot.assets import TemplatePack
@@ -561,6 +765,117 @@ class TestDifficultyDialogFlagObservation:
         assert dialog_only.raw_data["difficulty_dialog_match"] == match
         assert dialog_only.difficulty_candidates == []
         assert not any("cai_hong" in call for call in vision.template_calls)
+
+
+class TestOcrDifficultyCandidates:
+    """勾选难度候选走 OCR 行文字（2026-10-14 定案）。
+
+    2026-10-14 实机：cai_hong 两位数行模板（10~15）在实机上全部跌破阈值，
+    而相近编号模板互相跨匹配出幻影编号（16/17/18），把滚动方向判死在两个
+    视图之间——难度 10/12~15 全部「滚动 15 次仍未识别到」跳过。同一帧的
+    弹窗开关 OCR 却把「合作模式-彩虹10层」读得清清楚楚，故勾选候选改由
+    OCR 行解析（彩虹N层 → 编号+文字框中心），模板降级为无 reader 兜底。
+    """
+
+    @staticmethod
+    def _build_perception(tmp_path, reader):
+        from wlxq_bot.assets import TemplatePack
+
+        pack_root = tmp_path / "pack" / "3000x2000"
+        pack_root.mkdir(parents=True)
+        tasks_cfg = TasksConfig(
+            rois={
+                "coop_difficulty_list": {
+                    "x_ratio": 0.2,
+                    "y_ratio": 0.3,
+                    "width_ratio": 0.4,
+                    "height_ratio": 0.5,
+                }
+            }
+        )
+        return CoopPerception(
+            FakeVision([]),
+            TemplatePack(client_size=(3000, 2000), root=pack_root),
+            tasks_cfg,
+            CoopRole.HELPER,
+            "assault",
+            title_reader=reader,
+        )
+
+    class _CountingReader:
+        def __init__(self, lines):
+            self._lines = lines
+            self.calls = 0
+
+        def read_with_confidence(self, image):
+            self.calls += 1
+            return list(self._lines)
+
+    def test_ocr_candidates_parse_two_digit_levels(self, tmp_path):
+        """回归（2026-10-14 实机）：彩虹 10~11 层在屏上时候选必须认出 10。
+
+        普通行（第N层）不是勾选目标不进候选；半行乱码被关键词排除；
+        弹窗开关与候选共享同一次 OCR 读数。
+        """
+        reader = self._CountingReader(
+            [
+                ("合作模式-第10层", 0.88, (200, 40)),
+                ("合作模式-彩虹9层", 0.90, (210, 140)),
+                ("合作模式-彩虹10层", 0.86, (215, 240)),
+                ("合作模式-彩虹11层", 0.84, (220, 340)),
+                ("全作模代彩虹尼", 0.58, (300, 440)),
+            ]
+        )
+        perception = self._build_perception(tmp_path, reader)
+        frame = np.zeros((1727, 927, 3), dtype=np.uint8)
+
+        obs = perception.observe(
+            _make_window_ctx(), frame, observation_mode="coop_difficulty"
+        )
+
+        # ROI (184, 516, 369, 861)：候选位置 = 文字框中心 + ROI 原点
+        assert [(c.level, c.position) for c in obs.difficulty_candidates] == [
+            (11, (404, 856)),
+            (10, (399, 756)),
+            (9, (394, 656)),
+        ]
+        assert obs.flag("difficulty_dialog_visible")
+        # 开关判定与候选解析共用一次 OCR，不读两遍
+        assert reader.calls == 1
+
+    def test_ocr_candidates_filter_confidence_and_duplicate_level(self, tmp_path):
+        """低于 dialog_min_confidence 的行不进候选；同编号两行留置信度高者。"""
+        reader = self._CountingReader(
+            [
+                ("合作模式-彩虹7层", 0.55, (200, 100)),
+                ("合作模式-彩虹7层", 0.90, (200, 200)),
+                ("合作模式-彩虹8层", 0.45, (200, 300)),
+            ]
+        )
+        perception = self._build_perception(tmp_path, reader)
+        frame = np.zeros((1727, 927, 3), dtype=np.uint8)
+
+        obs = perception.observe(
+            _make_window_ctx(), frame, observation_mode="coop_difficulty"
+        )
+
+        assert [
+            (c.level, c.position, c.confidence) for c in obs.difficulty_candidates
+        ] == [(7, (384, 716), 0.90)]
+
+    def test_ocr_candidates_read_levels_missing_from_template_pack(self, tmp_path):
+        """模板包缺号（如 19）不再是识别盲区：OCR 读到什么编号就是什么编号。"""
+        reader = self._CountingReader([("合作模式-彩虹19层", 0.82, (210, 140))])
+        perception = self._build_perception(tmp_path, reader)
+        frame = np.zeros((1727, 927, 3), dtype=np.uint8)
+
+        obs = perception.observe(
+            _make_window_ctx(), frame, observation_mode="coop_difficulty"
+        )
+
+        assert [c.level for c in obs.difficulty_candidates] == [19]
+        # 单行不满足 ≥2 行判据，弹窗开关仍为未打开
+        assert not obs.flag("difficulty_dialog_visible")
 
 
 class _RecordingVision:

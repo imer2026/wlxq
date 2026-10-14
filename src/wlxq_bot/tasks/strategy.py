@@ -329,15 +329,15 @@ class CultivationStrategy:
         failed_pairs: FailedMergePairs,
         *,
         transform_used: int,
-        transform_used_in_stage: int,
         failed_targets: Collection[TransformGiveupKey] = (),
     ) -> tuple[bool, str]:
         """3星培养环节退出判定；返回 (是否退出, 原因)。
 
         1. 达成：场上出现 ≥3 星主C；
-        2. 放弃·变身用尽：本环节内消耗过变身（``transform_used_in_stage > 0``）
-           且预算归零仍无 3 星主C——进入前次数已用完不触发，合成 2 星对
-           类型随机仍可能直接出 3 星主C（2026-09-30 用户定案）；
+        2. 放弃·变身用尽：整局预算归零即退，不再要求「环节内消耗过变身」
+           （2026-10-05 用户定案，推翻 2026-09-30 的环节内门槛——当日实机
+           局 6：进场前预算已空仍留场培养，合成路径被数量底线+3星避让锁
+           死，70 秒 18 发召唤零产出）。退场后凑 lineup 英雄保证照旧；
         3. 放弃·死局：无可用合成对（非主C对 + 富余主C对，排除失败记忆）
            + 无空位可召唤 + 无可变身对象（3星非主C + 剩余预算 + 未被
            按英雄放弃记忆记过——2026-10-03 记法从整盘签名改按目标英雄，
@@ -346,7 +346,7 @@ class CultivationStrategy:
         if self.has_star3_main_c(board):
             return True, "已达成3星主C"
         max_per_round = self._run_config.transform_max_per_round
-        if transform_used_in_stage > 0 and transform_used >= max_per_round:
+        if transform_used >= max_per_round:
             return True, "变身次数用尽仍无3星主C"
         has_pair = self.star3_has_mergeable_pair(board, candidates, failed_pairs)
         has_space = board.capacity.available > 0
@@ -450,6 +450,7 @@ class CultivationStrategy:
         *,
         exclude_heroes: tuple[str, ...] = (),
         exclude_targets: Collection[TransformGiveupKey] = (),
+        min_star_level: int | None = None,
     ) -> BoardHero | None:
         """选择本次变身目标；None 表示不变身。
 
@@ -458,11 +459,15 @@ class CultivationStrategy:
         ``exclude_targets``：按英雄放弃记忆（类型+星级+格位，2026-10-03
         用户定案）——按钮超时等失败的目标本局不再重选；皮肤升级的不可变身
         英雄与常规产出外观无差别，超时是唯一可观测信号。
+        ``min_star_level``：目标星级下限覆盖（2026-10-05 用户定案）——缺省
+        用 ``run.transform_min_star_level``（一阶段与回补段：只变 3/4 星）；
+        3星主C培养环节与凑 lineup 英雄子环节传 1 放开任意星级（低星滚主C
+        数量/目标英雄，预算打光即按环节退出离场）。
 
         强袭模式（默认，``transform_sacrifice_order`` 为空）——设计文档 §4.1：
         条件全部满足才返回目标：
         1. 本局变身次数未用完（used_count < max_count）；
-        2. 棋盘存在星级不低于 run.transform_min_star_level 的非主 C 英雄。
+        2. 棋盘存在星级不低于下限的非主 C 英雄。
 
         2026-09-17 用户变更：不再要求「尚无达标主 C」——主 C 已达标（含
         回补阶段）时，2 星对合并产出 3 星非主 C 的下一轮识别同样变身碰
@@ -480,7 +485,10 @@ class CultivationStrategy:
             return None
         if used_count >= max_count:
             return None
-        min_star = self._run_config.transform_min_star_level
+        if min_star_level is not None:
+            min_star = min_star_level
+        else:
+            min_star = self._run_config.transform_min_star_level
         for hero in board.heroes:
             if (
                 hero.hero_type != self._main_c

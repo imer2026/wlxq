@@ -63,7 +63,7 @@ wlxq-bot --debug run coop --main-c assault
 
 ## 退出帧落盘
 
-任务**非正常退出**（保守停止、失败/步数上限、异常崩溃）时，主循环最近 `vision.exit_frame_buffer_size`（默认 20）张截图会批量保存到 `screenshots/debug/exit_<状态>_<时间戳>/`，并输出一条带完整路径的 WARNING（`任务非正常退出，已保存退出前 N 帧截图到 ...`）；正常完成（COMPLETED）和用户主动停止（Esc 热键、Ctrl+C）不保存。文件夹内 `NN_frame_<id>.png` 按时间升序编号，`frames.txt` 记录每帧的 `frame_id`、拍摄时刻和相邻帧间隔，用于定位退出前卡在哪一步。缓冲常驻内存约 N × 4.8MB（927x1727 客户区，20 张约 96MB，只存引用无复制开销）；按主循环和抢合作检查线程的节奏采样（只保留前台有效帧，挂起/最小化期间的黑帧不冲掉历史），培养阶段多帧棋盘识别的内部截图不进缓冲；`vision.debug: false` 时整体关闭。
+任务**非正常退出**（保守停止、失败/步数上限、异常崩溃）时，主循环最近 `vision.exit_frame_buffer_size`（默认 20）张截图会批量保存到 `screenshots/debug/exit/exit_<状态>_<时间戳>/`，并输出一条带完整路径的 WARNING（`任务非正常退出，已保存退出前 N 帧截图到 ...`）；正常完成（COMPLETED）和用户主动停止（Esc 热键、Ctrl+C）不保存。文件夹内 `NN_frame_<id>.png` 按时间升序编号，`frames.txt` 记录每帧的 `frame_id`、拍摄时刻和相邻帧间隔，用于定位退出前卡在哪一步。exit 目录按目录名时间戳自动清理：超过 `vision.exit_retention_days`（默认 7）天的整目录删除，`vision.exit_keep_last` 可改为只按个数保留最近 N 个（两项任一命中即删，0 关闭）；`screenshots/debug` 顶层历史遗留的 `exit_*` 目录在下次运行时自动挪入 `exit/` 子目录。缓冲常驻内存约 N × 4.8MB（927x1727 客户区，20 张约 96MB，只存引用无复制开销）；按主循环和抢合作检查线程的节奏采样（只保留前台有效帧，挂起/最小化期间的黑帧不冲掉历史），培养阶段多帧棋盘识别的内部截图不进缓冲；`vision.debug: false` 时整体关闭。
 
 它通过 `@app.callback` 调用 `setup_logging("DEBUG")`；不带 `--debug` 时控制台为 `INFO`。无论是否带 `--debug`，文件日志都按 `file_level`（默认 `DEBUG`）完整记录（见「文件日志」）。DEBUG 模式下第三方库（pyautogui、PIL、urllib3 等）仍压在 `WARNING`，避免刷屏。
 

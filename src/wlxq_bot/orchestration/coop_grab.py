@@ -12,7 +12,10 @@
   并匹配准备按钮；识别到即通知停止。它绝不点击。窗口失焦/最小化时挂起等待
   切回（与主循环同策略：系统空闲时自动切回，持续超过 window_foreground_wait_seconds
   才报 window_lost），期间不识别不点击。前台有效截图进入退出帧缓冲，
-  抢合作阶段丢失窗口瞬间的画面也能落盘排查。
+  抢合作阶段丢失窗口瞬间的画面也能落盘排查。已进过组队大厅后顺带匹配
+  首页标志，连续 home_return_confirm_frames 拍命中判 kicked_home（2026-10-05
+  实机：进房间后被房主请离回首页，画面无准备按钮/无弹窗/边缘亮，不检测
+  会无限连点空坐标直到超时）。
 - 弹窗关闭（2026-09-14 实机）：连点 join 落在组队大厅会误点自己头像，弹出
   「个人信息」等全屏弹窗挡住准备按钮。检查线程在准备按钮未命中时顺带匹配
   全屏弹窗右上角标准关闭按钮（×，跨弹窗皮肤一致），命中后把匹配位置写给
@@ -98,9 +101,11 @@ class GrabResult:
 
     Attributes:
         found: 是否识别到准备按钮（True 表示抢到合作，应进入准备流程）
-        reason: 结束原因：ready_found / window_lost / timeout / stopped /
-            capture_failed / perception_failed / worker_failed / no_join_hotspot /
-            popup_unclosable / unknown_popup；
+        reason: 结束原因：ready_found / kicked_home / window_lost / timeout /
+            stopped / capture_failed / perception_failed / worker_failed /
+            no_join_hotspot / popup_unclosable / unknown_popup；
+            kicked_home 为已进组队大厅后被踢回首页（2026-10-05 实机），
+            交回 Runner 清进度重走招募而非停止；
             window_lost 为连点执行连续失败（窗口真丢失）或失焦/最小化持续
             超过 window_foreground_wait_seconds；
             popup_unclosable 为全屏弹窗关闭按钮重试用尽仍可见；
@@ -172,6 +177,9 @@ class CoopGrabCoordinator:
         self._popup_close_attempts = 0
         self._passed_recruit = False
         self._unknown_popup_streak = 0
+        # 被踢回首页检测：连续命中首页标志的拍数（run() 开始时重置，
+        # 协调器实例跨抢合作段复用）
+        self._home_streak = 0
 
     def run(self) -> GrabResult:
         """运行抢合作阶段，阻塞直到发现准备按钮、超时、窗口失效或停止。"""
@@ -196,6 +204,7 @@ class CoopGrabCoordinator:
         self._popup_close_attempts = 0
         self._passed_recruit = False
         self._unknown_popup_streak = 0
+        self._home_streak = 0
 
         deadline = self._clock() + self._run_config.find_coop_max_duration_seconds
         stop_event = threading.Event()
@@ -509,6 +518,8 @@ class CoopGrabCoordinator:
                 return
             if not self._watch_popup(stop_event, holder, ctx, frame):
                 return
+            if not self._check_kicked_home(stop_event, holder, ctx, frame):
+                return
             stop_event.wait(self._check_interval)
 
     def _watch_popup(
@@ -587,4 +598,56 @@ class CoopGrabCoordinator:
             self._unknown_popup_streak,
         )
         self._finish(stop_event, holder, GrabResult(False, "unknown_popup"))
+        return False
+
+    def _check_kicked_home(
+        self,
+        stop_event: threading.Event,
+        holder: list[GrabResult | None],
+        ctx: WindowContext,
+        frame: Any,
+    ) -> bool:
+        """检查线程的被踢回首页分支（2026-10-05 实机）：抢进组队大厅后被
+        房主请离、落点首页——画面无准备按钮、无弹窗、边缘亮，三条既有判定
+        全部落空，旧逻辑会无限连点 join_coop 空坐标直到超时/人工停止。
+
+        仅在已进过组队大厅（_passed_recruit）后生效：抢合作起点本就贴近
+        首页，未越过招募时首页标志命中是常态。命中需连续
+        home_return_confirm_frames 拍确认（复用等待开局被踢检查的同一配置，
+        默认 4——单拍命中可能是进房过场画面相似，不触发），确认后返回
+        kicked_home，由 Runner 清进度重走招募。
+
+        Returns:
+            True: 继续下一拍检查；False: 已写入结论并通知停止。
+        """
+        if not self._passed_recruit:
+            self._home_streak = 0
+            return True
+        try:
+            home_match = self._perception.match_home_page_marker(ctx, frame)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # 首页识别失败不中断抢合作：退化为本拍不判（与弹窗分支同策略）
+            logger.warning("抢合作首页标志识别异常，本拍跳过被踢检测: %r", exc)
+            self._home_streak = 0
+            return True
+        if home_match is None:
+            self._home_streak = 0
+            return True
+        self._home_streak += 1
+        frames = self._run_config.home_return_confirm_frames
+        if self._home_streak < frames:
+            logger.info(
+                "抢合作期间识别到首页标志 frame=%d（%d/%d 拍），确认是否被踢",
+                ctx.frame_id,
+                self._home_streak,
+                frames,
+            )
+            return True
+        logger.warning(
+            "抢合作期间连续 %d 拍识别到首页标志 frame=%d：判定进房间后被踢回首页，"
+            "交回主流程重走招募",
+            self._home_streak,
+            ctx.frame_id,
+        )
+        self._finish(stop_event, holder, GrabResult(False, "kicked_home"))
         return False

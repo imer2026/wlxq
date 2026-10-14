@@ -778,6 +778,66 @@ class TestLoopStopConditions:
         # 返回验证通过、局数 +1 后输出局完成日志
         assert "第 1 局完成（1/2）" in messages
 
+    def test_grab_coop_kicked_home_resets_task_and_reenters(self, caplog):
+        """抢合作循环内被踢回首页（2026-10-05 实机）：Runner 收到 kicked_home
+        不保守停止——重置任务进度、继续主循环重走领地入口，而不是在首页
+        无限连点 join_coop 直到超时/人工停止。"""
+        import logging
+
+        from wlxq_bot.config import Hotspot, RunConfig
+        from wlxq_bot.models import CoopRole
+        from wlxq_bot.orchestration.coop_grab import GrabResult
+        from wlxq_bot.tasks.base import TaskContext
+        from wlxq_bot.tasks.coop import _RecruitStep
+
+        ctx = TaskContext(main_c="assault", max_rounds=10)
+        ctx.current_state = State.FIND_COOP
+        run_cfg = RunConfig(error_restart_enabled=False)
+        task = CoopTask(
+            ctx, run_cfg, CoopRole.HELPER, {"territory_nav": Hotspot(x_ratio=0.1, y_ratio=0.2)}
+        )
+        task._recruit_step = _RecruitStep.JOIN_COOP
+
+        class _KickedCoordinator:
+            """第一次返回 kicked_home；若循环误停止则不会出现第二次调用。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def run(self):
+                self.calls += 1
+                return GrabResult(found=False, reason="kicked_home")
+
+        coordinator = _KickedCoordinator()
+        screen = FakeScreen(make_window_ctx())
+        # 重置后 OPEN_TERRITORY 步骤：首页落点导航读「领地」→ 点领地重走
+        perception = FakePerception(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"})
+        )
+        executor = FakeExecutor()
+        safety = SafetyGuard(max_failures=3, frame_ttl_ms=5000)
+
+        with caplog.at_level(logging.WARNING, logger="wlxq_bot.runner"):
+            make_runner()._run_loop(
+                screen,
+                perception,
+                executor,
+                task,
+                safety,
+                1,
+                max_steps=4,
+                grab_coordinator=coordinator,
+            )
+
+        assert coordinator.calls == 1
+        # 重置生效：不再停在 JOIN_COOP 空点，领地入口点击成功后步骤已沿
+        # 招募链推进（open_territory 的验证通过进确认步骤）
+        assert task._recruit_step == _RecruitStep.CONFIRM_TERRITORY_OPEN
+        # 首个动作是领地入口点击，其后是确认步骤的等待帧（读「返回」直到超时）
+        assert executor.actions[0].tag == "open_territory"
+        assert all(a.tag == "territory_open_pending" for a in executor.actions[1:])
+        assert "kicked_home" in " ".join(r.getMessage() for r in caplog.records)
+
     def test_stops_immediately_on_completed(self):
         """round_count 达上限时 determine_state 返回 COMPLETED，循环立即结束。"""
         from wlxq_bot.config import Hotspot, RunConfig
@@ -2035,7 +2095,7 @@ class TestExitFrameSaving:
 
         assert final == State.BUILD_MAIN_C
         assert screen.capture_count == 5  # 缓冲上限 3：只保留最后 3 帧
-        folders = list(tmp_path.glob("exit_*"))
+        folders = list((tmp_path / "exit").glob("exit_*"))
         assert len(folders) == 1
         assert folders[0].name.startswith("exit_build_main_c_")
         assert [p.name for p in sorted(folders[0].glob("*.png"))] == [
@@ -2048,7 +2108,7 @@ class TestExitFrameSaving:
         assert "frame_id=5" in manifest
         # 缓冲已清空：重复 flush 不再产生新文件夹
         Runner._flush_exit_frames(recorder, task, safety)
-        assert len(list(tmp_path.glob("exit_*"))) == 1
+        assert len(list((tmp_path / "exit").glob("exit_*"))) == 1
 
     def test_completed_exit_saves_nothing(self, tmp_path):
         """正常完成（COMPLETED）退出不落盘退出帧。"""
@@ -2085,7 +2145,7 @@ class TestExitFrameSaving:
         Runner._flush_exit_frames(recorder, task, safety)
 
         assert final == State.COMPLETED
-        assert list(tmp_path.glob("exit_*")) == []
+        assert list((tmp_path / "exit").glob("exit_*")) == []
 
     def test_user_esc_stop_saves_nothing(self, tmp_path):
         """Esc 停止（stop_requested=True）：用户主动退出，不保存退出帧。"""
@@ -2101,7 +2161,7 @@ class TestExitFrameSaving:
 
         Runner._flush_exit_frames(recorder, task, safety)
 
-        assert list(tmp_path.glob("exit_*")) == []
+        assert list((tmp_path / "exit").glob("exit_*")) == []
 
     def test_flush_without_recorder_or_frames_is_noop(self, tmp_path):
         """无 recorder 或缓冲为空时 flush 直接返回，不报错不落盘。"""
@@ -2113,7 +2173,7 @@ class TestExitFrameSaving:
 
         recorder = DebugRecorder(str(tmp_path))  # 默认不启用缓冲
         Runner._flush_exit_frames(recorder, task, safety)
-        assert list(tmp_path.glob("exit_*")) == []
+        assert list((tmp_path / "exit").glob("exit_*")) == []
 
 
 # ---------------------------------------------------------------------------

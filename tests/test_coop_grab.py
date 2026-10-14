@@ -92,15 +92,18 @@ class FakePerception:
         *,
         close_matches: list[MatchResult | None] | None = None,
         modal_plan: list[bool] | None = None,
+        home_matches: list[MatchResult | None] | None = None,
         raise_on_match: bool = False,
         unexpected_error: bool = False,
     ) -> None:
         self._matches = list(matches)
         self._close_matches = list(close_matches or [])
         self._modal_plan = list(modal_plan or [])
+        self._home_matches = list(home_matches or [])
         self.calls = 0
         self.close_calls = 0
         self.modal_calls = 0
+        self.home_calls = 0
         self._raise_on_match = raise_on_match
         self._unexpected_error = unexpected_error
 
@@ -118,6 +121,12 @@ class FakePerception:
         self.close_calls += 1
         if self.close_calls <= len(self._close_matches):
             return self._close_matches[self.close_calls - 1]
+        return None
+
+    def match_home_page_marker(self, ctx, frame):
+        self.home_calls += 1
+        if self.home_calls <= len(self._home_matches):
+            return self._home_matches[self.home_calls - 1]
         return None
 
     def is_modal_frame(self, frame, brightness_threshold):
@@ -521,3 +530,112 @@ def test_popup_close_state_resets_between_runs():
         find_coop_max_duration_seconds=0.15,
     )
     assert coordinator.run().reason == "timeout"
+
+
+def test_kicked_home_after_passing_hall():
+    # 进组队大厅（第 1 拍亮边缘 → 越过招募）后被踢回首页：画面无准备按钮、
+    # 无弹窗、边缘亮，三条既有判定全部落空；首页标志连续
+    # home_return_confirm_frames（当前默认 4，2026-10-05 从 2 提到 4）拍命中
+    # → kicked_home，交由 Runner 重走招募而不是无限连点直到超时
+    home = MatchResult("home_marker", (100, 1600), 0.9)
+    perception = FakePerception(
+        [None] * 20,
+        modal_plan=[False],
+        home_matches=[home] * 4,
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        FakeExecutor(),
+        SafetyGuard(),
+        home_return_confirm_frames=4,
+        find_coop_max_duration_seconds=3.0,
+    )
+
+    result = coordinator.run()
+
+    assert not result.found
+    assert result.reason == "kicked_home"
+
+
+def test_home_return_confirm_frames_default_is_four():
+    # 默认值锁定：被踢回首页确认 2026-10-05 用户定案从 2 提到 4 拍，
+    # 防止日后被无意改回；两处消费同一默认（抢合作检查线程 + 等待开局检查）
+    assert RunConfig().home_return_confirm_frames == 4
+
+
+def test_single_home_flash_does_not_trigger_kick():
+    # 单拍首页命中（过场画面相似）下一拍不命中：计数清零不触发，
+    # 继续正常抢（最终按超时收场，绝不是 kicked_home）
+    home = MatchResult("home_marker", (100, 1600), 0.9)
+    perception = FakePerception(
+        [],
+        modal_plan=[False],
+        home_matches=[home],
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        FakeExecutor(),
+        SafetyGuard(),
+        find_coop_max_duration_seconds=0.15,
+    )
+
+    result = coordinator.run()
+
+    assert not result.found
+    assert result.reason == "timeout"
+
+
+def test_home_marker_before_hall_does_not_trigger():
+    # 从未进过组队大厅（暗边缘，还在招募页附近）：首页标志命中不判被踢
+    # ——抢合作起点本就贴近首页，未越过招募时首页标志命中是常态，
+    # 门未打开时连匹配都不该发生
+    home = MatchResult("home_marker", (100, 1600), 0.9)
+    perception = FakePerception(
+        [],
+        modal_plan=[True],
+        home_matches=[home] * 20,
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        perception,
+        FakeExecutor(),
+        SafetyGuard(),
+        find_coop_max_duration_seconds=0.15,
+    )
+
+    result = coordinator.run()
+
+    assert not result.found
+    assert result.reason == "timeout"
+    assert perception.home_calls == 0
+
+
+def test_home_streak_resets_between_runs():
+    # 协调器实例跨抢合作段复用：上一段的首页连拍计数不泄漏到下一段
+    # ——第二段首拍命中首页时 streak 只能是 1（重置过），随后抢到准备按钮
+    home = MatchResult("home_marker", (100, 1600), 0.9)
+    first = FakePerception(
+        [None] * 20,
+        modal_plan=[False],
+        home_matches=[home, home],
+    )
+    coordinator = make_coordinator(
+        FakeScreen(),
+        first,
+        FakeExecutor(),
+        SafetyGuard(),
+        home_return_confirm_frames=2,
+        find_coop_max_duration_seconds=3.0,
+    )
+    assert coordinator.run().reason == "kicked_home"
+
+    second = FakePerception(
+        [None, MatchResult("zhun_bei", (500, 900), 0.9)],
+        modal_plan=[False],
+        home_matches=[home],
+    )
+    coordinator._perception = second
+
+    assert coordinator.run().reason == "ready_found"

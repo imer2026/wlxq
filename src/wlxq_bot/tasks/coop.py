@@ -279,6 +279,15 @@ class CoopTask(Task):
         self._batch_planned_occupancy = None
         self._batch_clicks_sent = 0
         self._batch_no_land_streak = 0
+        # 召唤拒判（2026-10-06 用户定案）：召唤点击派发时记录费用基线并武装，
+        # 下一次决策入口评估——费用不变 = 被游戏拒绝（满盘），连续 N 次判定
+        # 棋盘已满并停用召唤出口。依据游戏拒绝行为而非识别占用，识别抖动的
+        # 假空格不再触发召唤空转（2026-10-06 实机 102 连点零落位事故）
+        self._summon_refusal_armed = False
+        self._summon_cost_baseline: int | None = None
+        self._summon_refusal_count = 0
+        self._summon_refusal_suppressed = False
+        self._summon_full_wait_streak = 0
         self._last_board_signature: tuple | None = None
         # 召唤未生效（多为金币不足）后的重试时刻；None 表示无需等待
         self._summon_retry_at: float | None = None
@@ -371,11 +380,9 @@ class CoopTask(Task):
         # 期间不会减少，2026-09-07 用户策略——本局内不再回培养复查数量，一直选技能
         self._topup_done = False
         # 3星主C培养环节（数量达标后的非强制追加，2026-09-30 用户定案）：
-        # done=本局已达成/放弃不再进入；active=当前帧留场培养（合并优先）；
-        # transform_entry=环节开始时已用变身次数（供「变身用尽」放弃判定）
+        # done=本局已达成/放弃不再进入；active=当前帧留场培养（合并优先）
         self._star3_done = False
         self._star3_active = False
-        self._star3_transform_entry: int | None = None
         # 3星环节出口的「凑 lineup 英雄」子环节（2026-10-01 用户定案）
         self._star3_after_active = False
         # 邀请者模式从 INVITE_CLICK 起步（发起邀请），不走 FIND_COOP 抢合作
@@ -1051,9 +1058,9 @@ class CoopTask(Task):
                     target=kick,
                     duration=0.08,
                     post_delay=0.5,
-                    # INVITE_COOLDOWN 为回流等待态：回空即回 INVITE_WAITING，
-                    # kick 未生效时超时重走邀请链从头复核房间状态，点击
-                    # 生效性由那条链兜底
+                    # INVITE_COOLDOWN 为回流等待态：回房间屏即回 INVITE_WAITING
+                    # 终判（2026-10-06 定案），踢未生效时等待态重读进度会自动
+                    # 再踢，点击生效性由那条路兜底
                     verification="immediate",
                     tag="invite_kick_helper",
                     reason="请离低于阈值的帮助者",
@@ -1215,15 +1222,17 @@ class CoopTask(Task):
         observation: Observation,
         window_ctx: WindowContext | None,
     ) -> tuple[Action, State] | None:
-        """请离后回流等待（2026-09-28 用户定案）：房间回空即回等待态。
+        """请离后回流等待：回到房间屏即回等待态（2026-10-06 用户定案）。
 
         60s 全量大轮回锚在上次全量邀请（_invite_full_since），不因请离重置。
-        请离后持续观察：邀请文字在房间屏锚点（金/灰按钮）下重现 = 踢已生效、
-        槽位回空，立即回 INVITE_WAITING 继续检查进房 + 轻量邀请（_invite_wait_since
-        由等待态首帧重置，轻量链按节奏照常发出）。文字超 kick_cooldown_seconds
-        仍不重现（踢未生效或新帮助者已占槽）才重走邀请链从头复核房间状态。
-        锚点缺失（加载页/过渡画面）冻结回空判定——非房间画面同样读不到
-        邀请文字，缺失不构成回空或占位证据（2026-09-26 实机教训）。
+        请离后只要房间屏锚点（金/灰按钮）可见即回 INVITE_WAITING 终判：
+        邀请文字可见 = 槽位回空（2026-09-28 定案路径，继续检查进房 +
+        轻量邀请）；不可见 = 槽位被占（新帮助者进房或踢未生效），由等待态
+        开信息层重读当前 occupant 进度分流——合格开局、不合格再踢，不靠
+        冷却干等坐实踢生效（实机 2026-10-06：新人快速占槽曾干等满 60s
+        兜底）。锚点缺失（加载页/过渡画面）冻结判定——非房间画面不构成
+        回空或占位证据（2026-09-26 实机教训）；满 kick_cooldown_seconds
+        仍不回房间屏才重走邀请链，超时从此只盯画面卡死。
         """
         now = self._clock()
         if self._invite_cooldown_until is None:
@@ -1231,17 +1240,30 @@ class CoopTask(Task):
         in_room_screen = observation.flag(
             "invite_start_ready_visible"
         ) or observation.flag("invite_start_not_ready_visible")
-        if in_room_screen and observation.flag("invite_text_visible"):
+        if in_room_screen:
             self._invite_cooldown_until = None
             self._invite_wait_since = None
-            logger.info("请离生效，房间回空，回等待态继续检查进房与轻量邀请（大轮回不重置）")
+            empty = bool(observation.flag("invite_text_visible"))
+            logger.info(
+                "%s，回等待态%s（大轮回不重置）",
+                "请离生效，房间回空" if empty else "槽位被占（新人进房或踢未生效）",
+                "继续检查进房与轻量邀请" if empty else "重读占槽者进度分流",
+            )
             return (
                 Action(
                     kind="wait",
                     duration=0.3,
                     verification="immediate",
-                    tag="invite_cooldown_room_empty",
-                    reason="请离生效，房间回空，继续等待新帮助者（大轮回不重置）",
+                    tag=(
+                        "invite_cooldown_room_empty"
+                        if empty
+                        else "invite_cooldown_occupied"
+                    ),
+                    reason=(
+                        "请离生效，房间回空，继续等待新帮助者（大轮回不重置）"
+                        if empty
+                        else "槽位被占，回等待态重读占槽者进度分流（大轮回不重置）"
+                    ),
                 ),
                 State.INVITE_WAITING,
             )
@@ -3561,6 +3583,9 @@ class CoopTask(Task):
             )
 
         gold = observation.raw_data.get("gold")
+        # 召唤拒判评估（2026-10-06 定案）：上一发召唤点击后费用不变计数，
+        # 判满后下方召唤出口全部停用。读数缺失/未武装时此处不做事
+        self._evaluate_summon_refusal(gold)
         if gold is not None and not self._can_afford(gold, "summon"):
             # 召唤金币门控（开局强制召唤之外的所有召唤）：费用不足
             # 时优先在等待空档合成（见下方分支），无对可合再原地等待金币恢复
@@ -3676,7 +3701,6 @@ class CoopTask(Task):
                         ),
                         self._failed_merge_pairs,
                         transform_used=self._transform_used_count,
-                        transform_used_in_stage=self._transform_used_in_stage(),
                         failed_targets=self._transform_failed_targets,
                     )
                     if exit_now:
@@ -3742,10 +3766,7 @@ class CoopTask(Task):
                             )
                         # 进入子环节：落到下方动作选择
                     else:
-                        # 留场培养：数量达标也不回选技能，落入下方变身/合成/召唤；
-                        # 记录环节开始时的变身次数，供「变身用尽」放弃判定
-                        if self._star3_transform_entry is None:
-                            self._star3_transform_entry = self._transform_used_count
+                        # 留场培养：数量达标也不回选技能，落入下方变身/合成/召唤
                         self._star3_active = True
                         logger.info("3星强袭培养环节：留场培养（%s）", star3_reason)
                 else:
@@ -3793,7 +3814,10 @@ class CoopTask(Task):
         # 缺失降级）或开关关闭时整分支跳过；按英雄放弃记忆（2026-10-03）
         # 在选目标时排除——按钮超时等失败的目标本局不再重选，棋盘其他
         # 演化不复活（旧整盘签名记法会被无关演化复活，皮肤升级的不可
-        # 变身英雄每次白烧 ~6 秒）
+        # 变身英雄每次白烧 ~6 秒）。目标星级下限用 transform_min_star_level
+        # （3/4星）；环节内任意星级的低星滚动在下方「无对可合」分支处理
+        # （2026-10-05 用户定案：一阶段/回补段只变 3/4 星，3星环节与凑狐狸
+        # 子环节内放开任意星级且让位于合并）
         if (
             self._run_config.transform_enabled
             and self._transform_locator is not None
@@ -3851,10 +3875,12 @@ class CoopTask(Task):
             self._run_config.batch_summon_enabled
             and batch_limit > 0
             and not star3_merge_first
+            and not self._summon_refusal_suppressed
         ):
             self._batch_summon_remaining = batch_limit
             self._batch_planned_occupancy = board.capacity.occupied
             self._batch_clicks_sent = 0
+            self._arm_summon_cost_check(gold)
             logger.info(
                 "规划批次召唤 %d 次（空格 %d/%d，frame=%d）",
                 batch_limit,
@@ -3909,13 +3935,66 @@ class CoopTask(Task):
         if pair is not None:
             return self._merge_drag_action(pair)
 
-        # 落位护栏冻结中：棋盘无空位，不再盲点召唤——转变身碰辅助或干等
-        if self._board_capacity_frozen and board.capacity.available <= 0:
+        # 3星环节/凑狐狸子环节无对可合：任意星级变身滚材料（2026-10-05
+        # 用户定案），排在召唤前——免费且产物 1/4 直接是主C/目标英雄；
+        # 让位于合并（环节内合并优先，2026-09-30 定案：幻天使+强袭这类
+        # 富余对先合，低星变身不抢）与子环节召唤优先（有空位先召唤，
+        # topup_fill_first）。一阶段与回补段不进此分支（只变 3/4 星，走
+        # 上方急切变身）。预算打光后下一帧环节退出判定②直接离场，不再
+        # 出现「无对可合只召唤」的空转循环
+        if (
+            (self._star3_active or self._star3_after_active)
+            and not topup_fill_first
+            and self._transform_usable_now()
+        ):
+            stage_target = self._strategy.select_transform(
+                board,
+                self._transform_used_count,
+                self._run_config.transform_max_per_round,
+                min_star_level=1,
+                exclude_heroes=(
+                    (self._strategy.star3_topup_after_hero,)
+                    if self._star3_after_active
+                    else ()
+                ),
+                exclude_targets=self._transform_failed_targets,
+            )
+            if stage_target is not None:
+                return self._emit_transform(
+                    stage_target,
+                    "环节内变身滚材料",
+                    "点击非主C英雄，弹出变身按钮（环节内任意星级）",
+                )
+
+        # 落位护栏冻结中：棋盘无空位，不再盲点召唤——转变身碰辅助或干等。
+        # 召唤拒判判满（2026-10-06）同路：依据游戏拒绝行为而非识别占用，
+        # 识别抖动造出的假空格不再触发召唤盲点
+        if self._summon_refusal_suppressed or (
+            self._board_capacity_frozen and board.capacity.available <= 0
+        ):
             assist = self._invite_gold_wait_assist(
-                board, observation, "棋盘已满（含锁定格兜底）"
+                board,
+                observation,
+                "棋盘已满（召唤费用未变化）"
+                if self._summon_refusal_suppressed
+                else "棋盘已满（含锁定格兜底）",
             )
             if assist is not None:
                 return assist
+            if self._summon_refusal_suppressed:
+                # 判满干等连击有界：计满保守停止。判满依据是游戏拒绝行为，
+                # 识别抖动会让棋盘签名一直变化、签名看门狗数不出停滞，按
+                # 动作计数兜底（真死局：满盘+无合法对+无变身可用）
+                self._summon_full_wait_streak += 1
+                if (
+                    self._summon_full_wait_streak
+                    >= self._run_config.summon_full_wait_limit
+                ):
+                    logger.warning(
+                        "棋盘已满（召唤被拒）且无合成对/变身可用，干等 %d 次无变化，保守停止",
+                        self._summon_full_wait_streak,
+                    )
+                    return None
             # 冻结干等是有意等待（对局推进前棋盘静止不动），不计入无进展，
             # 否则看门狗把连续同签名判成停滞、runner 计满后保守停止
             # （2026-09-26 实机事故）
@@ -3926,7 +4005,11 @@ class CoopTask(Task):
                     duration=self._run_config.gold_red_wait_seconds,
                     verification="immediate",
                     tag="frozen_board_wait",
-                    reason="召唤已冻结且无安全动作，等待对局推进",
+                    reason=(
+                        "棋盘已满（召唤被拒），无合成对/变身，等待棋盘变化"
+                        if self._summon_refusal_suppressed
+                        else "召唤已冻结且无安全动作，等待对局推进"
+                    ),
                 ),
                 State.BUILD_MAIN_C,
             )
@@ -3945,6 +4028,7 @@ class CoopTask(Task):
                 f"（金币：现有 {gold.get('current')} / "
                 f"召唤需 {gold.get('summon_cost')}）"
             )
+        self._arm_summon_cost_check(gold)
         return (
             Action(
                 kind="click",
@@ -3965,12 +4049,6 @@ class CoopTask(Task):
     def _star3_stage_should_run(self) -> bool:
         """3星主C培养环节是否需要进入/留场（启用且本局未达成/放弃）。"""
         return self._strategy.star3_topup_enabled and not self._star3_done
-
-    def _transform_used_in_stage(self) -> int:
-        """本环节内已消耗的变身次数（进入前用掉的不计入放弃判定）。"""
-        if self._star3_transform_entry is None:
-            return 0
-        return max(0, self._transform_used_count - self._star3_transform_entry)
 
     def _transform_usable_now(self) -> bool:
         """当前帧变身是否可用（开关/接线/预算三者同时满足）。
@@ -4462,6 +4540,7 @@ class CoopTask(Task):
         else:
             post_delay = self._run_config.forced_summon_interval_seconds
         self._batch_clicks_sent += 1
+        self._arm_summon_cost_check(gold)
         return (
             Action(
                 kind="click",
@@ -4696,10 +4775,74 @@ class CoopTask(Task):
             return not after.flag("return_button_visible")
         return False
 
+    def _arm_summon_cost_check(self, gold: dict | None) -> None:
+        """召唤点击派发前记录当前费用基线并武装，下一次决策入口据此评估
+        「点击后费用是否变化」（见 :meth:`_evaluate_summon_refusal`）。"""
+        cost = gold.get("summon_cost") if gold else None
+        if isinstance(cost, int) and cost > 0:
+            self._summon_cost_baseline = cost
+            self._summon_refusal_armed = True
+
+    def _evaluate_summon_refusal(self, gold: dict | None) -> None:
+        """召唤拒判（2026-10-06 用户定案）：点击后费用不变 = 被游戏拒绝。
+
+        棋盘满时游戏直接拒绝召唤（金币不扣、按钮费用不动），而识别占用会被
+        战斗特效/飘字抖成假空格——费用是只有召唤成功才会变化的「安静信号」
+        （金币后台缓存每 ~2s 读按钮区，与阵容无关），以它为准判满。每次召唤
+        点击武装一次，下一次决策入口评估并解除武装：读数缺失跳过（不计数
+        不复位）、读数等于封顶值冻结（封顶后成功召唤费用也不变，信号无定义）、
+        费用变化立即复位（有召唤落位）、连续 N 次不变判定棋盘已满并停用
+        召唤出口。
+        """
+        if not self._summon_refusal_armed:
+            return
+        self._summon_refusal_armed = False
+        cost = gold.get("summon_cost") if gold else None
+        if not isinstance(cost, int) or cost <= 0:
+            return
+        if cost == self._run_config.summon_cost_cap:
+            logger.debug("召唤费用读数 %s 已达封顶，拒判计数冻结", cost)
+            return
+        if cost == self._summon_cost_baseline:
+            self._summon_refusal_count += 1
+            logger.debug(
+                "召唤费用未变化（%s），拒判计数 %d/%d",
+                cost,
+                self._summon_refusal_count,
+                self._run_config.summon_refusal_limit,
+            )
+            if (
+                self._summon_refusal_count >= self._run_config.summon_refusal_limit
+                and not self._summon_refusal_suppressed
+            ):
+                self._summon_refusal_suppressed = True
+                self._summon_full_wait_streak = 0
+                logger.warning(
+                    "召唤费用连续 %d 次未变化，判定棋盘已满，停用召唤出口"
+                    "（费用变化或合成成功自动解除）",
+                    self._summon_refusal_count,
+                )
+            return
+        if self._summon_refusal_suppressed or self._summon_refusal_count:
+            logger.info(
+                "召唤费用 %s→%s，判定有召唤落位，解除棋盘已满判定",
+                self._summon_cost_baseline,
+                cost,
+            )
+        self._summon_refusal_count = 0
+        self._summon_refusal_suppressed = False
+        self._summon_full_wait_streak = 0
+
     def _unfreeze_summon(self, source: str) -> None:
         """合成成功 = 棋盘已变化，落位护栏"点不进去"的依据过时：解除本局
         召唤冻结并复位连败计数，让下一帧正常规划试探召唤（2026-09-27 用户
-        拍板：冻结不再一冻一局，合成腾出的空位必须重新可用）。"""
+        拍板：冻结不再一冻一局，合成腾出的空位必须重新可用）。费用判据的
+        「棋盘已满」同理解除——合成腾出的空位召唤必然可落位（2026-10-06）。"""
+        if self._summon_refusal_suppressed:
+            self._summon_refusal_suppressed = False
+            self._summon_refusal_count = 0
+            self._summon_full_wait_streak = 0
+            logger.info("合成成功（%s），解除「棋盘已满」召唤抑制", source)
         if not self._board_capacity_frozen:
             return
         self._board_capacity_frozen = False
@@ -4836,7 +4979,6 @@ class CoopTask(Task):
             self._topup_done = False
             self._star3_done = False
             self._star3_active = False
-            self._star3_transform_entry = None
             self._star3_after_active = False
             self._summon_retry_at = None
             self._transform_used_count = 0
@@ -4902,7 +5044,8 @@ class CoopTask(Task):
             self._unfreeze_summon("单动作合成")
         elif tag == "batch_merge":
             # 批次合成单拖已发送：弹出队首；拖动生效同样证明机制正常，
-            # 清空失败记忆（与单动作合成语义一致）
+            # 清空失败记忆（与单动作合成语义一致）。可达星级在批末归因时
+            # 按「已生效的对」抬升（发送≠生效，见 _attribute_merge_batch）
             self._batch_merge_queue.pop(0)
             self._failed_merge_pairs.clear()
             self._unfreeze_summon("批次合成")
@@ -4965,6 +5108,10 @@ class CoopTask(Task):
     def on_action_failed(self, action: Action) -> None:
         """动作重试耗尽、Runner 放弃该动作时调整内部进度，均不结束任务。"""
         tag = action.tag
+        if tag in {"summon_hero", "batch_summon"}:
+            # 召唤点击未发出（窗口校验失败等）：解除费用判据武装——没有
+            # 真正点出去的召唤不参与「费用不变 = 被拒绝」的计数
+            self._summon_refusal_armed = False
         if tag == "skill_refresh":
             # 刷新点击未生效（或换出同三张）：本局机会按已用处理，页面仍开时
             # 下一帧直接按优先级选卡——刷新不可用后必须选一张
@@ -5046,6 +5193,12 @@ class CoopTask(Task):
         self._batch_planned_occupancy: int | None = None
         self._batch_clicks_sent = 0
         self._batch_no_land_streak = 0
+        # 召唤拒判按局重置：费用阶梯每局从头计，判满状态不带入下一局
+        self._summon_refusal_armed = False
+        self._summon_cost_baseline = None
+        self._summon_refusal_count = 0
+        self._summon_refusal_suppressed = False
+        self._summon_full_wait_streak = 0
         self._empty_board_count = 0
         self._no_progress_count = 0
         self._last_board_signature = None
@@ -5076,11 +5229,21 @@ class CoopTask(Task):
         self._topup_done = False
         self._star3_done = False
         self._star3_active = False
-        self._star3_transform_entry = None
         self._star3_after_active = False
         self._transform_used_count = 0
         self._transform_failed_targets.clear()
         self._clear_transform_state()
+
+    def reset_after_grab_kick(self) -> None:
+        """抢合作循环内被踢回首页（协调器 kicked_home）：清进度重走招募。
+
+        Runner 在协调器返回 kicked_home 时调用——本局尚未点准备，对局内
+        进度本就近零，重置防协调器运行期间意外残留；复用点准备后被踢的
+        同一条重置路径（_reset_for_home_reentry），从领地入口重新走招募，
+        落点自校正：首页导航读「领地」正常点领地，已在领地页读「返回」
+        跳过点击。
+        """
+        self._reset_for_home_reentry()
 
     @staticmethod
     def _board_signature(board: BoardSnapshot) -> tuple:
