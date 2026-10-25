@@ -138,6 +138,52 @@ class GoldCache:
             return None
         return snapshot
 
+    def read_now(
+        self,
+        frame: Any,
+        *,
+        frame_id: int,
+        clean: bool,
+        current_roi: tuple[int, int, int, int],
+        cost_roi: tuple[int, int, int, int],
+        cost_key: str,
+    ) -> dict[str, Any] | None:
+        """同步现读当前帧（绕过限频与后台线程），读到的值提交进缓存。
+
+        召唤拒判评估专用（2026-10-14 实机三连误判事故）：评估读数必须来自
+        点击之后的画面，而后台快照天然滞后一个决策周期——召唤动画窗口内
+        的旧值「费用未变化」不构成拒绝证据。调用方在识别帧上调用本方法，
+        读数必然晚于上一周期的点击。读取失败返回 None 且不动缓存，调用方
+        回退 snapshot() 的既有缺失语义。脏帧（clean=False）直接返回 None：
+        遮挡下的解析结果不可信。
+        """
+        if not clean:
+            return None
+        try:
+            current, cost = self._reader.read_pair(frame, current_roi, cost_roi)
+        except Exception as exc:
+            logger.debug("frame_id=%d 金币同步现读异常：%r", frame_id, exc)
+            return None
+        if current is None and cost is None:
+            logger.debug("frame_id=%d 金币同步现读失败（解析不出数字）", frame_id)
+            return None
+        now = self._clock()
+        with self._cache_lock:
+            values = dict(self._snapshot) if self._snapshot is not None else {}
+            if current is not None:
+                values["current"] = current
+            if cost is not None:
+                values[cost_key] = cost
+            values["frame_id"] = frame_id
+            self._snapshot = values
+            self._snapshot_at = now
+            self._snapshot_frame_id = frame_id
+            self._consecutive_failures = 0
+            self._invalidate_pending = False
+            self._last_success_at = now
+            self._last_attempt_at = now
+        return dict(values)
+
     def stop(self) -> None:
         """请求后台线程退出；幂等。daemon 线程随进程退出兜底。"""
         self._stop_requested = True

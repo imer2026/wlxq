@@ -393,3 +393,60 @@ class TestSubmitCleanRule:
             self._window_ctx(), self._frame(), State.ENTER_MATCH, {}
         )
         assert submitted == []
+
+
+class TestReadNow:
+    """同步现读（2026-10-14 召唤拒判三连误判事故）：评估读数必须来自点击
+    之后的画面，后台快照天然滞后一个决策周期。"""
+
+    def test_read_now_returns_and_commits_with_frame_id(self):
+        reader = FakePairReader(results=[(3000, 215)])
+        cache = _make_cache(reader)
+        values = cache.read_now(
+            object(),
+            frame_id=458,
+            clean=True,
+            current_roi=_ROI,
+            cost_roi=_ROI,
+            cost_key="summon_cost",
+        )
+        assert values == {"current": 3000, "summon_cost": 215, "frame_id": 458}
+        # 现读结果提交进缓存：后续 snapshot 消费者看到同一份新鲜值
+        assert cache.snapshot() == values
+
+    def test_read_now_dirty_frame_skips_without_reading(self):
+        reader = FakePairReader(results=[(3000, 215)])
+        cache = _make_cache(reader)
+        assert (
+            cache.read_now(
+                object(),
+                frame_id=1,
+                clean=False,
+                current_roi=_ROI,
+                cost_roi=_ROI,
+                cost_key="summon_cost",
+            )
+            is None
+        )
+        assert reader.calls == 0
+        assert cache.snapshot() is None
+
+    def test_read_now_parse_failure_keeps_cache_untouched(self):
+        reader = FakePairReader(results=[(100, 80)])
+        cache = _make_cache(reader)
+        _submit(cache, object())
+        assert _wait_until(lambda: cache.snapshot() is not None)
+        # 解析失败：返回 None，缓存保留上一个好值
+        reader.results = [(None, None)]
+        assert (
+            cache.read_now(
+                object(),
+                frame_id=2,
+                clean=True,
+                current_roi=_ROI,
+                cost_roi=_ROI,
+                cost_key="summon_cost",
+            )
+            is None
+        )
+        assert cache.snapshot() == {"current": 100, "summon_cost": 80}

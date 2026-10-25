@@ -285,6 +285,7 @@ class CoopTask(Task):
         # 假空格不再触发召唤空转（2026-10-06 实机 102 连点零落位事故）
         self._summon_refusal_armed = False
         self._summon_cost_baseline: int | None = None
+        self._summon_arm_frame_id = 0
         self._summon_refusal_count = 0
         self._summon_refusal_suppressed = False
         self._summon_full_wait_streak = 0
@@ -3193,6 +3194,16 @@ class CoopTask(Task):
             return self._summon_count >= self._run_config.minimum_summon_count_before_skills
         return False
 
+    def wants_fresh_gold(self) -> bool:
+        """召唤拒判武装待评估时要求识别管线在当前帧上同步现读金币。
+
+        后台缓存快照来自上一个识别帧——召唤点击后按钮费用晚 ~1-2 秒（动画）
+        才刷新，拿旧快照评估「费用未变化」会把已落位的召唤误判成被拒
+        （2026-10-14 实机三连误判 → 假判满 → 锁死保守退出）。武装待评估的
+        周期改为现读，读数必然晚于点击；武装已解除的周期走后台快照零 OCR。
+        """
+        return self._summon_refusal_armed
+
     @staticmethod
     def _can_afford(gold: dict, cost_key: str) -> bool:
         """判断金币是否够付某项费用。
@@ -3880,7 +3891,7 @@ class CoopTask(Task):
             self._batch_summon_remaining = batch_limit
             self._batch_planned_occupancy = board.capacity.occupied
             self._batch_clicks_sent = 0
-            self._arm_summon_cost_check(gold)
+            self._arm_summon_cost_check(gold, observation.frame_id)
             logger.info(
                 "规划批次召唤 %d 次（空格 %d/%d，frame=%d）",
                 batch_limit,
@@ -3907,10 +3918,14 @@ class CoopTask(Task):
         # 合成要拖动加验证耗时，先召唤占满空位更快；棋盘占满且数量未达标
         # 才合成腾格子。批次合成遵循同一优先级。3星环节内反转：合并优先
         # （尽快出 3 星），召唤只用于凑材料
+        # 拒判判满期间例外（2026-10-14 实机锁死事故）：召唤出口已被停用，
+        # 「有空位先召唤」的前提失效——仍拦合成会让唯一的解除路径（合成
+        # 成功自动解除）也走不通，只能干等到保守退出；放行合成即自愈
         topup_fill_first = (
             self._topup_active
             and not self._star3_active
             and board.capacity.available > 0
+            and not self._summon_refusal_suppressed
         )
         if self._run_config.batch_merge_enabled and not topup_fill_first:
             # 批末归因：上一批中仍原样存在的对记入失败记忆（拖动未生效）
@@ -3926,11 +3941,17 @@ class CoopTask(Task):
             # 合成/避让/失败对跳过等策略决策由 CultivationStrategy 负责；
             # 返回 None 表示本次不合并，落入下方召唤分支。3星环节内启用
             # 富余主C对（保 topup_hero_count，2026-10-01 用户修正）
+            # 判满期窄例外（2026-10-25 实机×2，与上方 topup_fill_first 同源）：
+            # 召唤出口已停用，策略层「有空位保主C数量/保幻天使」两道门一并
+            # 让位——否则唯一的解锁路径（合成成功自动解除）够不着，宠物局
+            # 在 6/8、7/8 的假满盘上干等计满保守退出
             pair = self._strategy.select_merge(
                 board,
                 candidates,
                 self._failed_merge_pairs,
                 star3_stage=self._star3_active,
+                allow_wildcard_with_space=self._summon_refusal_suppressed,
+                allow_main_c_with_space=self._summon_refusal_suppressed,
             )
         if pair is not None:
             return self._merge_drag_action(pair)
@@ -4028,7 +4049,7 @@ class CoopTask(Task):
                 f"（金币：现有 {gold.get('current')} / "
                 f"召唤需 {gold.get('summon_cost')}）"
             )
-        self._arm_summon_cost_check(gold)
+        self._arm_summon_cost_check(gold, observation.frame_id)
         return (
             Action(
                 kind="click",
@@ -4540,7 +4561,7 @@ class CoopTask(Task):
         else:
             post_delay = self._run_config.forced_summon_interval_seconds
         self._batch_clicks_sent += 1
-        self._arm_summon_cost_check(gold)
+        self._arm_summon_cost_check(gold, observation.frame_id)
         return (
             Action(
                 kind="click",
@@ -4775,12 +4796,13 @@ class CoopTask(Task):
             return not after.flag("return_button_visible")
         return False
 
-    def _arm_summon_cost_check(self, gold: dict | None) -> None:
-        """召唤点击派发前记录当前费用基线并武装，下一次决策入口据此评估
-        「点击后费用是否变化」（见 :meth:`_evaluate_summon_refusal`）。"""
+    def _arm_summon_cost_check(self, gold: dict | None, frame_id: int) -> None:
+        """召唤点击派发前记录当前费用基线、派发帧号并武装，下一次决策入口
+        据此评估「点击后费用是否变化」（见 :meth:`_evaluate_summon_refusal`）。"""
         cost = gold.get("summon_cost") if gold else None
         if isinstance(cost, int) and cost > 0:
             self._summon_cost_baseline = cost
+            self._summon_arm_frame_id = frame_id
             self._summon_refusal_armed = True
 
     def _evaluate_summon_refusal(self, gold: dict | None) -> None:
@@ -4793,12 +4815,20 @@ class CoopTask(Task):
         不复位）、读数等于封顶值冻结（封顶后成功召唤费用也不变，信号无定义）、
         费用变化立即复位（有召唤落位）、连续 N 次不变判定棋盘已满并停用
         召唤出口。
+
+        读数新鲜度门（2026-10-14 实机三连误判事故）：金币读数必须来自
+        点击派发帧之后的画面——召唤动画会让按钮费用晚 ~1-2 秒才刷新，
+        点击前/同帧的旧值「未变化」不构成拒绝证据（10-14 三批召唤全部
+        落位却被判费用不变 → 假判满 → 锁死退出）。旧读数按缺失处理：
+        不计数不复位（武装已解除，下一批发召唤重新武装）。
         """
         if not self._summon_refusal_armed:
             return
         self._summon_refusal_armed = False
         cost = gold.get("summon_cost") if gold else None
         if not isinstance(cost, int) or cost <= 0:
+            return
+        if (gold.get("frame_id", 0) if gold else 0) <= self._summon_arm_frame_id:
             return
         if cost == self._run_config.summon_cost_cap:
             logger.debug("召唤费用读数 %s 已达封顶，拒判计数冻结", cost)

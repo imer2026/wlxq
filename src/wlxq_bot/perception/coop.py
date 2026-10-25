@@ -294,6 +294,7 @@ class CoopPerception:
         observation_mode: str | None = None,
         read_gold: bool = False,
         light: bool = False,
+        fresh_gold: bool = False,
     ) -> Observation:
         """对一帧截图做识别，返回 Observation。
 
@@ -337,8 +338,22 @@ class CoopPerception:
         )
         # 金币感知：读数由 GoldCache 后台线程完成（主循环零 OCR），这里只取
         # 快照。超龄/未就绪返回 None，任务层按「金币缺失不拦截」放行。
+        # fresh_gold（召唤拒判武装待评估，任务层 wants_fresh_gold 声明）时
+        # 在当前帧上同步现读——后台快照来自上一帧，可能是点击前的旧值
+        # （2026-10-14 实机三连误判事故）；现读失败回退快照。
         if self._gold_cache is not None and read_gold:
-            gold = self._gold_cache.snapshot()
+            gold = None
+            if fresh_gold:
+                gold = self._fresh_gold_snapshot(
+                    ctx,
+                    frame,
+                    hint_state,
+                    clean=not any(
+                        raw_data.get(flag) for flag in self._GOLD_OCCLUSION_FLAGS
+                    ),
+                )
+            if gold is None:
+                gold = self._gold_cache.snapshot()
             if gold is not None:
                 raw_data["gold"] = gold
         # 喂帧：培养期两个金币门控状态才提交（开局召唤免费，不查金币）。
@@ -1401,6 +1416,40 @@ class CoopPerception:
         "merge_gift_skill_page_visible",
     )
 
+    def _fresh_gold_snapshot(
+        self,
+        ctx: WindowContext,
+        frame: Any,
+        hint_state: State,
+        *,
+        clean: bool,
+    ) -> dict[str, Any] | None:
+        """在当前识别帧上同步现读金币（召唤拒判评估专用，2026-10-14 实机
+        三连误判事故）。
+
+        后台缓存快照天然滞后一个决策周期：召唤点击后按钮费用晚 ~1-2 秒
+        （动画）才刷新，而快照往往还是点击前那帧的读数——拿它评估「费用
+        未变化」会把已落位的召唤误判成被拒。本方法绕过后台线程在当前帧
+        上直接 OCR，读数必然晚于上一周期的点击，并带 frame_id 供评估端
+        做新鲜度兜底。仅金币门控状态且 ROI 已标定时可用；脏帧/解析失败
+        返回 None，调用方回退后台快照（frame_id 缺失 → 评估按缺失跳过）。
+        """
+        hint = self._GOLD_HINT_BY_STATE.get(hint_state)
+        if hint is None or self._gold_cache is None:
+            return None
+        current_roi = self._resolve_named_roi("gold_current_area", ctx)
+        cost_roi = self._resolve_named_roi(f"{hint[0]}_cost_area", ctx)
+        if current_roi is None or cost_roi is None:
+            return None
+        return self._gold_cache.read_now(
+            frame,
+            frame_id=ctx.frame_id,
+            clean=clean,
+            current_roi=current_roi,
+            cost_roi=cost_roi,
+            cost_key=hint[1],
+        )
+
     def _submit_gold_frame(
         self,
         ctx: WindowContext,
@@ -1661,6 +1710,7 @@ class CoopPerception:
         *,
         require_foreground: bool = True,
         read_gold: bool = False,
+        fresh_gold: bool = False,
     ) -> tuple[WindowContext, Observation]:
         """多帧分类棋盘，并按每格精确类别做多数投票。
 
@@ -1785,9 +1835,23 @@ class CoopPerception:
                 raw_data,
                 matches,
             )
-            # 金币感知：培养/回补阶段的召唤门控需要金币数据（按最小间隔读取）
+            # 金币感知：培养/回补阶段的召唤门控需要金币数据（按最小间隔读取）。
+            # fresh_gold（召唤拒判武装待评估）时在当前帧上同步现读——多帧批次
+            # 的最新帧晚于上一周期点击 ~2 秒，读数必然已过召唤动画；现读失败
+            # 回退后台快照（frame_id 缺失，评估端按缺失跳过）
             if self._gold_cache is not None:
-                gold = self._read_gold(latest_ctx, latest_frame)
+                gold = None
+                if fresh_gold:
+                    gold = self._fresh_gold_snapshot(
+                        latest_ctx,
+                        latest_frame,
+                        State.BUILD_MAIN_C,
+                        clean=not any(
+                            raw_data.get(flag) for flag in self._GOLD_OCCLUSION_FLAGS
+                        ),
+                    )
+                if gold is None:
+                    gold = self._read_gold(latest_ctx, latest_frame)
                 if gold is not None:
                     raw_data["gold"] = gold
                 # 多帧路径必须喂帧：金币等待循环每轮全走本路径且无动作后

@@ -128,6 +128,7 @@ class FakePerception:
         observation_mode=None,
         read_gold=False,
         light=False,
+        fresh_gold=False,
     ):
         self.observe_count += 1
         self.observation_modes.append(observation_mode)
@@ -140,7 +141,7 @@ class FakePerception:
             return obs
         return replace(obs, frame_id=ctx.frame_id)
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
         """培养阶段多帧累积的 fake：直接返回预设 observation。"""
         self.observe_count += 1
         self.cultivation_n_frames.append(n_frames)
@@ -994,6 +995,9 @@ class TestLoopStopConditions:
             def observation_mode(self):
                 return None
 
+            def wants_fresh_gold(self) -> bool:
+                return False
+
             def wants_gold_read(self):
                 return False
 
@@ -1583,7 +1587,7 @@ class TestCultivationLoop:
                 self.observe_count += 1
                 return replace(obs, frame_id=c.frame_id)
 
-            def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+            def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
                 obs = self.observations[min(self.observe_count, len(self.observations) - 1)]
                 self.observe_count += 1
                 return ctx, replace(obs, frame_id=ctx.frame_id)
@@ -1638,7 +1642,7 @@ class _PopupPerception:
         )
         return replace(Observation(frame_id=c.frame_id, raw_data=raw), frame_id=c.frame_id)
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
         obs = self.observe(ctx, None, State.BUILD_MAIN_C)
         return ctx, obs
 
@@ -1758,7 +1762,7 @@ class _MergeBoardPerception:
     def observe(self, c, f, hint, observation_mode=None, read_gold=False, **kwargs):
         return self._next(c)
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
         return ctx, self._next(ctx)
 
 
@@ -1933,7 +1937,7 @@ class _OpeningSkillPagePerception:
             skill_candidates=[SkillCandidate("assault", (100, 100), 0.9)],
         )
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
         return ctx, self.observe(ctx, None, None)
 
 
@@ -2004,7 +2008,7 @@ class _MainSkillPagePerception:
             },
         )
 
-    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+    def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
         return ctx, self.observe(ctx, None, None)
 
 
@@ -2587,6 +2591,9 @@ class TestVerifyAbortOnMatchEnd:
             def wants_board_watch(self) -> bool:
                 return False
 
+            def wants_fresh_gold(self) -> bool:
+                return False
+
             def wants_gold_read(self) -> bool:
                 return False
 
@@ -2695,6 +2702,9 @@ class TestPopupCloseUsesLightObserve:
             def wants_board_watch(self) -> bool:
                 return True  # 培养状态默认会走多帧棋盘投票——必须被跳过
 
+            def wants_fresh_gold(self) -> bool:
+                return False
+
             def wants_gold_read(self) -> bool:
                 return False
 
@@ -2736,7 +2746,7 @@ class TestPopupCloseUsesLightObserve:
         task = _PopupCloseTask()
 
         class _CountingPerception(FakePerception):
-            def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False):
+            def observe_cultivation(self, screen, handle, ctx, n_frames=10, read_gold=False, fresh_gold=False):
                 # 不抛异常：决策帧的合法多帧投票照常记录，断言里核对它只发生一次
                 self.cultivation_n_frames.append(n_frames)
                 return ctx, replace(self._obs, frame_id=ctx.frame_id)
@@ -2781,6 +2791,9 @@ class TestPopupPreEmptsVerification:
                 self.verify_calls = 0
 
             def wants_board_watch(self) -> bool:
+                return False
+
+            def wants_fresh_gold(self) -> bool:
                 return False
 
             def wants_gold_read(self) -> bool:
@@ -2879,6 +2892,9 @@ class TestPopupPreEmptsVerification:
             def wants_board_watch(self) -> bool:
                 return False
 
+            def wants_fresh_gold(self) -> bool:
+                return False
+
             def wants_gold_read(self) -> bool:
                 return False
 
@@ -2968,6 +2984,9 @@ def test_generic_verification_failure_notifies_task_on_action_failed() -> None:
         def wants_board_watch(self) -> bool:
             return False
 
+        def wants_fresh_gold(self) -> bool:
+            return False
+
         def wants_gold_read(self) -> bool:
             return False
 
@@ -3039,6 +3058,9 @@ def test_action_level_verify_frames_override_global_budget() -> None:
             self.failed = False
 
         def wants_board_watch(self) -> bool:
+            return False
+
+        def wants_fresh_gold(self) -> bool:
             return False
 
         def wants_gold_read(self) -> bool:

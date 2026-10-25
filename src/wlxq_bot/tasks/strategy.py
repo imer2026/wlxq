@@ -599,6 +599,7 @@ class CultivationStrategy:
         *,
         star3_stage: bool = False,
         allow_wildcard_with_space: bool = False,
+        allow_main_c_with_space: bool = False,
     ) -> MergeCandidate | None:
         """从合法合成对中选择本次要拖的一对；None 表示本次不合并（应召唤）。
 
@@ -623,10 +624,14 @@ class CultivationStrategy:
         :meth:`_order_star3_same_type_low` 排序（2026-10-03 用户定案）：
         合成后场上 2 星主C清零的对让位到 1 星对之后，先攒后花。
 
-        ``allow_wildcard_with_space``：金币不足例外（2026-10-01 用户定案）——
-        召唤被金币门控拦住时「有空位 → 召唤不花幻天使」的前提不成立，
-        等金币恢复期间幻天使通配对让位可合（仅放开第 5 层的空位保留；
-        3 星对规避与主C保数量照旧）。调用方目前只有等金币合成路径。
+        ``allow_wildcard_with_space``：召唤被拦时「有空位 → 召唤不花幻天使」
+        前提失效的窄例外，幻天使通配对让位可合（仅放开第 5 层的空位保留；
+        3 星对规避照旧）。两个调用方：等金币恢复期间（2026-10-01 用户定案）
+        与召唤拒判判满期间（2026-10-25 实机事故）。
+        ``allow_main_c_with_space``：召唤拒判判满期例外（2026-10-25 实机
+        事故×2）——召唤出口已停用，「有空位保主C数量等召唤」的前提失效；
+        仍拦主C对会让唯一的解除路径（合成成功自动解除）够不着，假判满双重
+        锁死干等保守退出。放行后主C对与普通对同层参与选择。
         """
         if star3_stage:
             candidates = [
@@ -640,7 +645,12 @@ class CultivationStrategy:
         if not candidates:
             return None
         non_main_pairs = [c for c in candidates if not c.is_main_c]
-        if not non_main_pairs and avoid_main_merge and not self._board_full(board):
+        if (
+            not non_main_pairs
+            and avoid_main_merge
+            and not self._board_full(board)
+            and not allow_main_c_with_space
+        ):
             logger.info("无非主C合成对且棋盘有空位，不合并主C，召唤新英雄（保主C数量）")
             return None
         pool = non_main_pairs if non_main_pairs else candidates

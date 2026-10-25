@@ -334,8 +334,10 @@ class RunConfig(BaseModel):
     summon_cost_cap: int = Field(default=660, ge=1)
     # 判满后无合成对/无变身可用时的干等决策连击上限：计满保守停止。棋盘
     # 签名看门狗按识别结果计数，识别抖动会让签名一直变化绕过它，这里按
-    # 动作计数兜底（判满依据是游戏拒绝行为，不依赖识别）
-    summon_full_wait_limit: int = Field(default=15, ge=1, le=200)
+    # 动作计数兜底（判满依据是游戏拒绝行为，不依赖识别）。默认 6（约 10
+    # 秒）：3 次对识别抖动容错不足（把真对抖没 3 帧就误杀可赢的局），且
+    # 判满期已放行合成自愈（2026-10-14），只有真死局才会走满
+    summon_full_wait_limit: int = Field(default=6, ge=1, le=200)
 
     @field_validator("wildcard_merge_heroes", mode="before")
     @classmethod

@@ -6291,7 +6291,7 @@ class TestSummonRefusalSuppression:
     阵容（邀请者/强袭）共用同一条通路。
     """
 
-    GOLD = {"current": 10000, "summon_cost": 215, "summon_red": False}
+    GOLD = {"current": 10000, "summon_cost": 215, "summon_red": False, "frame_id": 2}
 
     @staticmethod
     def _task(batch_enabled: bool = False) -> CoopTask:
@@ -6337,14 +6337,31 @@ class TestSummonRefusalSuppression:
     def test_cost_change_resets_count(self):
         """费用变化 = 有召唤落位：计数清零。"""
         task = self._task()
-        task._arm_summon_cost_check(dict(self.GOLD))
+        task._arm_summon_cost_check(dict(self.GOLD), 1)
         task._evaluate_summon_refusal(dict(self.GOLD))
-        task._arm_summon_cost_check(dict(self.GOLD))
+        task._arm_summon_cost_check(dict(self.GOLD), 1)
         task._evaluate_summon_refusal(dict(self.GOLD))
         assert task._summon_refusal_count == 2
-        task._arm_summon_cost_check(dict(self.GOLD))
-        task._evaluate_summon_refusal({"current": 10000, "summon_cost": 230, "summon_red": False})
+        task._arm_summon_cost_check(dict(self.GOLD), 1)
+        task._evaluate_summon_refusal(
+            {"current": 10000, "summon_cost": 230, "summon_red": False, "frame_id": 2}
+        )
         assert task._summon_refusal_count == 0
+        assert not task._summon_refusal_suppressed
+
+    def test_stale_frame_read_skips_without_counting(self):
+        """回归（2026-10-14 实机三连误判）：读数来自点击派发帧或更早——召唤
+        动画未刷新按钮费用的旧值「未变化」不构成拒绝证据，不计数。
+
+        事故链：三批召唤全部落位（棋盘多出 2 只、开新格、费用 190→215），
+        但评估消费了点击前的缓存旧值 → 连计 3 次假判满 → 召唤出口锁死 →
+        干等保守退出。帧号新鲜度门让这类读数按缺失处理。
+        """
+        task = self._task()
+        task._arm_summon_cost_check(dict(self.GOLD), 5)
+        task._evaluate_summon_refusal(dict(self.GOLD, frame_id=5))
+        assert task._summon_refusal_count == 0
+        assert not task._summon_refusal_armed
         assert not task._summon_refusal_suppressed
 
     def test_cost_change_lifts_suppression(self):
@@ -6352,8 +6369,10 @@ class TestSummonRefusalSuppression:
         task = self._task()
         task._summon_refusal_suppressed = True
         task._summon_refusal_count = 3
-        task._arm_summon_cost_check(dict(self.GOLD))
-        task._evaluate_summon_refusal({"current": 10000, "summon_cost": 230, "summon_red": False})
+        task._arm_summon_cost_check(dict(self.GOLD), 1)
+        task._evaluate_summon_refusal(
+            {"current": 10000, "summon_cost": 230, "summon_red": False, "frame_id": 2}
+        )
         assert not task._summon_refusal_suppressed
         assert task._summon_refusal_count == 0
 
@@ -6374,7 +6393,7 @@ class TestSummonRefusalSuppression:
     def test_missing_cost_read_skips_without_counting(self):
         """读数缺失（OCR 空读/快照超龄）：跳过不计数也不复位。"""
         task = self._task()
-        task._arm_summon_cost_check(dict(self.GOLD))
+        task._arm_summon_cost_check(dict(self.GOLD), 1)
         task._evaluate_summon_refusal({"current": 10000, "summon_red": False})
         assert task._summon_refusal_count == 0
         assert not task._summon_refusal_armed
@@ -6385,14 +6404,16 @@ class TestSummonRefusalSuppression:
     def test_cap_cost_freezes_counter(self):
         """费用读数达封顶值：计数冻结（封顶后成功召唤费用也不变，信号无定义）。"""
         task = self._task()
-        gold_cap = {"current": 99999, "summon_cost": 660, "summon_red": False}
-        task._arm_summon_cost_check(dict(gold_cap))
+        gold_cap = {
+            "current": 99999, "summon_cost": 660, "summon_red": False, "frame_id": 2,
+        }
+        task._arm_summon_cost_check(dict(gold_cap), 1)
         task._evaluate_summon_refusal(dict(gold_cap))
         assert task._summon_refusal_count == 0
         assert not task._summon_refusal_suppressed
         # 已累计的计数在封顶段保持，不增不清
         task._summon_refusal_count = 2
-        task._arm_summon_cost_check(dict(gold_cap))
+        task._arm_summon_cost_check(dict(gold_cap), 1)
         task._evaluate_summon_refusal(dict(gold_cap))
         assert task._summon_refusal_count == 2
         assert not task._summon_refusal_suppressed
@@ -6433,9 +6454,87 @@ class TestSummonRefusalSuppression:
     def test_failed_summon_action_disarms(self):
         """召唤点击未发出（重试耗尽）：解除武装，不参与费用不变计数。"""
         task = self._task()
-        task._arm_summon_cost_check(dict(self.GOLD))
+        task._arm_summon_cost_check(dict(self.GOLD), 1)
         task.on_action_failed(Action(kind="click", tag="summon_hero", target=(1, 1)))
         assert not task._summon_refusal_armed
+
+    def test_suppressed_topup_with_space_merges_instead_of_wait(self):
+        """回归（2026-10-14 实机锁死）：判满期 + 回补阶段 + 有空位时放行合成。
+
+        「有空位先召唤」的前提随召唤出口停用失效；仍拦合成会让唯一的解除
+        路径（合成成功自动解除）也走不通——10-14 事故里 fox1★ 对被
+        topup_fill_first 拦了 18 帧，干等计满保守退出。放行后合成即自愈。
+        """
+        board = make_board(
+            [
+                make_hero("snow", star=1, pos=(100, 100)),
+                make_hero("snow", star=1, pos=(200, 200)),
+            ]
+        )
+        task = self._task(batch_enabled=True)
+        task._topup_active = True
+        task._summon_refusal_suppressed = True
+        decision = task.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag in {"merge_heroes", "batch_merge"}
+        # 对照：未判满时同局同盘仍走「有空位先召唤」
+        baseline = self._task(batch_enabled=True)
+        baseline._topup_active = True
+        decision = baseline.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
+
+    def test_suppressed_with_space_releases_main_c_pair_gate(self):
+        """回归（2026-10-25 实机×2）：判满期 + 有空位 + 仅主C对 → 放行合成。
+
+        保卫宠物两局都在 6/8、7/8 的假满盘上锁死：召唤出口被费用判据停用后，
+        策略层「有空位保主C数量」仍拦下 assault1★ 对，合成成功这条唯一
+        解锁路径够不着，干等计满保守退出。放行后判满帧直接拖主C对自愈。
+        """
+        board = make_board(
+            [
+                make_hero("assault", star=1, pos=(100, 100)),
+                make_hero("assault", star=1, pos=(200, 100)),
+                make_hero("fox", star=1, pos=(100, 200)),
+            ]
+        )
+        task = self._task()
+        task._topup_active = True
+        task._summon_refusal_suppressed = True
+        decision = task.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag in {"merge_heroes", "batch_merge"}
+        # 对照：未判满时同局同盘仍走「有空位先召唤」
+        baseline = self._task(batch_enabled=True)
+        baseline._topup_active = True
+        decision = baseline.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
+
+    def test_suppressed_with_space_releases_wildcard_pair_gate(self):
+        """回归（2026-10-25 实机）：判满期 + 有空位 + 幻天使通配对让位可合。
+
+        假满盘上仅剩的合法对常是幻天使对（strategy:665 日志逐帧刷屏），
+        与金币不足例外共用同一窄例外语义：召唤不可用时第 5 层空位保留失效。
+        """
+        board = make_board(
+            [
+                make_hero("angel_phantom", star=1, pos=(100, 100)),
+                make_hero("angel_phantom", star=1, pos=(200, 100)),
+                make_hero("fox", star=1, pos=(100, 200)),
+            ]
+        )
+        task = self._task()
+        task._topup_active = True
+        task._summon_refusal_suppressed = True
+        decision = task.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag in {"merge_heroes", "batch_merge"}
+        baseline = self._task(batch_enabled=True)
+        baseline._topup_active = True
+        decision = baseline.decide_action(self._obs(board, self.GOLD), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
 
     def test_round_reset_clears_refusal_state(self):
         """局间重置（结算/被踢共用）：判满状态与计数清零，不带入下一局。"""

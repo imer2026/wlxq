@@ -825,6 +825,7 @@ class Runner:
                     ctx,
                     n_frames=self.default_config.run.board_recognition_frames,
                     read_gold=task.wants_gold_read(),
+                    fresh_gold=task.wants_fresh_gold(),
                 )
                 logger.debug(
                     "frame=%d 多帧累积识别 heroes=%d",
@@ -839,6 +840,7 @@ class Runner:
                     task.observation_mode(),
                     read_gold=task.wants_gold_read(),
                     light=light_verify,
+                    fresh_gold=task.wants_fresh_gold(),
                 )
             observe_ms = (time.perf_counter() - observe_started) * 1000
             # 每帧耗时基线（与截图超龄告警同一口径）：定位慢环节用——
