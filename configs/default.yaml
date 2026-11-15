@@ -306,17 +306,20 @@ run:
   # 局内坐骑定时点击（2026-11-15 用户定案，合作猴子/合作强袭/保卫宠物三模式
   # 共用，经 _MATCH_STATES 公共路径生效）：选完开局技能（进入培养）后连续
   # absent_frames 帧未见「准备完成」（locator zhun_bei_wan_cheng）→ 锚定计时，
-  # 再等 start_delay_seconds 秒，每 click_interval_seconds 秒点一次 hotspot
-  # mount_ride，共 click_count 次。计数期间模板任何一帧命中即清零重数；全程
-  # 不命中退化为「选完技能即锚定」，功能不失效。弹窗/赠送页/技能页在场时
-  # 点击顺延不消耗预算（防误点卡片）；除爆发窗口内的占位等待外零等待零重试，
-  # 任何异常只记日志并本局禁用坐骑，绝不阻塞正常流程（用户硬性要求）。
-  # 触发与节奏属自动化策略，非游戏规则。
+  # 再等 start_delay_seconds 秒，每隔 click_interval_seconds 秒点一次 hotspot
+  # mount_ride，共 click_count 次。计数期间模板任何一帧命中即清零重数；
+  # 弹窗帧不计入也不打断（盲帧跳过，用户定案：只有重新识别到「准备完成」
+  # 才重新开始）；全程不命中退化为「选完技能即锚定」，功能不失效。
+  # click_interval_seconds 是相邻两击下限：
+  # 到期后第一个干净帧发击（主循环一圈 0.5~2 秒，实际间隔略大于下限），
+  # 两击之间正常流程零打扰。弹窗/赠送页/技能页在场时点击顺延不消耗预算
+  # （防误点卡片）；全调度零等待零重试，任何异常只记日志并本局禁用坐骑，
+  # 绝不阻塞正常流程（用户硬性要求）。触发与节奏属自动化策略，非游戏规则。
   mount_ride:
     enabled: true
     absent_frames: 4
     start_delay_seconds: 30.0
-    click_interval_seconds: 1.0
+    click_interval_seconds: 3.0
     click_count: 4
 
 main_c_profiles:

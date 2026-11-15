@@ -235,11 +235,12 @@ class CoopTask(Task):
         # 退队落点探测降级上限：等满仍无首页信箱/领地导航才按合作页处理
         self._entry_detect_timeout_seconds = max(1.0, entry_detect_timeout_seconds)
         # 坐骑定时点击（2026-11-15 用户定案，default.yaml run.mount_ride）：
-        # 选完开局技能后连续 absent_frames 帧未见「准备完成」→ 锚定计时，
-        # start_delay_seconds 后每 click_interval_seconds 点一次 mount_ride，
-        # 共 click_count 次。零等待零重试（爆发窗口占位除外），异常本局禁用，
-        # 绝不阻塞正常流程；参数运行时读 self._run_config.mount_ride，
-        # 以下状态字段按局在 _reset_for_home_reentry 清零
+        # 选完开局技能后连续 absent_frames 个「无弹窗且未命中」帧未见
+        # 「准备完成」→ 锚定计时，start_delay_seconds 后每隔
+        # click_interval_seconds（下限）点一次 mount_ride，共 click_count 次。
+        # 零等待零重试，异常本局禁用，绝不阻塞正常流程；参数运行时读
+        # self._run_config.mount_ride，以下状态字段按局在
+        # _reset_for_home_reentry 清零
         self._mount_armed = False  # 选完开局技能（进 BUILD）后开始计数
         self._mount_absent_streak = 0
         self._mount_ever_seen = False  # 锚定前是否命中过（判模板漂移）
@@ -5281,11 +5282,6 @@ class CoopTask(Task):
     # 坐骑定时点击（2026-11-15 用户定案，三模式共用，default.yaml run.mount_ride）
     # ------------------------------------------------------------------
 
-    # 爆发窗口内相邻两击之间的占位等待（秒）：把「每隔 click_interval_seconds
-    # 一击」的节奏钉在主循环上（合成帧一轮 1~2 秒会拉长间隔）。这是本功能
-    # 唯一的等待，窗口最长 click_count * click_interval_seconds 秒，点满即恢复
-    _MOUNT_PACE_WAIT_SECONDS = 0.2
-
     def _mount_ride_consult(
         self,
         observation: Observation,
@@ -5315,12 +5311,14 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         """坐骑定时点击调度器：主循环内到点即发的纯内存时间戳（不起线程）。
 
-        触发（2026-11-15 用户二次修订）：选完开局技能（SELECT_OPENING_SKILLS
-        → BUILD_MAIN_C 迁移点）后连续 ``absent_frames`` 帧未见「准备完成」→
-        锚定 t0；计数期间模板任何一帧命中即清零重数，不要求先确认在场。t0 +
-        ``start_delay_seconds`` 起每隔 ``click_interval_seconds`` 点击一次
-        hotspot ``mount_ride``，共 ``click_count`` 次，点满本局沉默。模板全程
-        未命中时退化为「选完技能即锚定」，功能不失效（打 WARNING 供漂移排查）。
+        触发（2026-11-15 用户三次修订）：选完开局技能（SELECT_OPENING_SKILLS
+        → BUILD_MAIN_C 迁移点）后连续 ``absent_frames`` 个「无弹窗且未命中」
+        帧未见「准备完成」→ 锚定 t0；计数期间模板任何一帧命中即清零重数，
+        弹窗帧不计入也不打断（盲帧跳过），不要求先确认在场。t0 +
+        ``start_delay_seconds`` 起每隔 ``click_interval_seconds``（相邻两击
+        下限）点击一次 hotspot ``mount_ride``，共 ``click_count`` 次，点满
+        本局沉默。模板全程未命中时退化为「选完技能即锚定」，功能不失效
+        （打 WARNING 供漂移排查）。
         """
         mount = self._run_config.mount_ride
         now = self._clock()
@@ -5333,8 +5331,13 @@ class CoopTask(Task):
             logger.info(
                 "坐骑监视开启：连续 %d 帧未见「准备完成」即开始计时", mount.absent_frames
             )
-        # 锚定：连续 absent_frames 帧模板不存在（期间命中即清零重数）
+        # 锚定：连续 absent_frames 个「无弹窗且未命中」帧（2026-11-15 用户
+        # 三次定案：弹窗帧不计入也不打断——弹窗帧对按钮区域是盲帧，跳过；
+        # 只有重新识别到「准备完成」才清零重数）
         if self._mount_ready_at is None:
+            if observation.flag("tan_chuang_visible"):
+                # 弹窗帧跳过：不计入缺席、不清零已累计的连续性
+                return None
             if observation.flag("zhun_bei_wan_cheng_visible"):
                 if self._mount_absent_streak:
                     logger.debug(
@@ -5381,19 +5384,10 @@ class CoopTask(Task):
         ):
             return None
         if now < (self._mount_next_click_at or 0.0):
-            if self._mount_clicks_done == 0:
-                # 首击前不打扰正常流程：30 秒等待期合成/选技能照常
-                return None
-            return (
-                Action(
-                    kind="wait",
-                    duration=self._MOUNT_PACE_WAIT_SECONDS,
-                    verification="immediate",
-                    tag="mount_ride_pace",
-                    reason="坐骑连点节奏等待（爆发窗口内）",
-                ),
-                state,
-            )
+            # 间隔下限未到（含首击前的 30 秒等待期）：完全不打扰正常流程，
+            # 两击之间合成/选技能照跑，零等待（2026-11-15 间隔改 3 秒定案：
+            # 到期后第一个干净帧发击，实际间隔 ≈下限+一个循环 0.5~2 秒）
+            return None
         point = self._hotspot_point("mount_ride", window_ctx)
         if point is None:
             # 窗口上下文缺失或 hotspot 未配置：本帧不发、不消耗预算，

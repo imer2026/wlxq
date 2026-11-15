@@ -6838,8 +6838,8 @@ class TestMountRide:
         assert to_state == State.BUILD_MAIN_C
         assert task._mount_clicks_done == 1
 
-    def test_burst_pacing_and_budget(self):
-        """爆发窗口：1 秒下限节奏、占位等待只出现在两击之间、4 击后沉默。"""
+    def test_burst_interval_lower_bound_and_budget(self):
+        """爆发窗口：3 秒下限、间隔未到时零打扰（不返回任何动作）、4 击后沉默。"""
         task, clock = make_mount_task()
         arm_mount_by_frames(task, clock)
         window_ctx = make_window_ctx()
@@ -6856,17 +6856,39 @@ class TestMountRide:
             assert action.target == expected_point
             assert task._mount_clicks_done == n
             if n < 4:
-                clock.advance(0.4)
-                paced = task._mount_ride_consult(
-                    mount_absent(20 + n), window_ctx, State.BUILD_MAIN_C
+                # 间隔未到：正常流程照跑（调度器返回 None，绝不返回等待动作）
+                clock.advance(1.0)
+                assert (
+                    task._mount_ride_consult(
+                        mount_absent(20 + n), window_ctx, State.BUILD_MAIN_C
+                    )
+                    is None
                 )
-                assert paced is not None
-                assert paced[0].kind == "wait"
-                assert paced[0].tag == "mount_ride_pace"
-                clock.advance(0.6)
+                clock.advance(2.0)
         # 点满后永久沉默
         clock.advance(5.0)
         assert task._mount_ride_consult(mount_absent(30), window_ctx, State.BUILD_MAIN_C) is None
+
+    def test_popup_frames_skipped_without_reset(self):
+        """弹窗帧不计入也不打断（2026-11-15 用户定案）：盲帧跳过，命中才重数。"""
+        task, clock = make_mount_task()
+        popup_frame = Observation(frame_id=99, raw_data={"tan_chuang_visible": True})
+        for i in range(2):
+            task._mount_ride_consult(mount_absent(i + 1), None, State.BUILD_MAIN_C)
+        assert task._mount_absent_streak == 2
+        # 弹窗帧：不 +1、不清零，连续性保留
+        task._mount_ride_consult(popup_frame, None, State.BUILD_MAIN_C)
+        assert task._mount_absent_streak == 2
+        assert task._mount_ready_at is None
+        # 对照：模板命中仍然清零重数（重新开始）
+        task._mount_ride_consult(mount_present(10), None, State.BUILD_MAIN_C)
+        assert task._mount_absent_streak == 0
+        # 弹窗关完/命中过后接着数：第 4 个「无弹窗且未命中」帧锚定
+        for i in range(3):
+            task._mount_ride_consult(mount_absent(20 + i), None, State.BUILD_MAIN_C)
+        assert task._mount_ready_at is None
+        task._mount_ride_consult(mount_absent(23), None, State.BUILD_MAIN_C)
+        assert task._mount_ready_at == clock.now
 
     def test_overlay_defers_without_consuming_budget(self):
         """技能页/赠送页在场时点击顺延、预算不消耗（防误点卡片）。"""

@@ -394,7 +394,7 @@ class TestModeProfile:
         assert mount.enabled is True
         assert mount.absent_frames == 4
         assert mount.start_delay_seconds == 30.0
-        assert mount.click_interval_seconds == 1.0
+        assert mount.click_interval_seconds == 3.0
         assert mount.click_count == 4
         assert RunConfig().mount_ride.enabled is False
 
