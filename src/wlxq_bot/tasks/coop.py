@@ -5282,6 +5282,18 @@ class CoopTask(Task):
     # 坐骑定时点击（2026-11-15 用户定案，三模式共用，default.yaml run.mount_ride）
     # ------------------------------------------------------------------
 
+    # 遮挡旗标集合：计数阶段=盲帧跳过（不计入缺席、不清零连续性——盖住
+    # 按钮区域的帧对"存在性"没有信息）；爆发阶段=点击顺延不消耗预算
+    # （防把坐骑点击落在页面上误选技能卡）。含主动点开的局内选技能页
+    # （用户确认同样算遮挡，2026-11-15）；flag() 对未计算旗标返回 False，
+    # 跨状态安全
+    _MOUNT_OVERLAY_FLAGS = (
+        "tan_chuang_visible",
+        "select_skill_button_visible",
+        "merge_gift_skill_page_visible",
+        "zeng_song_ji_neng_visible",
+    )
+
     def _mount_ride_consult(
         self,
         observation: Observation,
@@ -5312,9 +5324,10 @@ class CoopTask(Task):
         """坐骑定时点击调度器：主循环内到点即发的纯内存时间戳（不起线程）。
 
         触发（2026-11-15 用户三次修订）：选完开局技能（SELECT_OPENING_SKILLS
-        → BUILD_MAIN_C 迁移点）后连续 ``absent_frames`` 个「无弹窗且未命中」
+        → BUILD_MAIN_C 迁移点）后连续 ``absent_frames`` 个「无遮挡且未命中」
         帧未见「准备完成」→ 锚定 t0；计数期间模板任何一帧命中即清零重数，
-        弹窗帧不计入也不打断（盲帧跳过），不要求先确认在场。t0 +
+        弹窗/技能页/赠送页帧不计入也不打断（盲帧跳过，含主动点开的局内
+        选技能页），不要求先确认在场。t0 +
         ``start_delay_seconds`` 起每隔 ``click_interval_seconds``（相邻两击
         下限）点击一次 hotspot ``mount_ride``，共 ``click_count`` 次，点满
         本局沉默。模板全程未命中时退化为「选完技能即锚定」，功能不失效
@@ -5331,12 +5344,11 @@ class CoopTask(Task):
             logger.info(
                 "坐骑监视开启：连续 %d 帧未见「准备完成」即开始计时", mount.absent_frames
             )
-        # 锚定：连续 absent_frames 个「无弹窗且未命中」帧（2026-11-15 用户
-        # 三次定案：弹窗帧不计入也不打断——弹窗帧对按钮区域是盲帧，跳过；
-        # 只有重新识别到「准备完成」才清零重数）
+        # 锚定：连续 absent_frames 个「无遮挡且未命中」帧（2026-11-15 用户
+        # 三次定案：弹窗/技能页/赠送页帧不计入也不打断——盲帧跳过；只有
+        # 重新识别到「准备完成」才清零重数）
         if self._mount_ready_at is None:
-            if observation.flag("tan_chuang_visible"):
-                # 弹窗帧跳过：不计入缺席、不清零已累计的连续性
+            if any(observation.flag(name) for name in self._MOUNT_OVERLAY_FLAGS):
                 return None
             if observation.flag("zhun_bei_wan_cheng_visible"):
                 if self._mount_absent_streak:
@@ -5375,13 +5387,9 @@ class CoopTask(Task):
         # 爆发窗口：点满即永久沉默（本局不再锚定）
         if self._mount_clicks_done >= mount.click_count:
             return None
-        # 遮挡帧顺延：技能页/赠送页在场时点击会落在页面上（误选技能卡），
-        # 交给原流程处理，预算不消耗；击杀弹窗已在 decide_action 更高优先级处理
-        if (
-            observation.flag("select_skill_button_visible")
-            or observation.flag("merge_gift_skill_page_visible")
-            or observation.flag("zeng_song_ji_neng_visible")
-        ):
+        # 遮挡帧顺延：点击会落在页面/弹窗上（误选技能卡），交给原流程处理，
+        # 预算不消耗；击杀弹窗已在 decide_action 更高优先级处理
+        if any(observation.flag(name) for name in self._MOUNT_OVERLAY_FLAGS):
             return None
         if now < (self._mount_next_click_at or 0.0):
             # 间隔下限未到（含首击前的 30 秒等待期）：完全不打扰正常流程，

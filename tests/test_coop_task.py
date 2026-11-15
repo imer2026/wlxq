@@ -6869,21 +6869,29 @@ class TestMountRide:
         clock.advance(5.0)
         assert task._mount_ride_consult(mount_absent(30), window_ctx, State.BUILD_MAIN_C) is None
 
-    def test_popup_frames_skipped_without_reset(self):
-        """弹窗帧不计入也不打断（2026-11-15 用户定案）：盲帧跳过，命中才重数。"""
+    def test_overlay_frames_skipped_without_reset(self):
+        """弹窗/技能页/赠送页帧不计入也不打断（2026-11-15 用户定案）：盲帧跳过，命中才重数。"""
         task, clock = make_mount_task()
-        popup_frame = Observation(frame_id=99, raw_data={"tan_chuang_visible": True})
         for i in range(2):
             task._mount_ride_consult(mount_absent(i + 1), None, State.BUILD_MAIN_C)
         assert task._mount_absent_streak == 2
-        # 弹窗帧：不 +1、不清零，连续性保留
-        task._mount_ride_consult(popup_frame, None, State.BUILD_MAIN_C)
-        assert task._mount_absent_streak == 2
+        # 四种遮挡帧：不 +1、不清零，连续性保留
+        for n, extra in enumerate(
+            (
+                {"tan_chuang_visible": True},
+                {"select_skill_button_visible": True},
+                {"merge_gift_skill_page_visible": True},
+                {"zeng_song_ji_neng_visible": True},
+            )
+        ):
+            obs = Observation(frame_id=99 + n, raw_data=dict(extra))
+            task._mount_ride_consult(obs, None, State.BUILD_MAIN_C)
+            assert task._mount_absent_streak == 2, extra
         assert task._mount_ready_at is None
         # 对照：模板命中仍然清零重数（重新开始）
         task._mount_ride_consult(mount_present(10), None, State.BUILD_MAIN_C)
         assert task._mount_absent_streak == 0
-        # 弹窗关完/命中过后接着数：第 4 个「无弹窗且未命中」帧锚定
+        # 遮挡关完/命中过后接着数：第 4 个「无遮挡且未命中」帧锚定
         for i in range(3):
             task._mount_ride_consult(mount_absent(20 + i), None, State.BUILD_MAIN_C)
         assert task._mount_ready_at is None
