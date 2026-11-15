@@ -50,6 +50,55 @@ def test_predicts_hero_and_star(tmp_path) -> None:
     assert net.input.shape == (1, 3, 32, 32)
 
 
+def test_hero_type_alias_maps_variant_to_base(tmp_path) -> None:
+    """变体类别映射为本体（洛姬分身→洛姬）：class_name 保留原值供日志，
+    hero_type/star_level 走映射后的本体。"""
+    metadata = tmp_path / "hero_classifier.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "class_names": ["empty", "loki_phantom_star2", "loki_star1"],
+                "input_size": 32,
+                "confidence_threshold": 0.7,
+                "margin_threshold": 0.2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    net = _FakeNet(np.array([[0.0, 5.0, 1.0]], dtype=np.float32))
+    classifier = HeroCellClassifier(
+        tmp_path / "unused.onnx",
+        metadata,
+        net=net,
+        hero_type_alias={"loki_phantom": "loki"},
+    )
+
+    prediction = classifier.predict([np.zeros((20, 30, 3), dtype=np.uint8)])[0]
+
+    assert prediction.class_name == "loki_phantom_star2"
+    assert prediction.raw_class_name == "loki_phantom_star2"
+    assert prediction.hero_type == "loki"
+    assert prediction.star_level == 2
+
+
+def test_hero_type_alias_unknown_key_is_ignored(tmp_path) -> None:
+    """别名键不在模型类别空间时静默不生效（构造时打警告），不改变预测。"""
+    metadata = tmp_path / "hero_classifier.json"
+    _metadata(metadata)
+    net = _FakeNet(np.array([[0.0, 5.0, 1.0]], dtype=np.float32))
+    classifier = HeroCellClassifier(
+        tmp_path / "unused.onnx",
+        metadata,
+        net=net,
+        hero_type_alias={"phantom_typo": "loki"},
+    )
+
+    prediction = classifier.predict([np.zeros((20, 30, 3), dtype=np.uint8)])[0]
+
+    assert prediction.class_name == "assault_star2"
+    assert prediction.hero_type == "assault"
+
+
 def test_rejects_low_margin_prediction(tmp_path) -> None:
     metadata = tmp_path / "hero_classifier.json"
     _metadata(metadata)

@@ -11,6 +11,10 @@ from typing import Any
 import cv2
 import numpy as np
 
+from wlxq_bot.utils.log import get_logger
+
+logger = get_logger(__name__)
+
 _HERO_CLASS_RE = re.compile(r"^(?P<hero>[a-z0-9_]+)_star(?P<star>[1-4])$")
 
 
@@ -41,6 +45,7 @@ class HeroCellClassifier:
         net: Any | None = None,
         confidence_threshold: float | None = None,
         margin_threshold: float | None = None,
+        hero_type_alias: dict[str, str] | None = None,
     ) -> None:
         self._model_path = Path(model_path)
         self._metadata_path = metadata_path or self._model_path.with_suffix(".json")
@@ -77,6 +82,21 @@ class HeroCellClassifier:
                 raise FileNotFoundError(f"英雄格分类模型不存在: {self._model_path}")
             net = cv2.dnn.readNetFromONNX(str(self._model_path))
         self._net = net
+        # 识别结果的英雄类型别名（如 {loki_phantom: loki}：变体与本体对脚本
+        # 完全等价，识别层保留 class_name 原值供日志，hero_type 映射为本体）。
+        # 键不在本模型类别空间里的条目不生效——打警告防手滑写错字。
+        self._hero_type_alias = dict(hero_type_alias or {})
+        class_space_heroes = {
+            match.group("hero")
+            for name in self._class_names
+            if (match := _HERO_CLASS_RE.fullmatch(name)) is not None
+        }
+        unknown_alias_keys = sorted(set(self._hero_type_alias) - class_space_heroes)
+        if unknown_alias_keys:
+            logger.warning(
+                "hero_type_alias 含模型类别空间外的英雄键（不生效）: %s",
+                ", ".join(unknown_alias_keys),
+            )
 
     def predict(self, images: list[np.ndarray]) -> list[HeroCellPrediction]:
         """批量分类 BGR 格子图；空输入直接返回空列表。"""
@@ -129,6 +149,7 @@ class HeroCellClassifier:
             if match is None:  # metadata 在初始化阶段已经校验；保留防御式检查。
                 raise RuntimeError(f"无法解析英雄类别名称: {class_name}")
             hero_type = match.group("hero")
+            hero_type = self._hero_type_alias.get(hero_type, hero_type)
             star_level = int(match.group("star"))
         return HeroCellPrediction(
             class_name="unknown" if rejected else class_name,

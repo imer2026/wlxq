@@ -152,3 +152,21 @@ skills:
     description: 狐尾爱心提升至9颗
   - name: 职业控制
     description: 最高星控制英雄冷却缩短50%
+
+  洛姬:
+  - name: 命运时钟
+    description: 大招！每 40 秒最高星洛姬连接场上所有英雄，本次连接时间+5秒，被连接英雄伤害+60%攻速+60%
+  - name: 命运恩泽
+    description: 丝线额外提升 +50% 攻击、+50% 攻速
+  - name: 契约连接
+    description: 丝线优先扔给已相连英雄，丝线持续时间 +6 秒
+  - name: 诡计之神
+    description: 丝线额外再提升 +60% 攻击、+60% 攻速
+  - name: 屏障扩散
+    description: 获得屏障概率提升至 50%
+  - name: 幻身入局
+    description: 分身复制完成后立刻获得 1 层神佑屏障，屏障存在期间，该英雄攻击 +200%
+  - name: 神域羁绊
+    description: 拥有神佑屏障的雷神获得 100% 增伤
+  - name: 诡术赠礼
+    description: 神佑屏障给怪物挂印记：怪物受 60% 易伤，持续 6 秒，每发激光给 BOSS/精英额外叠 10% 易伤（上限 40%）

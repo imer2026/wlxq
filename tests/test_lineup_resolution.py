@@ -34,6 +34,18 @@ def test_runner_reads_global_lineup_only_inside_helper() -> None:
         "runner 出现了绕过 _lineup_others_for 的全局阵容读取，"
         "会让阵容分叉的主C拿到错误白名单: " + "; ".join(direct_reads)
     )
+    # 同样的守卫覆盖 lineup_variants（2026-11-15 档案级变体：猴子 loki_phantom、
+    # 强袭 angel_phantom，全局并集会让任一主C的启动类别校验互相炸）
+    variant_reads = [
+        line.strip()
+        for line in source
+        if "self.default_config.hero_classifier.lineup_variants" in line
+    ]
+    assert len(variant_reads) == 1, (
+        "runner 出现了绕过 _lineup_variants_for 的全局变体读取，"
+        "会让阵容分叉的主C拿到错误白名单: " + "; ".join(variant_reads)
+    )
+    assert "return profile_variants or" in variant_reads[0]
     assert "return profile_lineup or" in direct_reads[0]
 
 
@@ -51,7 +63,8 @@ def test_every_configured_model_covers_its_lineup() -> None:
             continue
         classifier = HeroCellClassifier(model_path)
         lineup = profile.lineup_others or cfg.hero_classifier.lineup_others
-        allowed = {mc, *lineup, *cfg.hero_classifier.lineup_variants}
+        variants = profile.lineup_variants or cfg.hero_classifier.lineup_variants
+        allowed = {mc, *lineup, *variants}
         missing = sorted(allowed - set(classifier.supported_heroes))
         assert not missing, f"主C {mc} 的模型 {model_path} 缺少阵容类别: {missing}"
         checked.append(mc)

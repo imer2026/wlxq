@@ -604,7 +604,7 @@ class TestWildcardMergeAndVariants:
         cfg = load_default_config(Path("configs/default.yaml"))
         assert cfg.hero_classifier.lineup_others == ["angel", "snow", "death_knight"]
         assert cfg.main_c_profiles["monkey"].lineup_others == [
-            "angel",
+            "loki",
             "fox",
             "death_knight",
         ]
@@ -616,6 +616,19 @@ class TestWildcardMergeAndVariants:
         # 未声明档案的 lineup_others 为空，语义 = 继承全局
         assert cfg.main_c_profiles["angel"].lineup_others == []
 
+    def test_repo_default_yaml_loki_lineup_swap(self) -> None:
+        """阵容分叉（monkey 11-15 天使→洛姬）：洛姬档案已注册、变体与别名
+        档案级隔离——猴子变体 loki_phantom、强袭仍 angel_phantom。"""
+        cfg = load_default_config(Path("configs/default.yaml"))
+        assert "loki" in cfg.main_c_profiles
+        assert cfg.main_c_profiles["loki"].display_name == "洛姬"
+        assert cfg.main_c_profiles["monkey"].lineup_variants == ["loki_phantom"]
+        assert cfg.main_c_profiles["monkey"].hero_type_alias == {"loki_phantom": "loki"}
+        # 强袭未声明变体/别名：继承全局（幻天使是通配赖子，须保持独立类型）
+        assert cfg.main_c_profiles["assault"].lineup_variants == []
+        assert cfg.main_c_profiles["assault"].hero_type_alias == {}
+        assert cfg.hero_classifier.lineup_variants == ["angel_phantom"]
+
     def test_main_c_profile_lineup_others_rejects_bad_identifier(self) -> None:
         from wlxq_bot.config import MainCProfile
 
@@ -626,8 +639,18 @@ class TestWildcardMergeAndVariants:
                 lineup_others=["9bad"],
             )
 
+    def test_main_c_profile_hero_type_alias_rejects_bad_identifier(self) -> None:
+        from wlxq_bot.config import MainCProfile
+
+        with pytest.raises(ValidationError, match="非法英雄标识"):
+            MainCProfile(
+                display_name="x",
+                hero_template_dir="h",
+                hero_type_alias={"9bad": "loki"},
+            )
+
     def test_runner_lineup_others_profile_overrides_global(self) -> None:
-        """runner 取阵容：档案显式声明优先，未声明继承全局。"""
+        """runner 取阵容/变体/别名：档案显式声明优先，未声明继承全局。"""
         from pathlib import Path
 
         from wlxq_bot.runner import Runner
@@ -635,6 +658,12 @@ class TestWildcardMergeAndVariants:
         cfg = load_default_config(Path("configs/default.yaml"))
         runner = Runner.__new__(Runner)
         runner.default_config = cfg
-        assert runner._lineup_others_for("monkey") == ["angel", "fox", "death_knight"]
+        assert runner._lineup_others_for("monkey") == ["loki", "fox", "death_knight"]
         assert runner._lineup_others_for("assault") == ["angel", "fox", "death_knight"]
         assert runner._lineup_others_for("angel") == ["angel", "snow", "death_knight"]
+        # 变体：猴子档案显式声明，强袭继承全局
+        assert runner._lineup_variants_for("monkey") == ["loki_phantom"]
+        assert runner._lineup_variants_for("assault") == ["angel_phantom"]
+        # 别名：仅猴子配置了分身等价
+        assert runner._hero_type_alias_for("monkey") == {"loki_phantom": "loki"}
+        assert runner._hero_type_alias_for("assault") == {}

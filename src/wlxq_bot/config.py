@@ -183,11 +183,43 @@ class MainCProfile(BaseModel):
     # 阵容相互独立，阵容分叉的号在档案里显式声明（如猴子号 2026-09-28 雪姬→狐狸）；
     # 空 = 继承全局 hero_classifier.lineup_others
     lineup_others: list[str] = Field(default_factory=list)
+    # 识别白名单的形态变体档案覆盖，与 hero_classifier.lineup_variants 同语义
+    # （放行变体类别进白名单与模型启动校验）。档案间变体不同（2026-11-15
+    # 天使→洛姬：猴子模型只认 loki_phantom、强袭模型只认 angel_phantom），
+    # 全局并集会让任一主C的启动校验被别的档案的变体炸掉，阵容分叉的号
+    # 显式声明；空 = 继承全局 hero_classifier.lineup_variants
+    lineup_variants: list[str] = Field(default_factory=list)
+    # 识别结果的英雄类型别名：键为模型类别里的英雄标识，值为下游等价本体。
+    # 适用于「变体与本体对脚本完全等价」的形态（2026-11-15 用户定案：洛姬
+    # 幻影分身只是长得不同，配对/保留数/门禁全按洛姬算）；与通配变体
+    # （幻天使=赖子，需保持独立类型做跨英雄配对）互斥，勿混用。
+    # 空 = 不做别名映射（原始类型直传）
+    hero_type_alias: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("lineup_others", mode="before")
     @classmethod
     def _validate_lineup_others(cls, value: Any) -> list[str]:
         return _parse_hero_identifier_list(value, "MainCProfile.lineup_others")
+
+    @field_validator("lineup_variants", mode="before")
+    @classmethod
+    def _validate_lineup_variants(cls, value: Any) -> list[str]:
+        return _parse_hero_identifier_list(value, "MainCProfile.lineup_variants")
+
+    @field_validator("hero_type_alias", mode="before")
+    @classmethod
+    def _validate_hero_type_alias(cls, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            raise ValueError("hero_type_alias 必须是 {变体: 本体} 映射")
+        result: dict[str, str] = {}
+        for variant, base in value.items():
+            variant_id = str(variant).strip()
+            base_id = str(base).strip()
+            for label, identifier in (("变体", variant_id), ("本体", base_id)):
+                if re.fullmatch(r"[a-z][a-z0-9_]*", identifier) is None:
+                    raise ValueError(f"hero_type_alias {label}含非法英雄标识: {identifier!r}")
+            result[variant_id] = base_id
+        return result
 
     @field_validator("star3_topup_after_hero", mode="before")
     @classmethod

@@ -430,11 +430,12 @@ main_c_profiles:
   monkey:
     display_name: 猴子
     hero_template_dir: heroes/monkey
-    # 正式模型（2026-09-28 阵容换血雪姬→狐狸后重训；12 类=empty/unavailable+
-    # monkey/angel/fox/death_knight/angel_phantom 各 star1/2，snow 已随阵容移除；
-    # validation=202609212119+狐狸局 202609282102 整局隔离 1305 张：总体 99.46%、
-    # fox 435 张全对、unavailable 94% 偏低系特效锁定格边界，运行时有落位护栏兜底）
-    hero_classifier_model: outputs/hero_classifier/monkey-v5/hero_classifier.onnx
+    # 正式模型（2026-11-15 阵容换血天使→洛姬后重训；12 类=empty/unavailable+
+    # monkey/fox/death_knight/loki/loki_phantom 各 star1/2，angel 系已随阵容移除；
+    # validation=洛姬局 202611141652+202611141657 整局 381 张 + 老局 202609212119/
+    # 202609282102 老类 1048 张：总体 99.65%、loki 四类全对、unavailable 95.4%
+    # 偏低系特效锁定格边界，运行时有落位护栏兜底）
+    hero_classifier_model: outputs/hero_classifier/monkey-v6/hero_classifier.onnx
     skill_icon_templates: []
     # ---- 邀请者打法（spec 2026-09-21-initiator-monkey-design.md）----
     # 主C门禁 1 星即达标；开局召唤 5 个后点「准备完成」，对局内每批 3 个召唤凑阵容
@@ -443,22 +444,31 @@ main_c_profiles:
     summon_batch_size: 3
     # 邀请者不合 3 星：产物星级 ≥3 的合并一律不做（棋盘占满也不做）
     forbid_star3_merge: true
-    # 保留数：天使/狐狸/猴子至少 1 个在场才可合并消耗；死骑 0（可自由合）
+    # 保留数：洛姬/狐狸/猴子至少 1 个在场才可合并消耗；死骑 0（可自由合）
     hero_keep_counts:
-      angel: 1
+      loki: 1
       fox: 1
       death_knight: 0
-    # 阵容门禁：天使 + 狐狸在场（猴子看星级门禁）才转纯选技能
-    # （2026-09-28 阵容换血：雪姬 → 狐狸）
-    required_lineup_heroes: [angel, fox]
-    # 幻天使是天使的形态（game-rules.md）：棋盘上有幻天使即算有天使
+    # 阵容门禁：洛姬 + 狐狸在场（猴子看星级门禁）才转纯选技能
+    # （2026-11-15 阵容换血：天使 → 洛姬）
+    required_lineup_heroes: [loki, fox]
+    # 洛姬幻影分身是洛姬的形态（2026-11-15 用户定案：纯视觉差异、脚本等同洛姬）：
+    # 棋盘上有幻影分身即算有洛姬
     lineup_variant_groups:
-      angel: [angel_phantom]
-    # 本号携带阵容（2026-09-28 阵容换血雪姬→狐狸）：覆盖全局 lineup_others，
+      loki: [loki_phantom]
+    # 本号携带阵容（2026-11-15 阵容换血天使→洛姬）：覆盖全局 lineup_others，
     # 识别白名单/模型类别启动校验/技能档位过滤均按本值
-    lineup_others: [angel, fox, death_knight]
+    lineup_others: [loki, fox, death_knight]
+    # 识别白名单变体（2026-11-15 档案覆盖全局 [angel_phantom]：猴子模型只认
+    # 洛姬分身，全局并集会让强袭/猴子的启动类别校验互相炸）
+    lineup_variants: [loki_phantom]
+    # 识别结果别名：分身与真身对脚本完全等价（2026-11-15 用户定案：只是长得
+    # 不同，配对/保留数/门禁全按洛姬算）。幻天使在强袭是通配赖子须保持独立
+    # 类型，所以别名只能档案级配置、不能全局
+    hero_type_alias:
+      loki_phantom: loki
     # 卡住时变身碰辅助：牺牲顺序死骑 → 狐狸（保留数 1 → 仅数量≥2 时可牺牲）；
-    # 天使/猴子永不在列
+    # 洛姬/猴子永不在列
     transform_sacrifice_order: [death_knight, fox]
     # 技能优先级（2026-09-23 用户定案）：只锁两档——天使大、狐狸大；
     # 其他技能随便选：第 8 档（猴子其他技能）与第 11 档（清单剩余技能）
@@ -466,18 +476,19 @@ main_c_profiles:
     # 三档模型（2026-09-25 定案）：天使大/狐狸大 + 其他（主C未列技能
     # 不优先，与其余技能同档随机）
     prefer_main_c_skills: false
-    # 技能优先级（2026-09-25 用户定案，2026-09-29 增第 8 档乱点天宫）：
+    # 技能优先级（2026-11-16 用户定案，2026-11-15 阵容换血天使→洛姬后重排；
+    # 幻身入局/神域羁绊不列=落剩余档：前者用户判没用，后者阵容无雷神）：
     # 1~8 档显式；未列出的技能全部落同一档随机（prefer_main_c_skills=false
     # 使主C未列技能也并入第 11 档）
     skill_priority:
-      1: [神圣契约]
-      2: [千狐魅影]
-      3: [圣羽加持]
-      4: [江海翻, 天地倾]
-      5: [称心如意]
-      6: [狐尾爱心, 九尾爱心, 职业控制]
-      7: [大闹天宫, 狐灵惑心]
-      8: [乱点天宫]
+      1: [江海翻, 天地倾]
+      2: [称心如意]
+      3: [狐尾爱心, 九尾爱心, 职业控制]
+      4: [千狐魅影]
+      5: [大闹天宫, 狐灵惑心]
+      6: [命运时钟, 屏障扩散, 诡计之神, 命运恩泽]
+      7: [契约连接]
+      8: [诡术赠礼, 乱点天宫]
 
   angel:
     display_name: 天使
@@ -503,10 +514,21 @@ main_c_profiles:
     hero_classifier_model: outputs/hero_classifier/fox-helper/hero_classifier.onnx
     skill_icon_templates: []
 
+  loki:
+    display_name: 洛姬
+    hero_template_dir: heroes/loki
+    # 占位路径（fox-helper 同款惯例）：洛姬只作为 lineup_others 成员出现，
+    # 识别用主C档案的模型（monkey 档案 → monkey-v6，类别已含 loki/loki_phantom）；
+    # 本字段仅在本档案作为主C启动时才会被加载，而那不该发生——模型文件
+    # 不存在可让「模型覆盖守卫测试」按占位档案跳过
+    hero_classifier_model: outputs/hero_classifier/loki-helper/hero_classifier.onnx
+    skill_icon_templates: []
+
 # 邀请者模式（run --invite）：组队等待/过滤/踢人循环参数
 invite:
-  # 帮助者关卡进度阈值：低于请离，不低于留下开局（2026-09-21 定 475，2026-09-25 调 375）
-  min_stage_progress: 475
+  # 帮助者关卡进度阈值：低于请离，不低于留下开局（2026-09-21 定 475，
+  # 2026-09-25 调 375，2026-11-16 调 550）
+  min_stage_progress: 550
   # 请离后等房间回空（邀请文字重现）的兜底秒数：回空立即回等待态继续检查
   # 进房 + 轻量邀请（60s 全量大轮回不因请离重置）；超时未回空才重走邀请链
   kick_cooldown_seconds: 60

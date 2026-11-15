@@ -315,7 +315,7 @@ class Runner:
             allowed_heroes={
                 mc,
                 *self._lineup_others_for(mc),
-                *self.default_config.hero_classifier.lineup_variants,
+                *self._lineup_variants_for(mc),
             },
             skill_collector=skill_collector,
             title_reader=title_reader,
@@ -1295,20 +1295,37 @@ class Runner:
         profile_lineup = self.default_config.main_c_profiles[main_c].lineup_others
         return profile_lineup or self.default_config.hero_classifier.lineup_others
 
+    def _lineup_variants_for(self, main_c: str) -> list[str]:
+        """本局识别白名单的形态变体：档案显式声明优先，否则回退全局配置。
+
+        与阵容同理，档案间变体不同（2026-11-15 猴子号天使→洛姬后猴子模型只认
+        loki_phantom、强袭模型只认 angel_phantom），全局并集会让任一主C的
+        启动类别校验被别的档案的变体炸掉。
+        """
+        profile_variants = self.default_config.main_c_profiles[main_c].lineup_variants
+        return profile_variants or self.default_config.hero_classifier.lineup_variants
+
+    def _hero_type_alias_for(self, main_c: str) -> dict[str, str]:
+        """本局识别结果的英雄类型别名（档案 hero_type_alias）。"""
+        return dict(self.default_config.main_c_profiles[main_c].hero_type_alias)
+
     def _load_hero_cell_classifier(self, main_c: str) -> HeroCellClassifier:
         """加载当前主 C 专用 ONNX 模型及其同名 metadata。"""
         model_path = Path(self.default_config.main_c_profiles[main_c].hero_classifier_model)
+        hero_type_alias = self._hero_type_alias_for(main_c)
         try:
-            classifier = HeroCellClassifier(model_path)
+            classifier = HeroCellClassifier(model_path, hero_type_alias=hero_type_alias)
         except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
             raise RuntimeError(f"英雄格分类模型加载失败: {exc}") from exc
         logger.info(
-            "已加载英雄格分类模型 main_c=%s model=%s classes=%d confidence=%.2f margin=%.2f",
+            "已加载英雄格分类模型 main_c=%s model=%s classes=%d confidence=%.2f "
+            "margin=%.2f hero_type_alias=%s",
             main_c,
             model_path,
             len(classifier.class_names),
             classifier.confidence_threshold,
             classifier.margin_threshold,
+            hero_type_alias or "{}",
         )
         return classifier
 
@@ -1351,13 +1368,13 @@ class Runner:
             allowed_heroes={
                 main_c,
                 *self._lineup_others_for(main_c),
-                *self.default_config.hero_classifier.lineup_variants,
+                *self._lineup_variants_for(main_c),
             },
         )
         required = {
             main_c,
             *self._lineup_others_for(main_c),
-            *self.default_config.hero_classifier.lineup_variants,
+            *self._lineup_variants_for(main_c),
         }
         missing = sorted(required - set(perception.available_heroes))
         if missing:
