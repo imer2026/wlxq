@@ -905,6 +905,7 @@ _FLAG_LOCATOR_FILES = {
     "close_button": "x.png",
     "invite_start_ready": "tiao_zhan_dui_you_zhun_bei.png",
     "invite_start_not_ready": "tiao_zhan_dui_you_wei_zhun_bei.png",
+    "zhun_bei_wan_cheng": "zhun_bei_wan_cheng.png",
 }
 
 
@@ -952,6 +953,40 @@ class TestInterfaceFlagGating:
         assert vision.template_calls == []
         assert raw == {}
 
+    def test_mount_ride_anchor_flag_gating(self, tmp_path):
+        """坐骑消失锚点（2026-11-15）：培养/选技能两状态识别，开局技能页不识别。"""
+        vision = _RecordingVision()
+        perception = _flag_gated_perception(tmp_path, vision)
+        ctx = _make_window_ctx()
+
+        # 培养与选技能状态都查询该模板，未命中时旗标为 False
+        for state in (State.BUILD_MAIN_C, State.SELECT_MAIN_C_SKILLS):
+            raw: dict = {}
+            perception._detect_interface_flags(ctx, None, state, raw, [])
+            assert raw.get("zhun_bei_wan_cheng_visible") is False
+
+        # 开局技能页阶段不识别（技能页盖住按钮的帧不参与坐骑计数）
+        fresh_vision = _RecordingVision()
+        fresh_perception = _flag_gated_perception(tmp_path, fresh_vision)
+        raw = {}
+        fresh_perception._detect_interface_flags(ctx, None, State.SELECT_OPENING_SKILLS, raw, [])
+        assert "zhun_bei_wan_cheng_visible" not in raw
+        assert "zhun_bei_wan_cheng.png" not in fresh_vision.template_calls
+
+        # 命中时旗标为 True 且匹配结果入 raw_data
+        hit_vision = _RecordingVision(
+            hits={
+                "zhun_bei_wan_cheng.png": MatchResult(
+                    "zhun_bei_wan_cheng.png", (600, 450), 0.93
+                )
+            }
+        )
+        perception_hit = _flag_gated_perception(tmp_path, hit_vision)
+        raw = {}
+        perception_hit._detect_interface_flags(ctx, None, State.BUILD_MAIN_C, raw, [])
+        assert raw.get("zhun_bei_wan_cheng_visible") is True
+        assert raw["zhun_bei_wan_cheng_match"].position == (600, 450)
+
     def test_grab_mode_matches_ready_and_close_buttons(self, tmp_path):
         """抢合作子步骤：额外查准备按钮和弹窗关闭按钮，其余标志仍不查。"""
         from wlxq_bot.models import State
@@ -993,12 +1028,14 @@ class TestInterfaceFlagGating:
                 "zhao_huan.png",
                 "tan_chuang.png",
                 "fan_hui.png",
+                "zhun_bei_wan_cheng.png",
             },
             State.SELECT_MAIN_C_SKILLS: {
                 "xuan_ze_ji_neng.png",
                 "4_xing_e_wai_ji_neng.png",
                 "tan_chuang.png",
                 "fan_hui.png",
+                "zhun_bei_wan_cheng.png",
             },
             State.HANDLE_RESULT: {"fan_hui.png"},
             State.CHECK_ROUND_LIMIT: {"fan_hui.png"},

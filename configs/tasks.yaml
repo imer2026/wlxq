@@ -213,6 +213,15 @@ hotspots:
     y_ratio: 0.2976
     description: 领地页进入合作/保卫宠物模式选择弹窗的按钮
 
+  # 局内坐骑按钮（2026-11-15 实机标定，927×1727 客户区，wlxq-bot pick，
+  # pixel (847, 947)）。坐骑定时点击的固定坐标目标：选完开局技能、连续
+  # 帧未见「准备完成」（locator zhun_bei_wan_cheng）锚定计时后，按
+  # default.yaml run.mount_ride 的节奏点击本位置（见 _mount_ride_action）
+  mount_ride:
+    x_ratio: 0.9137
+    y_ratio: 0.5483
+    description: 局内坐骑按钮（准备完成消失后定时连点）
+
 # 定位器配置
 # 每个定位器声明策略、ROI 和动作点来源
 # 坐标体系统一使用客户区比例（ratio），运行时按实际客户区尺寸换算为像素
@@ -441,6 +450,19 @@ locators:
     search_up_ratio: 0.093
     search_down_ratio: 0.015
 
+  # 局内「准备完成」按钮：坐骑定时点击的消失锚点（2026-11-15 实机采集）。
+  # 只判在场不点击——选完开局技能（进培养）后连续 N 帧未命中即锚定坐骑
+  # 计时（default.yaml run.mount_ride.absent_frames）。阈值 0.82 起步，
+  # 首轮实机开 debug 看得分回调；全程不命中时功能退化为「选完技能即锚定」，
+  # 不失效（见 _mount_ride_action）。
+  zhun_bei_wan_cheng:
+    strategy: template
+    template: buttons/zhun_bei_wan_cheng.png
+    threshold: 0.82
+    roi: zhun_bei_wan_cheng_area
+    action_point:
+      source: match_center
+
 # ROI 区域定义
 # 使用比例坐标（ratio），相对于客户区左上角
 # 运行时按实际客户区尺寸换算：pixel_x = x_ratio * client_width
@@ -533,6 +555,16 @@ rois:
     y_ratio: 0.7887
     width_ratio: 0.3506
     height_ratio: 0.0625
+
+  # 局内「准备完成」按钮识别区（2026-11-15 实机标定，wlxq-bot pick --rect）。
+  # 坐骑定时点击的消失锚点 locator zhun_bei_wan_cheng 的搜索区；区域覆盖
+  # 按钮整块并留余量，anim 抖动由「连续 N 帧未命中才锚定」吸收
+  zhun_bei_wan_cheng_area:
+    relative_to: client
+    x_ratio: 0.5674
+    y_ratio: 0.2583
+    width_ratio: 0.1953
+    height_ratio: 0.0643
 
   # 技能三候选区域，标定自 923×1723 客户区（wlxq-bot pick --rect）
   skill_candidates:

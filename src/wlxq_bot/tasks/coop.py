@@ -234,6 +234,20 @@ class CoopTask(Task):
         self._entry_wait_timeout_seconds = max(1.0, entry_wait_timeout_seconds)
         # 退队落点探测降级上限：等满仍无首页信箱/领地导航才按合作页处理
         self._entry_detect_timeout_seconds = max(1.0, entry_detect_timeout_seconds)
+        # 坐骑定时点击（2026-11-15 用户定案，default.yaml run.mount_ride）：
+        # 选完开局技能后连续 absent_frames 帧未见「准备完成」→ 锚定计时，
+        # start_delay_seconds 后每 click_interval_seconds 点一次 mount_ride，
+        # 共 click_count 次。零等待零重试（爆发窗口占位除外），异常本局禁用，
+        # 绝不阻塞正常流程；参数运行时读 self._run_config.mount_ride，
+        # 以下状态字段按局在 _reset_for_home_reentry 清零
+        self._mount_armed = False  # 选完开局技能（进 BUILD）后开始计数
+        self._mount_absent_streak = 0
+        self._mount_ever_seen = False  # 锚定前是否命中过（判模板漂移）
+        self._mount_ready_at: float | None = None  # t0（连续缺席锚定时刻）
+        self._mount_next_click_at: float | None = None  # 下次可点时刻
+        self._mount_clicks_done = 0
+        self._mount_disabled_for_round = False  # 异常兜底：本局禁用
+        self._mount_point_warned = False  # hotspot 缺失只警告一次
         # 领地入口确认步骤的重点预算：连续多帧未见标识时重点入口按钮，
         # 用尽仍不成功才保守停止（同难度弹窗打开确认的重点模式）
         self._entry_max_reclicks = max(0, entry_max_reclicks)
@@ -495,6 +509,13 @@ class CoopTask(Task):
                 )
                 if gift_action is not None:
                     return gift_action
+            # 坐骑定时点击（2026-11-15 用户定案）：排在弹窗/赠送页之后——
+            # 被弹窗打断时优先处理弹窗，坐骑顺延且不消耗预算。调度器内部
+            # try/except 兜底：任何异常记日志并本局禁用坐骑，该帧落回原
+            # 状态分支（用户硬性要求：绝不阻塞正常流程）
+            mount_action = self._mount_ride_consult(observation, window_ctx, state)
+            if mount_action is not None:
+                return mount_action
         # 结算阶段出现【双倍奖励】确认弹窗（多为结算瞬间误点「双倍奖励」触发，
         # 实机确认 2026-08-16）：优先点击取消回到正常结算，再继续点赞/领宝箱
         if state in _SETTLEMENT_STATES and observation.flag("double_reward_dialog_visible"):
@@ -5257,6 +5278,159 @@ class CoopTask(Task):
                 self._summon_retry_at = self._clock() + self._run_config.summon_retry_delay_seconds
 
     # ------------------------------------------------------------------
+    # 坐骑定时点击（2026-11-15 用户定案，三模式共用，default.yaml run.mount_ride）
+    # ------------------------------------------------------------------
+
+    # 爆发窗口内相邻两击之间的占位等待（秒）：把「每隔 click_interval_seconds
+    # 一击」的节奏钉在主循环上（合成帧一轮 1~2 秒会拉长间隔）。这是本功能
+    # 唯一的等待，窗口最长 click_count * click_interval_seconds 秒，点满即恢复
+    _MOUNT_PACE_WAIT_SECONDS = 0.2
+
+    def _mount_ride_consult(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+        state: State,
+    ) -> tuple[Action, State] | None:
+        """坐骑调度唯一入口：异常在此收口，任何情况下不影响原状态分支。"""
+        mount = self._run_config.mount_ride
+        if not mount.enabled or self._mount_disabled_for_round:
+            return None
+        try:
+            return self._mount_ride_action(observation, window_ctx, state)
+        except Exception:
+            # 用户硬性要求（2026-11-15）：坐骑任何异常都不阻塞正常流程——
+            # 记日志、本局禁用、该帧落回原状态分支，不停机不保守退出
+            self._mount_disabled_for_round = True
+            logger.exception(
+                "frame=%d 坐骑定时点击调度异常，本局禁用坐骑功能", observation.frame_id
+            )
+            return None
+
+    def _mount_ride_action(
+        self,
+        observation: Observation,
+        window_ctx: WindowContext | None,
+        state: State,
+    ) -> tuple[Action, State] | None:
+        """坐骑定时点击调度器：主循环内到点即发的纯内存时间戳（不起线程）。
+
+        触发（2026-11-15 用户二次修订）：选完开局技能（SELECT_OPENING_SKILLS
+        → BUILD_MAIN_C 迁移点）后连续 ``absent_frames`` 帧未见「准备完成」→
+        锚定 t0；计数期间模板任何一帧命中即清零重数，不要求先确认在场。t0 +
+        ``start_delay_seconds`` 起每隔 ``click_interval_seconds`` 点击一次
+        hotspot ``mount_ride``，共 ``click_count`` 次，点满本局沉默。模板全程
+        未命中时退化为「选完技能即锚定」，功能不失效（打 WARNING 供漂移排查）。
+        """
+        mount = self._run_config.mount_ride
+        now = self._clock()
+        # 门：选完开局技能（进培养）才开始计数；开局技能页阶段不参与，
+        # 从源头排除「技能页盖住按钮误判消失」
+        if not self._mount_armed:
+            if state is not State.BUILD_MAIN_C:
+                return None
+            self._mount_armed = True
+            logger.info(
+                "坐骑监视开启：连续 %d 帧未见「准备完成」即开始计时", mount.absent_frames
+            )
+        # 锚定：连续 absent_frames 帧模板不存在（期间命中即清零重数）
+        if self._mount_ready_at is None:
+            if observation.flag("zhun_bei_wan_cheng_visible"):
+                if self._mount_absent_streak:
+                    logger.debug(
+                        "frame=%d 坐骑监视：准备完成命中，缺席计数清零（曾连续 %d 帧）",
+                        observation.frame_id,
+                        self._mount_absent_streak,
+                    )
+                self._mount_absent_streak = 0
+                self._mount_ever_seen = True
+                return None
+            self._mount_absent_streak += 1
+            if self._mount_absent_streak < mount.absent_frames:
+                logger.debug(
+                    "frame=%d 坐骑监视：准备完成未命中，缺席=%d/%d",
+                    observation.frame_id,
+                    self._mount_absent_streak,
+                    mount.absent_frames,
+                )
+                return None
+            self._mount_ready_at = now
+            self._mount_next_click_at = now + mount.start_delay_seconds
+            if not self._mount_ever_seen:
+                logger.warning(
+                    "frame=%d 「准备完成」模板锚定前从未命中（模板漂移或皮肤差异？），"
+                    "坐骑计时按选完开局技能锚定",
+                    observation.frame_id,
+                )
+            logger.info(
+                "frame=%d 坐骑计时开始，%.0f 秒后连点坐骑 %d 次",
+                observation.frame_id,
+                mount.start_delay_seconds,
+                mount.click_count,
+            )
+            return None
+        # 爆发窗口：点满即永久沉默（本局不再锚定）
+        if self._mount_clicks_done >= mount.click_count:
+            return None
+        # 遮挡帧顺延：技能页/赠送页在场时点击会落在页面上（误选技能卡），
+        # 交给原流程处理，预算不消耗；击杀弹窗已在 decide_action 更高优先级处理
+        if (
+            observation.flag("select_skill_button_visible")
+            or observation.flag("merge_gift_skill_page_visible")
+            or observation.flag("zeng_song_ji_neng_visible")
+        ):
+            return None
+        if now < (self._mount_next_click_at or 0.0):
+            if self._mount_clicks_done == 0:
+                # 首击前不打扰正常流程：30 秒等待期合成/选技能照常
+                return None
+            return (
+                Action(
+                    kind="wait",
+                    duration=self._MOUNT_PACE_WAIT_SECONDS,
+                    verification="immediate",
+                    tag="mount_ride_pace",
+                    reason="坐骑连点节奏等待（爆发窗口内）",
+                ),
+                state,
+            )
+        point = self._hotspot_point("mount_ride", window_ctx)
+        if point is None:
+            # 窗口上下文缺失或 hotspot 未配置：本帧不发、不消耗预算，
+            # 下一帧自然重查（无重试计数，不阻塞原流程）
+            if not self._mount_point_warned and window_ctx is not None:
+                self._mount_point_warned = True
+                logger.warning(
+                    "frame=%d hotspot mount_ride 未配置，坐骑定时点击无法发出",
+                    observation.frame_id,
+                )
+            return None
+        self._mount_clicks_done += 1
+        self._mount_next_click_at = now + mount.click_interval_seconds
+        done = self._mount_clicks_done
+        logger.info(
+            "frame=%d 坐骑点击 %d/%d 客户区坐标=%s",
+            observation.frame_id,
+            done,
+            mount.click_count,
+            point,
+        )
+        if done >= mount.click_count:
+            logger.info("坐骑点击完成（%d/%d），本局坐骑动作结束", done, mount.click_count)
+        return (
+            Action(
+                kind="click",
+                target=point,
+                duration=0.08,
+                post_delay=0.2,
+                verification="immediate",
+                tag="mount_ride_click",
+                reason=f"坐骑定时点击 {done}/{mount.click_count}",
+            ),
+            state,
+        )
+
+    # ------------------------------------------------------------------
     # 辅助
     # ------------------------------------------------------------------
 
@@ -5336,6 +5510,17 @@ class CoopTask(Task):
         self._transform_used_count = 0
         self._transform_failed_targets.clear()
         self._clear_transform_state()
+        # 坐骑定时点击按局重置：锚点/预算/禁用标记不带入下一局
+        # （结算走 _reset_for_next_round、被踢走本函数与 reset_after_grab_kick，
+        # 三条路径全部经过此处）
+        self._mount_armed = False
+        self._mount_absent_streak = 0
+        self._mount_ever_seen = False
+        self._mount_ready_at = None
+        self._mount_next_click_at = None
+        self._mount_clicks_done = 0
+        self._mount_disabled_for_round = False
+        self._mount_point_warned = False
 
     def reset_after_grab_kick(self) -> None:
         """抢合作循环内被踢回首页（协调器 kicked_home）：清进度重走招募。

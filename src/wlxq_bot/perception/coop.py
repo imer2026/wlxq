@@ -104,6 +104,11 @@ _INTERFACE_FLAG_LOCATORS: tuple[tuple[str, str, str], ...] = (
     # 是否退房（槽位回空=邀请文字重现，正向信号）。INVITE_WAITING 的同名
     # 标志由 invite_waiting 观察模式的 _detect_invite_text 提供，不重复识别
     ("invite_button_label", "invite_text_visible", "invite_text_match"),
+    # 局内「准备完成」按钮：坐骑定时点击的消失锚点（2026-11-15）。选完开局
+    # 技能（进培养）后连续 N 帧未命中即锚定计时（消费者 CoopTask 的
+    # _mount_ride_action）；只判在场不点击。开局技能页阶段不识别——页面
+    # 盖住按钮的帧不参与计数，从源头排除「页面遮挡误判消失」
+    ("zhun_bei_wan_cheng", "zhun_bei_wan_cheng_visible", "zhun_bei_wan_cheng_match"),
 )
 
 # 各状态需要识别的全局界面标志。合作只能通过自己点击加入进入，游戏不会主动
@@ -146,6 +151,8 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
             "summon_button",
             "tan_chuang",
             "return_button",
+            # 坐骑定时点击的消失锚点（选完开局技能后开始计数，见 CoopTask）
+            "zhun_bei_wan_cheng",
         }
     ),
     State.SELECT_MAIN_C_SKILLS: frozenset(
@@ -159,6 +166,9 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
             # （2026-10-02 实机截图 02:03）：提示条不在本状态识别时，页面遮住
             # 【选技能】图会被误判"技能页已关闭"盲点按钮空转到局结束
             "merge_gift_skill_title",
+            # 坐骑定时点击的消失锚点（与 BUILD 同源，锚定可能发生在两状态
+            # 任意一个的帧上，见 CoopTask._mount_ride_action）
+            "zhun_bei_wan_cheng",
         }
     ),
     State.HANDLE_RESULT: frozenset({"return_button"}),

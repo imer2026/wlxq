@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from wlxq_bot.config import Hotspot, MainCProfile, ModeProfile, RoiConfig, RunConfig
+from wlxq_bot.config import (
+    Hotspot,
+    MainCProfile,
+    ModeProfile,
+    MountRideConfig,
+    RoiConfig,
+    RunConfig,
+)
 from wlxq_bot.models import (
     Action,
     BoardCapacity,
@@ -6697,3 +6704,251 @@ class TestSummonRefusalSuppression:
         assert not task._summon_refusal_armed
         assert task._summon_cost_baseline is None
         assert task._summon_full_wait_streak == 0
+
+
+# ---------------------------------------------------------------------------
+# 坐骑定时点击（2026-11-15 用户定案，default.yaml run.mount_ride）
+# ---------------------------------------------------------------------------
+
+
+class _MountFakeClock:
+    """坐骑调度假时钟：手动推进，测试锚定与爆发节奏。"""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def make_mount_task(**mount_kwargs) -> tuple[CoopTask, _MountFakeClock]:
+    """坐骑定时点击任务：默认参数开启，假时钟可控，mount_ride hotspot 已配置。"""
+    ctx = TaskContext(main_c="assault", max_rounds=10)
+    run_cfg = RunConfig(
+        max_rounds=10,
+        minimum_summon_count_before_skills=3,
+        initial_board_capacity=7,
+        target_star_level=2,
+        mount_ride=MountRideConfig(enabled=True, **mount_kwargs),
+    )
+    task = CoopTask(
+        ctx,
+        run_cfg,
+        CoopRole.HELPER,
+        {"mount_ride": Hotspot(x_ratio=0.9137, y_ratio=0.5483)},
+    )
+    clock = _MountFakeClock()
+    task._clock = clock
+    task.ctx.current_state = State.BUILD_MAIN_C
+    return task, clock
+
+
+def mount_absent(frame_id: int) -> Observation:
+    """无 zhun_bei_wan_cheng 旗标的观察 = 「准备完成」不存在。"""
+    return Observation(frame_id=frame_id)
+
+
+def mount_present(frame_id: int) -> Observation:
+    return Observation(
+        frame_id=frame_id, raw_data={"zhun_bei_wan_cheng_visible": True}
+    )
+
+
+def arm_mount_by_frames(task: CoopTask, clock: _MountFakeClock) -> None:
+    """走真实计数路径锚定：连续 4 帧缺席（默认 absent_frames=4）。"""
+    for i in range(4):
+        assert (
+            task._mount_ride_consult(mount_absent(i + 1), None, State.BUILD_MAIN_C)
+            is None
+        )
+    assert task._mount_ready_at is not None
+
+
+def preset_mount_due(task: CoopTask, clock: _MountFakeClock, ago: float = 1.0) -> None:
+    """直接置为「已锚定且已到期」，跳过计数路径（爆发窗口测试前置）。"""
+    task._mount_armed = True
+    task._mount_ready_at = clock.now - 30.0
+    task._mount_next_click_at = clock.now - ago
+
+
+class TestMountRide:
+    def test_disabled_by_default_no_state_change(self):
+        """默认配置（enabled=False）下调度器完全不参与，门不开。"""
+        task = make_task()
+        task.ctx.current_state = State.BUILD_MAIN_C
+        for i in range(10):
+            assert (
+                task._mount_ride_consult(mount_absent(i + 1), None, State.BUILD_MAIN_C)
+                is None
+            )
+        assert task._mount_armed is False
+
+    def test_arms_only_after_build_state(self):
+        """开局技能页阶段不计数；进入培养（选完开局技能）才开门。"""
+        task, _clock = make_mount_task()
+        for i in range(10):
+            assert (
+                task._mount_ride_consult(
+                    mount_absent(i + 1), None, State.SELECT_OPENING_SKILLS
+                )
+                is None
+            )
+        assert task._mount_armed is False
+        assert task._mount_ride_consult(mount_absent(11), None, State.BUILD_MAIN_C) is None
+        assert task._mount_armed is True
+
+    def test_absent_streak_resets_on_hit(self):
+        """连续缺席被命中打断后重数（「连续」的本义）。"""
+        task, clock = make_mount_task()
+        for i in range(3):
+            task._mount_ride_consult(mount_absent(i + 1), None, State.BUILD_MAIN_C)
+        assert task._mount_ready_at is None
+        assert task._mount_absent_streak == 3
+        task._mount_ride_consult(mount_present(4), None, State.BUILD_MAIN_C)
+        assert task._mount_absent_streak == 0
+        assert task._mount_ever_seen is True
+        for i in range(3):
+            task._mount_ride_consult(mount_absent(5 + i), None, State.BUILD_MAIN_C)
+        assert task._mount_ready_at is None
+        task._mount_ride_consult(mount_absent(8), None, State.BUILD_MAIN_C)
+        assert task._mount_ready_at == clock.now
+
+    def test_degraded_anchor_without_template_hit(self):
+        """模板全程不命中：4 帧后照样锚定（退化=选完技能即锚定），标记漂移。"""
+        task, clock = make_mount_task()
+        arm_mount_by_frames(task, clock)
+        assert task._mount_ever_seen is False
+
+    def test_first_click_after_start_delay(self):
+        """锚定后 30 秒内不打扰正常流程（返回 None），到期即发首击。"""
+        task, clock = make_mount_task()
+        arm_mount_by_frames(task, clock)
+        clock.advance(29.9)
+        assert task._mount_ride_consult(mount_absent(5), None, State.BUILD_MAIN_C) is None
+        assert task._mount_clicks_done == 0
+        clock.advance(0.2)
+        result = task._mount_ride_consult(mount_absent(6), make_window_ctx(), State.BUILD_MAIN_C)
+        assert result is not None
+        action, to_state = result
+        assert action.kind == "click"
+        assert action.tag == "mount_ride_click"
+        assert to_state == State.BUILD_MAIN_C
+        assert task._mount_clicks_done == 1
+
+    def test_burst_pacing_and_budget(self):
+        """爆发窗口：1 秒下限节奏、占位等待只出现在两击之间、4 击后沉默。"""
+        task, clock = make_mount_task()
+        arm_mount_by_frames(task, clock)
+        window_ctx = make_window_ctx()
+        expected_point = task._hotspot_point("mount_ride", window_ctx)
+        clock.advance(30.0)
+        for n in range(1, 5):
+            result = task._mount_ride_consult(
+                mount_absent(10 + n), window_ctx, State.BUILD_MAIN_C
+            )
+            assert result is not None
+            action, _ = result
+            assert action.kind == "click"
+            assert action.tag == "mount_ride_click"
+            assert action.target == expected_point
+            assert task._mount_clicks_done == n
+            if n < 4:
+                clock.advance(0.4)
+                paced = task._mount_ride_consult(
+                    mount_absent(20 + n), window_ctx, State.BUILD_MAIN_C
+                )
+                assert paced is not None
+                assert paced[0].kind == "wait"
+                assert paced[0].tag == "mount_ride_pace"
+                clock.advance(0.6)
+        # 点满后永久沉默
+        clock.advance(5.0)
+        assert task._mount_ride_consult(mount_absent(30), window_ctx, State.BUILD_MAIN_C) is None
+
+    def test_overlay_defers_without_consuming_budget(self):
+        """技能页/赠送页在场时点击顺延、预算不消耗（防误点卡片）。"""
+        task, clock = make_mount_task()
+        preset_mount_due(task, clock)
+        window_ctx = make_window_ctx()
+        overlays = [
+            {"select_skill_button_visible": True},
+            {"merge_gift_skill_page_visible": True},
+            {"zeng_song_ji_neng_visible": True},
+        ]
+        for i, extra in enumerate(overlays):
+            obs = Observation(frame_id=100 + i, raw_data=dict(extra))
+            assert task._mount_ride_consult(obs, window_ctx, State.BUILD_MAIN_C) is None
+        assert task._mount_clicks_done == 0
+        result = task._mount_ride_consult(mount_absent(200), window_ctx, State.BUILD_MAIN_C)
+        assert result is not None
+        assert result[0].tag == "mount_ride_click"
+
+    def test_popup_preempts_due_mount_click(self):
+        """被弹窗打断：击杀奖励弹窗优先关闭，坐骑不发点击。"""
+        task, clock = make_mount_task()
+        preset_mount_due(task, clock)
+        match = MatchResult("buttons/tan_chuang.png", (400, 1100), 0.9)
+        obs = Observation(
+            frame_id=1,
+            raw_data={"tan_chuang_visible": True, "tan_chuang_match": match},
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "close_popup"
+        assert task._mount_clicks_done == 0
+
+    def test_decide_returns_mount_click_when_due(self):
+        """decide_action 分支插在原状态逻辑之前：到期帧干净即发坐骑点击。"""
+        task, clock = make_mount_task()
+        preset_mount_due(task, clock)
+        decision = task.decide_action(mount_absent(1), make_window_ctx())
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "mount_ride_click"
+        assert to_state == State.BUILD_MAIN_C
+
+    def test_exception_disables_for_round_only(self):
+        """调度异常：ERROR 后本局禁用坐骑，该帧起原流程完全接管。"""
+        task, clock = make_mount_task()
+        preset_mount_due(task, clock)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("hotspot 换算爆炸")
+
+        task._hotspot_point = _boom
+        window_ctx = make_window_ctx()
+        assert task._mount_ride_consult(mount_absent(1), window_ctx, State.BUILD_MAIN_C) is None
+        assert task._mount_disabled_for_round is True
+        assert task._mount_ride_consult(mount_absent(2), window_ctx, State.BUILD_MAIN_C) is None
+
+    def test_round_reset_clears_mount_state(self):
+        """局间重置（结算/被踢共用路径）：锚点与预算不带入下一局。"""
+        task, _clock = make_mount_task()
+        task._mount_armed = True
+        task._mount_absent_streak = 2
+        task._mount_ever_seen = True
+        task._mount_ready_at = 123.0
+        task._mount_next_click_at = 456.0
+        task._mount_clicks_done = 2
+        task._mount_disabled_for_round = True
+        task._reset_for_home_reentry()
+        assert task._mount_armed is False
+        assert task._mount_absent_streak == 0
+        assert task._mount_ever_seen is False
+        assert task._mount_ready_at is None
+        assert task._mount_next_click_at is None
+        assert task._mount_clicks_done == 0
+        assert task._mount_disabled_for_round is False
+
+    def test_missing_hotspot_preserves_budget(self):
+        """hotspot 未配置：不发点击不消耗预算，原流程照常（只警告一次）。"""
+        task, clock = make_mount_task()
+        del task._hotspots["mount_ride"]
+        preset_mount_due(task, clock)
+        window_ctx = make_window_ctx()
+        assert task._mount_ride_consult(mount_absent(1), window_ctx, State.BUILD_MAIN_C) is None
+        assert task._mount_clicks_done == 0
+        assert task._mount_point_warned is True

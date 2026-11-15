@@ -303,6 +303,30 @@ class SkillCollectionConfig(BaseModel):
     min_icon_confidence: float = Field(default=0.70, ge=0.0, le=1.0)
 
 
+class MountRideConfig(BaseModel):
+    """局内坐骑定时点击（2026-11-15 用户定案，三模式共用）。
+
+    选完开局技能（进入培养）后连续 ``absent_frames`` 帧未见「准备完成」
+    （locator ``zhun_bei_wan_cheng``，ROI ``zhun_bei_wan_cheng_area``）即锚定
+    计时起点；再等 ``start_delay_seconds`` 秒，每 ``click_interval_seconds``
+    秒点击一次 hotspot ``mount_ride``，共 ``click_count`` 次。计数期间模板
+    任何一帧命中即清零重数；模板全程未命中时退化为「选完技能即锚定」，
+    功能不失效。弹窗/赠送页/技能页在场时点击顺延且不消耗预算；整个调度
+    零等待零重试（爆发窗口内的占位等待除外），任何异常只记日志并本局
+    禁用坐骑，绝不阻塞正常对局流程。
+    """
+
+    enabled: bool = False
+    # 锚定所需的连续「准备完成不存在」帧数（选完开局技能后起数）
+    absent_frames: int = Field(default=4, ge=1, le=20)
+    # 锚定后到第一击的延时（秒）
+    start_delay_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
+    # 相邻两击的最小间隔（秒）
+    click_interval_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
+    # 爆发窗口内总点击次数
+    click_count: int = Field(default=4, ge=1, le=20)
+
+
 class RunConfig(BaseModel):
     max_rounds: int = 20
     # Runner 的单局最终保险。每当返回验证成功、round_count 增加时重置，
@@ -535,6 +559,8 @@ class RunConfig(BaseModel):
     error_restart_max_consecutive: int = Field(default=3, ge=1, le=50)
     # 技能卡自动采集（统计阶段）：默认关闭，见 SkillCollectionConfig
     skill_collection: SkillCollectionConfig = Field(default_factory=SkillCollectionConfig)
+    # 局内坐骑定时点击：默认关闭，见 MountRideConfig（configs/default.yaml 显式开启）
+    mount_ride: MountRideConfig = Field(default_factory=MountRideConfig)
 
     @field_validator("coop_difficulties", mode="before")
     @classmethod

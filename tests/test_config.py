@@ -384,6 +384,20 @@ class TestModeProfile:
         assert cfg.mode_profiles["pet"].entry.difficulty.kind == "ocr"
         assert cfg.mode_profiles["pet"].main_c_overrides["assault"]["skill_selection_cap"] == 0
 
+    def test_repo_default_yaml_mount_ride_enabled(self) -> None:
+        """仓库自带 default.yaml 显式开启坐骑定时点击（三模式共用，2026-11-15）。
+
+        代码级默认关闭：未配置该段时调度器完全不参与对局决策，老配置不受影响。
+        """
+        cfg = load_default_config(Path("configs/default.yaml"))
+        mount = cfg.run.mount_ride
+        assert mount.enabled is True
+        assert mount.absent_frames == 4
+        assert mount.start_delay_seconds == 30.0
+        assert mount.click_interval_seconds == 1.0
+        assert mount.click_count == 4
+        assert RunConfig().mount_ride.enabled is False
+
     def test_repo_default_yaml_entry_profiles_define_territory_entry(self) -> None:
         """两个模式档案的领地入口字段齐备（卡片文字 + 挑战页锚点）。"""
         from pathlib import Path
