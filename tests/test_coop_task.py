@@ -1434,7 +1434,41 @@ class TestOtherStates:
         assert follow[0].tag == "open_territory"
 
     def test_leave_team_entry_detect_falls_back_to_coop_page(self):
-        """退队后未识别到首页标志：按合作页面处理，从合作页面聊天进入。"""
+        """退队后无首页/领地信号：先复识，等满探测上限才按合作页面处理。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task.on_action_verified(
+            Action(kind="click", tag="leave_team", target=(1, 1)),
+            State.FIND_COOP,
+        )
+        task._entry_wait_started_at = 0.0
+        task._clock = lambda: 1.0
+
+        # 未超时：不急于判合作页，等待下一帧复识（OCR 抖动容错）
+        detect = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        assert detect is not None
+        assert detect[0].tag == "entry_page_detected"
+        task.on_action_verified(*detect)
+        pending = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert pending is not None
+        assert pending[0].tag == "entry_page_detected"
+
+        # 等满探测上限仍无信号：降级按合作页面处理，从合作页面聊天进入
+        task._clock = lambda: 6.0
+        degrade = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert degrade is not None
+        assert degrade[0].tag == "entry_page_detected"
+        task.on_action_verified(*degrade)
+        follow = task.decide_action(Observation(frame_id=4), make_window_ctx())
+        assert follow is not None
+        assert follow[0].tag == "open_coop_chat"
+
+    def test_leave_team_entry_detect_territory_page(self):
+        """退队落在领地页（2026-10-30/11-01 两次实机）：读到导航「返回」走领地入口。
+
+        回归用例：此前「非首页即合作页」的探测把领地页误判成合作页，
+        点空聊天入口后卡重点循环。
+        """
         task = make_task()
         task.ctx.current_state = State.FIND_COOP
         task.on_action_verified(
@@ -1442,13 +1476,50 @@ class TestOtherStates:
             State.FIND_COOP,
         )
 
-        detect = task.decide_action(Observation(frame_id=1), make_window_ctx())
+        # 退队后第一帧：无首页信箱，但导航读到「返回」=已在领地页
+        detect = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
         assert detect is not None
         assert detect[0].tag == "entry_page_detected"
         task.on_action_verified(*detect)
-        follow = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        # 领地入口第一步：仍在领地页 → 跳过点领地，直进模式选择弹窗步骤
+        follow = task.decide_action(
+            Observation(frame_id=2, raw_data={"territory_nav_text": "返回"}),
+            make_window_ctx(),
+        )
         assert follow is not None
-        assert follow[0].tag == "open_coop_chat"
+        assert follow[0].tag == "territory_open_confirmed"
+        task.on_action_verified(*follow)
+        # 模式选择弹窗步骤：点「合作模式」入口
+        advance = task.decide_action(Observation(frame_id=3), make_window_ctx())
+        assert advance is not None
+        assert advance[0].tag == "open_mode_select"
+
+    def test_leave_team_entry_detect_home_nav_text(self):
+        """退队落在首页（导航读「领地」而非信箱命中）：同样走领地入口。"""
+        task = make_task()
+        task.ctx.current_state = State.FIND_COOP
+        task.on_action_verified(
+            Action(kind="click", tag="leave_team", target=(1, 1)),
+            State.FIND_COOP,
+        )
+
+        detect = task.decide_action(
+            Observation(frame_id=1, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert detect is not None
+        assert detect[0].tag == "entry_page_detected"
+        task.on_action_verified(*detect)
+        # 领地入口第一步：读「领地」=未进领地页，点底部导航领地格
+        follow = task.decide_action(
+            Observation(frame_id=2, raw_data={"territory_nav_text": "领地"}),
+            make_window_ctx(),
+        )
+        assert follow is not None
+        assert follow[0].tag == "open_territory"
 
     def test_lobby_wait_before_leave_timeout(self):
         """房主未开始的等待期内（未超时）：只等待，不点退队。"""
@@ -4200,6 +4271,82 @@ class TestModeProfileDispatch:
         action, _ = decision
         assert action.tag == "return_result"
         assert action.save_frame_before is True
+
+    def test_return_auto_skipped_when_settlement_page_closed(self):
+        """结算页被游戏自动关闭（2026-11-05/06 实机）：读到挑战页锚点即视同
+        返回完成，局数+1 并从模式聊天入口开下一局，不再等返回按钮。"""
+        task = make_task(
+            max_rounds=2,
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(),
+        )
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        action, to_state = decision
+        assert action.tag == "return_auto_skipped"
+        assert action.kind == "wait"
+        assert to_state == State.FIND_COOP
+
+        # 视同返回完成：局数+1，下一局从模式聊天进入
+        task.on_action_verified(action, to_state)
+        assert task.ctx.round_count == 1
+        task.ctx.current_state = to_state
+        chat = task.decide_action(Observation(frame_id=2), make_window_ctx())
+        assert chat is not None
+        assert chat[0].tag == "open_coop_chat"
+
+    def test_return_button_wins_over_challenge_anchor(self):
+        """返回按钮与挑战锚点同帧可见时优先点返回（结算页在场）。"""
+        task = make_task(
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(),
+        )
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+        match = MatchResult("buttons/fan_hui.png", (500, 1000), 0.9)
+
+        decision = task.decide_action(
+            Observation(
+                frame_id=1,
+                raw_data={
+                    "return_button_visible": True,
+                    "return_button_match": match,
+                    "challenge_text": "开始挑战",
+                },
+            ),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "return_result"
+        assert decision[0].target == (500, 1000)
+
+    def test_return_auto_skipped_completes_on_last_round(self):
+        """自动返回兜底命中最后一局：视同完成后进入 COMPLETED。"""
+        task = make_task(max_rounds=1, mode_profile=make_mode_profile())
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+
+        decision = task.decide_action(
+            Observation(frame_id=1, raw_data={"challenge_text": "开始挑战"}),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].tag == "return_auto_skipped"
+        assert decision[1] == State.COMPLETED
+
+    def test_check_round_limit_requests_challenge_page_mode(self):
+        """结算返回步骤的观察模式：须在 recruit_step 遗留值之前命中。"""
+        task = make_task(
+            hotspots=self._spots_with_tabs(),
+            mode_profile=make_mode_profile(),
+        )
+        task.ctx.current_state = State.CHECK_ROUND_LIMIT
+        # 结算态携带局内遗留的入口步骤值（如模式选择弹窗步骤），不得误命中
+        task._recruit_step = _RecruitStep.SELECT_MODE_CARD
+        assert task.observation_mode() == "challenge_page"
 
     def test_pet_mode_uses_pet_chat_hotspot(self):
         task = make_task(

@@ -420,6 +420,11 @@ class Runner:
                     "entry_wait_timeout_seconds", 60.0
                 )
             ),
+            entry_detect_timeout_seconds=float(
+                self.tasks_config.mode_select_recognition.get(
+                    "entry_detect_timeout_seconds", 5.0
+                )
+            ),
             entry_max_reclicks=int(
                 self.tasks_config.mode_select_recognition.get("entry_max_reclicks", 3)
             ),

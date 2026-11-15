@@ -1893,6 +1893,22 @@ class TestTerritoryEntryDetection:
         assert observation.raw_data["territory_nav_text"] == "开始挑战"
         assert observation.raw_data["challenge_text"] == "开始挑战"
 
+    def test_home_page_mode_reads_territory_nav_for_leave_detect(self, tmp_path):
+        """退队落点三分类（2026-10-30/11-01 实机确认退队落点=领地页）：
+        home_page 探测模式同帧写领地导航文字——领地页没有首页信箱，
+        任务层靠导航「返回/领地」区分领地页与合作页面。"""
+        perception = _build_entry_perception(
+            tmp_path, _FakeRowsReader([("返回", 0.8, (10, 20))])
+        )
+        observation = perception.observe(
+            _make_window_ctx(),
+            _frame(),
+            observation_mode="home_page",
+        )
+        # FakeVision 无模板命中：无首页信箱；但导航文字同帧写出
+        assert observation.raw_data["home_page_visible"] is False
+        assert observation.raw_data["territory_nav_text"] == "返回"
+
     def test_mode_select_title_uses_substring_match(self, tmp_path):
         """标题装饰星星读作「模式选择·」也应命中：必须子串匹配而非全等。"""
         perception = _build_entry_perception(

@@ -755,7 +755,7 @@ class TasksConfig(BaseModel):
     # 招募页模式页签行 OCR 识别配置（candidate_roi + min_confidence + miss_limit）
     mode_tab_recognition: dict[str, Any] = Field(default_factory=dict)
     # 「模式选择」弹窗 OCR 识别配置（title_roi/title_text + min_confidence +
-    # entry_wait_timeout_seconds），领地入口共用
+    # entry_wait_timeout_seconds + entry_detect_timeout_seconds），领地入口共用
     mode_select_recognition: dict[str, Any] = Field(default_factory=dict)
     # 技能卡采集（统计阶段）的几何参数：比例相对 rois.skill_candidates 裁剪结果
     skill_collection: dict[str, Any] = Field(default_factory=dict)

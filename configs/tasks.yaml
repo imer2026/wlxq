@@ -777,7 +777,10 @@ mode_tab_recognition:
 # 是聊天点击生效确认（挑战页锚点消失）的重点预算：点击被道具卡等弹窗
 # 吃掉、页面未切换时重点聊天按钮（重点会顺带关掉挡路弹窗），整个确认
 # 步骤共用一个 entry_wait_timeout_seconds 上限，用尽仍停留在挑战页才
-# 保守停止（2026-09-16 实机：结算返回后金币说明卡盖住聊天按钮）
+# 保守停止（2026-09-16 实机：结算返回后金币说明卡盖住聊天按钮）；
+# entry_detect_timeout_seconds 是退队落点探测的降级上限：退队后等满仍
+# 无首页信箱/领地导航文字才按合作页面处理（2026-10-30 实机确认退队
+# 落点=领地页，领地页没有信箱，立即判合作页会点空聊天入口）
 mode_select_recognition:
   title_roi: mode_select_title_area
   title_text: 模式选择
@@ -787,6 +790,7 @@ mode_select_recognition:
   pet_text: 保卫
   min_confidence: 0.5
   entry_wait_timeout_seconds: 60
+  entry_detect_timeout_seconds: 5
   entry_max_reclicks: 3
   chat_open_max_reclicks: 10
 

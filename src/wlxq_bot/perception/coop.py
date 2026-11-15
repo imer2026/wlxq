@@ -316,8 +316,10 @@ class CoopPerception:
         raw_data: dict[str, Any] = {}
         matches: list = []
 
-        # 合作任务首次动作前必须正向识别首页。仅在首页门禁步骤匹配，
-        # 避免后续高频循环持续消耗模板识别时间。
+        # 退队落点探测：正向识别首页标志（信箱按钮只在首页出现），并同帧
+        # OCR 底部导航领地格文字区分领地页（2026-10-30/11-01 两次实机确认
+        # 退队落点=领地页，领地页没有信箱）。仅在探测步骤匹配，避免高频
+        # 循环持续消耗模板识别时间。
         if observation_mode == "home_page":
             locator = self._cfg.locators.get("home_page_marker")
             home_match = self._match_locator_template(ctx, frame, locator) if locator else None
@@ -325,6 +327,7 @@ class CoopPerception:
             if home_match is not None:
                 matches.append(home_match)
                 raw_data["home_page_match"] = home_match
+            self._detect_territory_nav_text(ctx, frame, raw_data)
 
         # 1. 界面标志识别（按状态门控，见 _INTERFACE_FLAGS_BY_STATE）
         skill_candidates = self._detect_interface_flags(

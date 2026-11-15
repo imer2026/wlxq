@@ -154,7 +154,7 @@ class _RecruitStep(Enum):
     OPEN_REFRESH_DIFFICULTY_DIALOG = "open_refresh_difficulty_dialog"
     CLOSE_REFRESH_DIFFICULTY_DIALOG = "close_refresh_difficulty_dialog"
     JOIN_COOP = "join_coop"
-    # 退队后画面可能在首页也可能在合作页面：先探测再选对应入口
+    # 退队落点探测（三分类：首页/领地页/合作页面）：先探测再选对应入口
     DETECT_ENTRY_PAGE = "detect_entry_page"
 
 
@@ -177,6 +177,7 @@ class CoopTask(Task):
         pet_difficulty_min_confidence: float = 0.5,
         mode_tab_miss_limit: int = 8,
         entry_wait_timeout_seconds: float = 60.0,
+        entry_detect_timeout_seconds: float = 5.0,
         entry_max_reclicks: int = 3,
         chat_open_max_reclicks: int = 10,
         main_c_profile: MainCProfile | None = None,
@@ -231,6 +232,8 @@ class CoopTask(Task):
         # 领地入口各等待步骤（领地变返回/弹窗出现/挑战页出现）共用的秒级
         # 上限；超时打 ERROR 保守停止，不盲点不无限重试
         self._entry_wait_timeout_seconds = max(1.0, entry_wait_timeout_seconds)
+        # 退队落点探测降级上限：等满仍无首页信箱/领地导航才按合作页处理
+        self._entry_detect_timeout_seconds = max(1.0, entry_detect_timeout_seconds)
         # 领地入口确认步骤的重点预算：连续多帧未见标识时重点入口按钮，
         # 用尽仍不成功才保守停止（同难度弹窗打开确认的重点模式）
         self._entry_max_reclicks = max(0, entry_max_reclicks)
@@ -624,8 +627,16 @@ class CoopTask(Task):
             # 「个人信息」等弹窗可能活到本状态，点准备前必须先关掉）。
             # 显式声明而不依赖入口子步骤残留值恰好是 JOIN_COOP
             return "coop_grab"
+        if self.ctx.current_state == State.CHECK_ROUND_LIMIT:
+            # 结算返回步骤：同帧读挑战页锚点（challenge_text）兜底「结算页
+            # 被游戏自动关闭」（2026-11-05/06 实机：结算页约 7~8 秒无操作
+            # 自动返回）——返回按钮在则优先点返回，锚点在则本局视同完成。
+            # 必须放在 recruit_step 分支之前：结算态带着局内遗留的入口
+            # 步骤值，会误命中入口链的观察模式
+            return "challenge_page"
         if self._recruit_step is _RecruitStep.DETECT_ENTRY_PAGE:
-            # 退队落点探测：只区分首页/非首页，首页也改走领地入口
+            # 退队落点探测（三分类）：首页信箱模板 + 领地导航文字同帧读，
+            # 首页与领地页都从领地入口进，限时无信号才降级合作页面
             return "home_page"
         if self._recruit_step is _RecruitStep.OPEN_TERRITORY:
             # 领地入口第一步：导航文字 + 挑战页锚点同帧读——锚点命中=
@@ -1547,6 +1558,26 @@ class CoopTask(Task):
         )
         return True
 
+    def _entry_detect_deadline_reached(self, observation: Observation) -> bool:
+        """退队落点探测是否已达降级上限：等满仍无首页/领地信号则按合作页处理。
+
+        deadline 复用入口等待起点（退队生效即起算，_reset_for_home_reentry
+        已调用 _start_entry_wait），惰性起算防 None。降级打 WARNING 而非保守
+        停止——真落在未知页面时由聊天点击确认链的既有超时兜底。
+        """
+        if self._entry_wait_started_at is None:
+            self._entry_wait_started_at = self._clock()
+            return False
+        elapsed = self._clock() - self._entry_wait_started_at
+        if elapsed < self._entry_detect_timeout_seconds:
+            return False
+        logger.warning(
+            "frame=%d 退队后 %.0fs 未见首页标志与领地导航，按合作页面处理",
+            observation.frame_id,
+            elapsed,
+        )
+        return True
+
     def _entry_wait_action(self, tag: str, reason: str) -> tuple[Action, State]:
         """领地入口等待步骤的轮询动作：短暂等待后下一帧复识。"""
         return (
@@ -2080,9 +2111,13 @@ class CoopTask(Task):
     ) -> tuple[Action, State] | None:
         """按代码中确认的首次/下一局入口步骤生成一个安全动作。"""
         if self._recruit_step == _RecruitStep.DETECT_ENTRY_PAGE:
-            # 退队后的落点未实机确认（可能首页、可能合作页面）：先识别首页
-            # 标志再选入口，两条路径都不重复勾选难度（本会话已选中）。
-            # 首页也改走领地入口（2026-09-09：不再从首页点聊天进招募）
+            # 退队落点三分类（2026-10-30/11-01 两次实机确认落点=领地页）：
+            # 首页与领地页都从领地入口进（导航自校正：「领地」=在首页点进、
+            # 「返回」=已在领地页直进模式选择）；既无首页信箱也读不到导航
+            # 文字时等满 entry_detect_timeout_seconds 才按合作页面处理——
+            # 领地页没有信箱，此前「非首页即合作页」的探测把领地页误判成
+            # 合作页，点聊天点空后卡重点循环（2026-10-30 实机）。两条路径
+            # 都不重复勾选难度（本会话已选中）
             if observation.flag("home_page_visible"):
                 logger.info("退队后识别到游戏首页，从领地入口进入招募")
                 self._recruit_step = _RecruitStep.OPEN_TERRITORY
@@ -2090,8 +2125,19 @@ class CoopTask(Task):
                 self._entry_misses = 0
                 self._start_entry_wait()
             else:
-                logger.info("退队后未识别到首页标志，按合作页面处理")
-                self._recruit_step = _RecruitStep.OPEN_COOP_CHAT
+                nav_text = str(observation.raw_data.get("territory_nav_text") or "")
+                if "返回" in nav_text or "领地" in nav_text:
+                    logger.info(
+                        "frame=%d 退队后读到领地导航「%s」，从领地入口进入招募",
+                        observation.frame_id,
+                        nav_text,
+                    )
+                    self._recruit_step = _RecruitStep.OPEN_TERRITORY
+                    self._entry_reclicks = 0
+                    self._entry_misses = 0
+                    self._start_entry_wait()
+                elif self._entry_detect_deadline_reached(observation):
+                    self._recruit_step = _RecruitStep.OPEN_COOP_CHAT
             return (
                 Action(
                     kind="wait",
@@ -4649,7 +4695,21 @@ class CoopTask(Task):
     def _action_return(self, observation: Observation) -> tuple[Action, State] | None:
         match = self._flag_match(observation, "return_button_match")
         if match is None:
-            return None
+            # 结算页已被游戏自动关闭（2026-11-05/06 两次实机：结算页停留约
+            # 7~8 秒无操作即自动返回挑战准备页；状态机被前置慢识别帧拖过
+            # 窗口后返回按钮永远等不到，check_round_limit 连续无可用动作
+            # 保守停止且局数不+1）。读到本模式挑战页锚点 = 对局已结束且
+            # 画面已回挑战页，视同返回已发生，本局直接计数走下一局入口
+            challenge_text = self._mode.entry.challenge_text if self._mode else None
+            anchor = str(observation.raw_data.get("challenge_text") or "")
+            if not (challenge_text and challenge_text in anchor):
+                return None
+            logger.info(
+                "frame=%d 结算页未出现但读到挑战页锚点「%s」，结算页已被自动关闭，"
+                "本局视同完成（不点返回）",
+                observation.frame_id,
+                challenge_text,
+            )
         # 下一轮入口：邀请者回 INVITE_CLICK（结算落在合作挑战页，先点开始
         # 挑战再走邀请链，spec §6）；抢合作回 FIND_COOP
         if self._invite_mode and self.ctx.round_count + 1 < self.ctx.max_rounds:
@@ -4659,6 +4719,17 @@ class CoopTask(Task):
         to_state = (
             State.COMPLETED if self.ctx.round_count + 1 >= self.ctx.max_rounds else next_state
         )
+        if match is None:
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.3,
+                    verification="immediate",
+                    tag="return_auto_skipped",
+                    reason="结算页已自动返回（挑战页锚点），本局视同完成",
+                ),
+                to_state,
+            )
         return (
             Action(
                 kind="click",
@@ -5126,7 +5197,9 @@ class CoopTask(Task):
             self._merge_gift_settled = False
             self._merge_gift_hits = 0
             self._merge_gift_misses = 0
-        elif tag == "return_result":
+        elif tag in {"return_result", "return_auto_skipped"}:
+            # return_auto_skipped：结算页被游戏自动关闭（2026-11-05/06 实机），
+            # 画面已回挑战页，本局视同返回完成——计数与重置与点返回同款
             self.ctx.round_count += 1
             # 本局对局内状态无条件清零。此前只在回 FIND_COOP 时重置，而邀请者
             # 结算直通 INVITE_CLICK 开下一局（_action_return），_summon_count
