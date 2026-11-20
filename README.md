@@ -88,6 +88,7 @@
 |   |-- raw/                  # 原始截图
 |   |-- debug/                # 调试标注图
 |   `-- settlement/           # 结算截图（每局点返回前自动保存，按 模式/日期 归档，保留最近 7 天）
+|-- logs/                     # 运行日志（每次命令一个 DEBUG 文件，保留 7 天，git 忽略）
 |-- src/
 |   `-- wlxq_bot/
 |       |-- __init__.py
@@ -104,6 +105,11 @@
 |       |   |-- screen.py     # Screen Capture
 |       |   |-- vision.py     # Vision: 模板匹配、颜色识别、标注
 |       |   |-- locator.py    # Locator: 坐标换算、ROI、动作点
+|       |   |-- coop.py       # 合作感知：界面标志门控、棋盘/技能识别、金币缓存喂帧
+|       |   |-- ocr.py        # RapidOCR 封装（技能标题/页签/难度行读数）
+|       |   |-- gold_cache.py # 金币后台缓存（召唤/选技能门控读数）
+|       |   |-- mode_tab.py   # 模式页签行 OCR 定位
+|       |   |-- pet_difficulty.py # 保卫宠物难度行 OCR 与勾选
 |       |   |-- hero_classifier.py # 英雄格 ONNX 运行时推理适配
 |       |   `-- skill_collector.py # 技能卡统计阶段采集（非阻塞旁路）
 |       |-- skill_catalog.py  # 技能清单离线建册（OCR 卡图 → configs/skills.yaml）
@@ -128,12 +134,15 @@
 |       `-- utils/
 |           |-- log.py        # Rich 日志初始化
 |           `-- time.py       # 随机延迟、超时工具
-`-- tests/
+`-- tests/                    # pytest 套件（40+ 文件，覆盖配置/感知/任务决策/输入/编排）
     |-- conftest.py
     |-- test_imports.py       # 包导入冒烟测试
     |-- test_config.py        # 配置校验测试
     |-- test_models.py        # 核心数据模型测试
-    `-- test_safety.py        # Safety Guard 测试
+    |-- test_safety.py        # Safety Guard 测试
+    |-- test_coop_task.py     # 合作任务状态机与决策链（最大件）
+    |-- test_coop_perception.py / test_runner.py / test_cultivation_strategy.py
+    `-- ...                   # 输入/OCR/金币缓存/英雄格分类器/邀请与宠物流程等
 ```
 
 ### 配置与工具链
@@ -363,8 +372,8 @@ run:
 - [x] 实现棋盘格子坐标模型，并将正式 12 格英雄识别接入 ONNX 分类模型与多帧投票。
 - [x] 实现编排层骨架（Runner + CoopTask 状态机 + `run` 命令）和主C培养决策链。
 - [x] 实现任务级动作验证协议；开局强制召唤（配置 `minimum_summon_count_before_skills`，当前 7 次）逐次发送、点击成功即计数并等待1～2秒识别（识别异常不阻断），召唤满后的追加召唤、合成、准备/返回、弹窗和技能选择严格验证。
-- [ ] 实现调试截图输出（DebugRecorder 落盘）。
-- [ ] 完成通用 hotspot、返回按钮 ROI 等定位参数标定，并实测技能候选 ROI 三列中心点击，执行真实游戏端到端验证。
+- [x] 实现调试截图输出（DebugRecorder 落盘）。
+- [x] 完成通用 hotspot、返回按钮 ROI 等定位参数标定，并实测技能候选 ROI 三列中心点击，执行真实游戏端到端验证。
 - [x] 实现 Esc 全局停止监听线程（触发 SafetyGuard.request_stop）。
 - [ ] 补充示例模板和端到端冒烟测试。
 
