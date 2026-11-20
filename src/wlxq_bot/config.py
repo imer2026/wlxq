@@ -288,6 +288,12 @@ class ModeProfile(BaseModel):
     settlement: SettlementProfile
     # 主C档案覆盖：键为主C标识，值为 MainCProfile 字段子集（如 skill_selection_cap）
     main_c_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # 帮助者「准备完成」点击（2026-11-19 用户定案）：第一阶段培养凑出 2 星
+    # 主C时，画面无弹窗遮挡且识别到「准备完成」按钮就点一下再回选技能；
+    # 弹窗在场则等待关闭后的干净帧再查，一局只查一次，未命中不重试
+    # （游戏 ~90s 自动开始兜底）。仅合作帮助者模式开启（pet 不配即关闭）；
+    # 邀请者沿用开局召唤后的既有点击（coop.py _invite_ready_done_action）
+    helper_ready_click: bool = False
     strategy: str = "default"
 
 
@@ -371,6 +377,11 @@ class RunConfig(BaseModel):
     # 开局强制召唤次数（填满开局 7 格）；游戏门禁为累计 5 次解锁选技能，
     # 该值是其上的策略配置（2026-09-10 用户决策改为 7）
     minimum_summon_count_before_skills: int = Field(default=7, ge=1, le=100)
+    # 开局合并先行（2026-11-19 用户定案）：开局强制召唤点满后，首批规划若有
+    # 可合对则召唤让位一轮——先合成腾格，下一轮把开局剩余空位+腾出的格一次
+    # 批次召唤填满，省一次「召唤→识别」往返；无对可合时标记作废直接召唤，
+    # 不干等。仅让位一轮，邀请者模式不受影响
+    opening_merge_first: bool = True
     # 批次召唤（2026-09-10 用户策略）：培养阶段棋盘识别后有空位时，按空格数
     # 规划一批召唤填满；每次点击前做召唤费用红/白金币门控，间隔共用
     # forced_summon_interval_seconds，全部点完并稳定等待后重新识别棋盘
@@ -466,6 +477,12 @@ class RunConfig(BaseModel):
     # 确认开局技能选完所需的连续「页面已关闭」帧数；每次选完一张卡后页面会先
     # 关闭、下一组技能卡再弹出，间隙里召唤按钮会短暂露出，单帧不能判定选完
     opening_exit_confirm_frames: int = Field(default=3, ge=1, le=10)
+    # 「准备完成」快速通道（2026-11-20 用户定案）：连续 N 帧「页面关 + 准备
+    # 完成可见」= 开局选卡序列结束，先于上面的页面关闭确认进入召唤。2026-11-20
+    # 全天观测（12 日志 37 个组间间隙）按钮可见帧数全部为 0——序列期间游戏
+    # 不渲染建造 HUD，按钮亮起本身是游戏的结束信号，2 帧不可能误判；按钮未亮
+    # 的局回落页面关闭确认，行为不变
+    opening_ready_confirm_frames: int = Field(default=2, ge=1, le=10)
     # 开局技能最多出现的选择次数（已实机确认最多 3 次，不会再多）；选满后召唤按钮
     # 一出现即结束开局阶段，无需再等退出确认帧
     opening_skill_max_selections: int = Field(default=3, ge=1, le=10)
@@ -496,8 +513,10 @@ class RunConfig(BaseModel):
     skill_fallback_settle_frames: int = Field(default=1, ge=0, le=10)
     action_verify_frames: int = Field(default=5, ge=1, le=30)
     # 关闭击杀奖励弹窗动作后验证失败时的整动作重试上限；连杀常会关掉后立刻弹新弹窗，
-    # 直接退出太激进。重试耗尽仍失败才保守停止。
-    close_popup_max_retries: int = Field(default=4, ge=0, le=20)
+    # 直接退出太激进。重试耗尽仍失败才保守停止。10 是连续失败保险丝（2026-11-19
+    # 用户定案 4→10，覆盖多弹窗连发+入场动画吞击）：点到关掉为止，验证通过清零
+    # 计数，正常一两个弹窗只消耗 1~2 次，上限几乎不会触顶
+    close_popup_max_retries: int = Field(default=10, ge=0, le=20)
     # 技能卡点击（开局/局内选技能）验证失败的整动作重试上限；重试耗尽后不结束任务
     # （对局仍在自动进行，结算窗口终将出现），改为通知任务放弃本次选择、等待对局推进
     skill_click_max_retries: int = Field(default=3, ge=0, le=20)
@@ -581,9 +600,9 @@ class RunConfig(BaseModel):
     # 技能解锁前强制召唤阶段（前 minimum_summon_count_before_skills 次）的连点
     # 间隔（秒）：该阶段不以棋盘识别为门禁（点击发送即计数），跳过多帧棋盘
     # 快速连点；最后一次保留正常稳定等待后再进入棋盘决策。批次召唤共用。
-    # 2026-09-26 实机日志：截图+识别固定开销 ≈0.28s（pyautogui.PAUSE 已归
-    # 零），0.2 等待对应实际 ≈0.5s/击（此前 0.5 配置实际跑出 ≈1s/击）
-    forced_summon_interval_seconds: float = Field(default=0.2, gt=0.0, le=10.0)
+    # 2026-11-19 用户决策 0.2→0.02：连点期实际节奏由每圈截图+识别开销主导
+    # （跳过单帧棋盘分类后 ≈0.4s/圈），post_delay 降到近乎只留按下时长
+    forced_summon_interval_seconds: float = Field(default=0.02, gt=0.0, le=10.0)
     # 召唤点击后棋盘始终未变化（多为金币不足，点击被游戏忽略）时的重试等待
     # （秒）：等待后重新尝试召唤。金币门控（summon_gold_wait）下金币不足时
     # 原地等待恢复，不设次数上限

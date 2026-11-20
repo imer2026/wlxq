@@ -665,6 +665,8 @@ class TestClosePopup:
         assert action.tag == "close_popup"
         assert action.target == (400, 1100)
         assert action.verification == "next_frame"
+        # 快速补点（2026-11-19）：小间隔替代全局 1~2s 拟人间隔，吞击后立即补点
+        assert 0.1 <= action.post_delay <= 0.3
         # 关闭后回到原状态，不改变流程
         assert to_state == State.BUILD_MAIN_C
 
@@ -2931,6 +2933,73 @@ class TestOtherStates:
         assert resumed[0].tag == "opening_skill_candidate"
         task.on_action_verified(*resumed)
         assert task._opening_exit_empty_count == 0
+
+    def test_ready_button_two_frames_fast_path_enters_summon(self):
+        """快速通道（2026-11-20）：连续 2 帧「页面关+准备完成可见」直接进召唤，
+        不等满 3 帧页面关闭确认。全天观测 37 个组间间隙按钮可见帧数全部为 0，
+        间隙不可能误触发。"""
+        task = make_task()
+        task.ctx.current_state = State.SELECT_OPENING_SKILLS
+        task._opening_loaded = True
+        raw = {"summon_button_visible": True, "zhun_bei_wan_cheng_visible": True}
+        first = task.decide_action(
+            Observation(frame_id=1, raw_data=dict(raw)), make_window_ctx()
+        )
+        assert first is not None
+        # 第 1 帧：连击=1 不足以触发，走确认等待
+        assert first[0].tag == "opening_exit_confirm_check"
+        task.on_action_verified(*first)
+        assert task._opening_ready_streak == 1
+        second = task.decide_action(
+            Observation(frame_id=2, raw_data=dict(raw)), make_window_ctx()
+        )
+        assert second is not None
+        assert second[0].tag == "opening_complete"
+        assert second[1] == State.BUILD_MAIN_C
+        assert task._opening_ready_streak == 0
+
+    def test_ready_button_streak_resets_on_page_reopen(self):
+        """间隙里页面重开（下一组弹出）作废连击：重关后重新数。"""
+        task = make_task()
+        task.ctx.current_state = State.SELECT_OPENING_SKILLS
+        task._opening_loaded = True
+        raw = {"summon_button_visible": True, "zhun_bei_wan_cheng_visible": True}
+        first = task.decide_action(
+            Observation(frame_id=1, raw_data=dict(raw)), make_window_ctx()
+        )
+        task.on_action_verified(*first)
+        assert task._opening_ready_streak == 1
+        # 下一组弹出：页面开 → 连击作废
+        candidates = [SkillCandidate("assault", (100, 100), 0.9)]
+        resumed = task.decide_action(
+            Observation(frame_id=2, skill_candidates=candidates), make_window_ctx()
+        )
+        assert resumed is not None
+        assert resumed[0].tag == "opening_skill_candidate"
+        assert task._opening_ready_streak == 0
+
+    def test_ready_button_blink_resets_streak(self):
+        """按钮亮 1 帧后熄灭：连击清零，回到 3 帧页面关闭确认节奏。"""
+        task = make_task()
+        task.ctx.current_state = State.SELECT_OPENING_SKILLS
+        task._opening_loaded = True
+        first = task.decide_action(
+            Observation(
+                frame_id=1,
+                raw_data={"summon_button_visible": True, "zhun_bei_wan_cheng_visible": True},
+            ),
+            make_window_ctx(),
+        )
+        assert first is not None
+        task.on_action_verified(*first)
+        assert task._opening_ready_streak == 1
+        second = task.decide_action(
+            Observation(frame_id=2, raw_data={"summon_button_visible": True}),
+            make_window_ctx(),
+        )
+        assert second is not None
+        assert second[0].tag == "opening_exit_confirm_check"
+        assert task._opening_ready_streak == 0
 
     def test_opening_exits_immediately_after_max_selections(self):
         """开局技能最多选 3 次：选满后召唤按钮一出现即结束，不再等退出确认帧。"""
@@ -5391,6 +5460,143 @@ class TestBatchSummon:
         assert task._batch_summon_remaining == 0
 
 
+class TestOpeningMergeFirst:
+    """开局合并先行（2026-11-19 用户定案）：强制召唤点满后首批规划有可合对
+    时召唤让位一轮——先合成腾格，下一轮把剩余空位一次批次召唤填满；
+    无对可合直接召唤，标记一次性消费，局间重置、邀请者不受影响。"""
+
+    def _task_through_forced_phase(
+        self, minimum_summons: int = 3, **kwargs
+    ) -> CoopTask:
+        task = make_task(minimum_summons=minimum_summons, batch_enabled=True, **kwargs)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        obs = Observation(frame_id=1, board=make_board([]))
+        for expected in range(1, minimum_summons + 1):
+            decision = task.decide_action(obs, make_window_ctx())
+            assert decision is not None
+            assert decision[0].tag == "required_summon"
+            task.on_action_verified(*decision)
+            assert task._summon_count == expected
+        assert task._opening_merge_pending is True
+        return task
+
+    def _pair_board(self) -> Observation:
+        return Observation(
+            frame_id=2,
+            board=make_board(
+                [
+                    make_hero("snow", star=1, pos=(10, 10)),
+                    make_hero("snow", star=1, pos=(20, 20)),
+                ]
+            ),
+        )
+
+    def test_defers_batch_summon_when_mergeable_pair(self):
+        """点满后首批规划有可合对：召唤让位，先排批次合成。"""
+        task = self._task_through_forced_phase()
+        decision = task.decide_action(self._pair_board(), make_window_ctx())
+        assert decision is not None
+        action, _ = decision
+        # 有空位也有对：正常优先级是先召唤（见 TestBatchSummon），让位后改排合成
+        assert action.tag == "batch_merge"
+        assert len(task._batch_merge_queue) == 1
+        assert task._batch_summon_remaining == 0
+        # 标记一次性消费
+        assert task._opening_merge_pending is False
+
+    def test_plans_batch_summon_directly_without_pair(self):
+        """点满后首批规划无可合对：标记作废，照旧批次召唤填空位。"""
+        task = self._task_through_forced_phase()
+        obs = Observation(
+            frame_id=2,
+            board=make_board(
+                [
+                    make_hero("snow", star=1, pos=(10, 10)),
+                    make_hero("death_knight", star=1, pos=(20, 20)),
+                ]
+            ),
+        )
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
+        assert task._opening_merge_pending is False
+
+    def test_deferral_consumed_after_one_merge_round(self):
+        """让位只一轮：合成批消费完后，下一轮即使场上仍有对也恢复召唤先行。"""
+        task = self._task_through_forced_phase()
+        obs = self._pair_board()
+        decision = task.decide_action(obs, make_window_ctx())
+        assert decision is not None
+        task.on_action_verified(*decision)
+        # 逐拖消费完合成队列（拖动后棋盘实际会变，这里只验证规划走向）
+        while task._batch_merge_queue:
+            step = task.decide_action(obs, make_window_ctx())
+            assert step is not None
+            assert step[0].tag == "batch_merge"
+            task.on_action_verified(*step)
+        # 队列清空后重新规划：标记已消费，恢复「有空位先召唤」
+        next_decision = task.decide_action(obs, make_window_ctx())
+        assert next_decision is not None
+        assert next_decision[0].tag == "batch_summon"
+
+    def test_disabled_config_keeps_summon_first(self):
+        """开关关闭（opening_merge_first=False）：行为与旧优先级完全一致。"""
+        task = make_task(minimum_summons=3, batch_enabled=True)
+        task._run_config.opening_merge_first = False
+        task.ctx.current_state = State.BUILD_MAIN_C
+        obs = Observation(frame_id=1, board=make_board([]))
+        for _ in range(3):
+            decision = task.decide_action(obs, make_window_ctx())
+            assert decision is not None
+            task.on_action_verified(*decision)
+        assert task._opening_merge_pending is False
+        decision = task.decide_action(self._pair_board(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
+
+    def test_invite_mode_never_sets_flag(self):
+        """邀请者打法独立（准备完成+凑阵容批次）：点满不置标记、不受让位影响。"""
+        task = self._task_through_forced_phase()
+        task._invite_mode = True
+        task._invite_ready_clicked = True  # 跳过邀请者「准备完成」分支直达规划
+        task._opening_merge_pending = True  # 模拟残留，验证规划处不消费也不让位
+        decision = task.decide_action(self._pair_board(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "batch_summon"
+        # 邀请者点满路径不置标记：单独验证置位条件
+        fresh = make_task(minimum_summons=3, batch_enabled=True)
+        fresh._invite_mode = True
+        fresh.ctx.current_state = State.BUILD_MAIN_C
+        obs = Observation(frame_id=1, board=make_board([]))
+        for _ in range(3):
+            step = fresh.decide_action(obs, make_window_ctx())
+            assert step is not None
+            fresh.on_action_verified(*step)
+        assert fresh._opening_merge_pending is False
+
+    def test_reset_for_next_round_clears_flag(self):
+        task = self._task_through_forced_phase()
+        task._reset_for_next_round()
+        assert task._opening_merge_pending is False
+
+    def test_reset_for_home_reentry_clears_flag(self):
+        task = self._task_through_forced_phase()
+        task._reset_for_home_reentry()
+        assert task._opening_merge_pending is False
+
+    def test_observation_mode_forced_summon_phase(self):
+        """连点期声明 forced_summon 模式（perception 据此跳过棋盘分类）；
+        点满后与非 BUILD_MAIN_C 状态不再声明。"""
+        task = make_task(minimum_summons=3)
+        task.ctx.current_state = State.BUILD_MAIN_C
+        assert task.observation_mode() == "forced_summon"
+        task._summon_count = 3
+        assert task.observation_mode() != "forced_summon"
+        task.ctx.current_state = State.SELECT_OPENING_SKILLS
+        task._summon_count = 0
+        assert task.observation_mode() != "forced_summon"
+
+
 class TestBatchMerge:
     def _task_ready_for_merge(self, main_c: str = "assault") -> CoopTask:
         task = make_task(main_c=main_c, batch_enabled=True)
@@ -6982,3 +7188,130 @@ class TestMountRide:
         assert task._mount_ride_consult(mount_absent(1), window_ctx, State.BUILD_MAIN_C) is None
         assert task._mount_clicks_done == 0
         assert task._mount_point_warned is True
+
+
+class TestHelperReadyClick:
+    """帮助者「准备完成」一次性点击（2026-11-19 用户定案，11-20 短暂改为
+    「召唤点满即点」后当日回滚到本版）。
+
+    第一阶段培养凑出 2 星主C时，画面无弹窗遮挡且识别到按钮就点匹配中心、
+    随即回选技能；弹窗在场延后到干净帧再查（不计入检查）；干净帧无论命中
+    与否都算查过，一局只查一次，未命中不重试（游戏 ~90s 自动开始兜底）。
+    仅模式档案 helper_ready_click=true 的帮助者生效；邀请者沿用开局召唤
+    后的既有点击。
+    """
+
+    def _mode_profile(self, enabled: bool) -> ModeProfile:
+        return ModeProfile(
+            display_name="测试模式",
+            mode_chat_hotspot="coop_chat",
+            entry={"mode_card_text": "合作", "challenge_text": "开始挑战"},
+            match={"ready_button": "ready_button", "leave_team": "coop_leave_team"},
+            settlement={"like_chest": True, "return_button": "return_button"},
+            helper_ready_click=enabled,
+        )
+
+    def _build_task(self, *, enabled: bool = True) -> CoopTask:
+        task = make_task(mode_profile=self._mode_profile(enabled))
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        return task
+
+    @staticmethod
+    def _ready_board() -> BoardSnapshot:
+        """第一阶段达标棋盘：单个 2 星强袭（不看数量）。"""
+        return make_board([make_hero("assault", star=2, pos=(100, 100))])
+
+    @staticmethod
+    def _button_observation(frame_id: int = 1, board: BoardSnapshot | None = None) -> Observation:
+        return Observation(
+            frame_id=frame_id,
+            board=board if board is not None else TestHelperReadyClick._ready_board(),
+            raw_data={
+                "zhun_bei_wan_cheng_visible": True,
+                "zhun_bei_wan_cheng_match": MatchResult(
+                    "buttons/zhun_bei_wan_cheng.png", (630, 500), 0.9
+                ),
+            },
+        )
+
+    def test_clicks_button_then_returns_to_skill_selection(self):
+        """干净帧命中按钮：点匹配中心、状态迁选技能、标记置位。"""
+        task = self._build_task()
+        decision = task.decide_action(self._button_observation(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].kind == "click"
+        assert decision[0].tag == "helper_ready_done"
+        assert decision[0].target == (630, 500)
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._helper_ready_check_done is True
+
+    def test_button_absent_falls_through_to_plain_exit(self):
+        """干净帧未命中：落回原出口（wait + 选技能），也算查过。"""
+        task = self._build_task()
+        board = self._ready_board()
+        decision = task.decide_action(
+            Observation(frame_id=1, board=board), make_window_ctx()
+        )
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+        assert task._helper_ready_check_done is True
+
+    def test_popup_defers_check_to_clean_frame(self):
+        """弹窗遮挡帧：等待留在培养态、不计入检查；弹窗关后再查命中。"""
+        task = self._build_task()
+        decision = task.decide_action(
+            Observation(
+                frame_id=1,
+                board=self._ready_board(),
+                raw_data={"tan_chuang_visible": True},
+            ),
+            make_window_ctx(),
+        )
+        assert decision is not None
+        assert decision[0].kind == "wait"
+        assert decision[0].tag == "helper_ready_popup_wait"
+        assert decision[1] == State.BUILD_MAIN_C
+        assert task._helper_ready_check_done is False
+        # 弹窗关闭后的干净帧：正常命中并点击
+        decision = task.decide_action(self._button_observation(frame_id=2), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "helper_ready_done"
+        assert decision[1] == State.SELECT_MAIN_C_SKILLS
+
+    def test_checked_once_per_round_and_reset_between_rounds(self):
+        """已查过的局不再点（含第二阶段出口复用同分支）；按局重置后恢复。"""
+        task = self._build_task()
+        first = task.decide_action(self._button_observation(), make_window_ctx())
+        assert first is not None and first[0].tag == "helper_ready_done"
+        # 同局后续帧（如回补阶段再达标）不再点
+        task.ctx.current_state = State.BUILD_MAIN_C
+        second = task.decide_action(self._button_observation(frame_id=2), make_window_ctx())
+        assert second is not None
+        assert second[0].tag == "main_c_ready"
+        # 按局重置（结算/被踢共用路径）后恢复可查
+        task._reset_for_home_reentry()
+        assert task._helper_ready_check_done is False
+
+    def test_disabled_by_mode_profile(self):
+        """档案未开启（如 pet 模式）：完全不参与，标记不置位。"""
+        task = self._build_task(enabled=False)
+        decision = task.decide_action(self._button_observation(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "main_c_ready"
+        assert task._helper_ready_check_done is False
+
+    def test_invite_mode_excluded(self):
+        """邀请者模式不参与：沿用开局召唤后的既有点击链路。"""
+        task = make_task(
+            mode_profile=self._mode_profile(True),
+            hotspots={"opening_ready_done": Hotspot(x_ratio=0.68, y_ratio=0.30)},
+        )
+        task.ctx.current_state = State.BUILD_MAIN_C
+        task._summon_count = task._run_config.minimum_summon_count_before_skills
+        task._invite_mode = True
+        decision = task.decide_action(self._button_observation(), make_window_ctx())
+        assert decision is not None
+        assert decision[0].tag == "invite_ready_done"
+        assert task._helper_ready_check_done is False

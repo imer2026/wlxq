@@ -142,7 +142,16 @@ _INTERFACE_FLAGS_BY_STATE: dict[State, frozenset[str]] = {
     ),
     State.ENTER_MATCH: frozenset({"ready_button"}),
     State.SELECT_OPENING_SKILLS: frozenset(
-        {"select_skill_button", "summon_button", "tan_chuang", "return_button"}
+        {
+            "select_skill_button",
+            "summon_button",
+            "tan_chuang",
+            "return_button",
+            # 观测（2026-11-19 用户提议，暂不改行为）：组间间隙「准备完成」
+            # 是否露出、暴露几帧——数据支撑后再决定是否作为「开局选卡已结束」
+            # 的图像信号（间隙误判会丢后续组技能）。任务层逐帧打 DEBUG 日志
+            "zhun_bei_wan_cheng",
+        }
     ),
     State.BUILD_MAIN_C: frozenset(
         {
@@ -462,9 +471,12 @@ class CoopPerception:
             ):
                 self._detect_helper_stage_progress(ctx, frame, raw_data)
 
-        # 2. 培养阶段做棋盘英雄识别
+        # 2. 培养阶段做棋盘英雄识别；开局强制召唤连点期跳过（任务层
+        # observation_mode="forced_summon" 声明，2026-11-19 用户定案）：该阶段
+        # 决策点击发送即计数，12 格分类结果无消费者，跳过它把连点节奏从每圈
+        # ~1s 压回 ~0.4s；点满后模式恢复默认，识别照常
         board: BoardSnapshot | None = None
-        if hint_state in _BOARD_WATCH_STATES:
+        if hint_state in _BOARD_WATCH_STATES and observation_mode != "forced_summon":
             board = self._observe_board(ctx, frame, matches)
 
         return Observation(

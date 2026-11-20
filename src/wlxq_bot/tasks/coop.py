@@ -210,6 +210,10 @@ class CoopTask(Task):
         )
         # 邀请者「准备完成」已点标记（开局召唤完成后点一次，动作后验证）
         self._invite_ready_clicked = False
+        # 帮助者「准备完成」已检查标记（2026-11-19 用户定案）：第一阶段培养
+        # 凑出 2 星主C时的干净帧上查一次「准备完成」，命中即点击；未命中也
+        # 置位不重试（游戏 ~90s 自动开始兜底）。弹窗遮挡帧不算检查
+        self._helper_ready_check_done = False
         # 挑战被拒回到组队大厅的连续确认帧数（防对局内单帧模板误匹配放弃对局）
         self._invite_back_lobby_streak = 0
         self._skill_candidate_roi = skill_candidate_roi
@@ -291,6 +295,9 @@ class CoopTask(Task):
         self._difficulty_close_streak = 0
 
         self._summon_count = 0
+        # 开局合并先行一次性标记（2026-11-19 用户定案）：强制召唤点满时置位，
+        # 首批规划消费——有可合对则召唤让位一轮，无对作废直召（见批次规划处）
+        self._opening_merge_pending = False
         self._empty_board_count = 0
         self._no_progress_count = 0
         self._board_capacity_frozen = False
@@ -335,6 +342,8 @@ class CoopTask(Task):
         self._opening_loaded = False
         self._opening_empty_checks = 0
         self._opening_exit_empty_count = 0
+        # 「准备完成」快速通道：连续「页面关+按钮可见」帧数（2026-11-20）
+        self._opening_ready_streak = 0
         self._opening_skill_selections = 0
         self._opening_clicks_blocked = False
         self._opening_wait_count = 0
@@ -474,6 +483,19 @@ class CoopTask(Task):
         window_ctx: WindowContext | None = None,
     ) -> tuple[Action, State] | None:
         state = self.ctx.current_state
+        if state is State.SELECT_OPENING_SKILLS:
+            # 观测（2026-11-19 用户提议，暂不改行为）：逐帧记录「准备完成」
+            # 在选技能态的可见性——组间间隙若暴露 ≥2 帧会误判「选完」，需实测
+            # 间隙暴露帧数分布后再决定是否启用该图像信号（见自动化流程文档）
+            logger.debug(
+                "frame=%d 选技能态观测: 准备完成=%s 选技能页=%s 召唤=%s 弹窗=%s 候选=%d",
+                observation.frame_id,
+                observation.flag("zhun_bei_wan_cheng_visible"),
+                observation.flag("select_skill_button_visible"),
+                observation.flag("summon_button_visible"),
+                observation.flag("tan_chuang_visible"),
+                len(observation.skill_candidates),
+            )
         # 游戏内任意阶段出现击杀奖励弹窗都优先关闭，再继续原流程
         if state in _MATCH_STATES:
             popup = self._flag_match(observation, "tan_chuang_match")
@@ -483,6 +505,11 @@ class CoopTask(Task):
                         kind="click",
                         target=popup.position,
                         duration=0.08,
+                        # 快速补点（2026-11-19 用户定案）：弹窗入场动画常吞第一击
+                        # （用户手玩同样要点几下才有反应），点击后用小间隔快速进入
+                        # 下一帧验证以便立即补点；不设则落全局 1~2s 拟人间隔，
+                        # 吞击后要干等近 7 秒才补上第二击
+                        post_delay=self._rng.uniform(0.1, 0.3),
                         verification="next_frame",
                         tag="close_popup",
                         reason="识别到击杀奖励弹窗，点击关闭",
@@ -656,6 +683,17 @@ class CoopTask(Task):
             # 必须放在 recruit_step 分支之前：结算态带着局内遗留的入口
             # 步骤值，会误命中入口链的观察模式
             return "challenge_page"
+        if (
+            self.ctx.current_state == State.BUILD_MAIN_C
+            and self._summon_count < self._effective_opening_summons()
+        ):
+            # 开局强制召唤连点期（2026-11-19 用户定案）：该阶段决策点击发送
+            # 即计数，单帧棋盘分类没有消费者，声明专项模式让 perception 跳过
+            # （界面标志照常匹配，弹窗/赠送页安全检查不受影响）；点满后恢复
+            # 默认识别，正常进棋盘决策。同 CHECK_ROUND_LIMIT：必须放在
+            # recruit_step 分支之前——对局内带着入口链残留步骤值（如
+            # JOIN_COOP），放后面永远轮不到
+            return "forced_summon"
         if self._recruit_step is _RecruitStep.DETECT_ENTRY_PAGE:
             # 退队落点探测（三分类）：首页信箱模板 + 领地导航文字同帧读，
             # 首页与领地页都从领地入口进，限时无信号才降级合作页面
@@ -1448,6 +1486,70 @@ class CoopTask(Task):
                 reason="开局召唤完成，点击「准备完成」确认进入培养",
             ),
             State.BUILD_MAIN_C,
+        )
+
+    def _helper_ready_done_action(
+        self, observation: Observation
+    ) -> tuple[Action, State] | None:
+        """帮助者「准备完成」一次性点击（2026-11-19 用户定案）。
+
+        第一阶段培养凑出目标星级主C时（调用方在 BUILD → 选技能的两个出口
+        接线），画面无弹窗遮挡且识别到「准备完成」（locator
+        zhun_bei_wan_cheng，坐骑消失锚点同源）就点匹配中心一下，随即回选
+        技能；按钮随点击消失，坐骑缺席计数随之开始锚定，坐骑释放提前。
+
+        Returns:
+            弹窗遮挡 → (等待, BUILD) 延后到干净帧（不计入检查，用户定案
+            「等弹窗关了再检查」）；未启用/已检查/未命中 → None（调用方
+            落回原出口）；命中 → (点击, SELECT_MAIN_C_SKILLS)。干净帧无论
+            命中与否都置位 ``_helper_ready_check_done``，一局只查一次，
+            未命中不重试（游戏 ~90s 自动开始兜底）。
+        """
+        if (
+            self._invite_mode
+            or self._helper_ready_check_done
+            or self._mode is None
+            or not self._mode.helper_ready_click
+        ):
+            return None
+        if observation.flag("tan_chuang_visible"):
+            # 弹窗遮挡帧延后：公共路径会先点掉弹窗（decide_action 顶部），
+            # 其后的干净帧再查；干等不算停滞，重置无进展计数
+            self._no_progress_count = 0
+            self._last_board_signature = None
+            return (
+                Action(
+                    kind="wait",
+                    duration=0.3,
+                    verification="immediate",
+                    tag="helper_ready_popup_wait",
+                    reason="弹窗遮挡，等关闭后再检查「准备完成」",
+                ),
+                State.BUILD_MAIN_C,
+            )
+        self._helper_ready_check_done = True
+        match = self._flag_match(observation, "zhun_bei_wan_cheng_match")
+        if match is None:
+            logger.info(
+                "frame=%d 凑出主C后未识别到「准备完成」，跳过点击（本局不再查）",
+                observation.frame_id,
+            )
+            return None
+        logger.info(
+            "frame=%d 凑出主C且「准备完成」可见，点击确认后回选技能",
+            observation.frame_id,
+        )
+        return (
+            Action(
+                kind="click",
+                target=match.position,
+                duration=0.08,
+                post_delay=1.5,
+                verification="immediate",
+                tag="helper_ready_done",
+                reason="第一阶段培养完成，点击「准备完成」确认后回选技能",
+            ),
+            State.SELECT_MAIN_C_SKILLS,
         )
 
     def _action_find_coop(
@@ -2793,6 +2895,8 @@ class CoopTask(Task):
             or observation.skill_candidates
             or observation.flag("tian_shi_kai_ju_visible")
         ):
+            # 页面开着：准备完成快速通道计数归零（间隙重开页面即作废重数）
+            self._opening_ready_streak = 0
             if self._opening_clicks_blocked:
                 # 技能卡点击多次未生效（Runner 已重试并放弃）：不再盲点，等待对局
                 # 自然推进——页面关闭、召唤出现或结算窗口由上层状态优先级接管
@@ -2857,6 +2961,36 @@ class CoopTask(Task):
         if observation.flag("summon_button_visible"):
             # 开局页面已关闭：解除点击阻塞（若之前因连续失败放弃过选择）
             self._opening_clicks_blocked = False
+            # 「准备完成」快速通道（2026-11-20 用户定案）：连续 N 帧「页面关 +
+            # 按钮可见」= 选卡序列结束。全天观测（12 日志 37 个组间间隙）按钮
+            # 可见帧数全部为 0——序列期间游戏不渲染建造 HUD，按钮亮起本身是
+            # 游戏的结束信号，先于页面关闭确认 1 个周期；按钮未亮的局走下方
+            # 3 帧确认，行为不变。与选卡计数无关，验证被抢断/空页过渡丢账
+            # 的局照样生效
+            if observation.flag("zhun_bei_wan_cheng_visible"):
+                self._opening_ready_streak += 1
+            else:
+                self._opening_ready_streak = 0
+            if (
+                self._opening_ready_streak
+                >= self._run_config.opening_ready_confirm_frames
+            ):
+                logger.info(
+                    "frame=%d 「准备完成」连续 %d 帧可见，开局选卡确认结束，进入召唤",
+                    observation.frame_id,
+                    self._opening_ready_streak,
+                )
+                self._opening_ready_streak = 0
+                return (
+                    Action(
+                        kind="wait",
+                        duration=0.0,
+                        verification="immediate",
+                        tag="opening_complete",
+                        reason="「准备完成」连续可见，开局技能已选完，进入召唤阶段",
+                    ),
+                    State.BUILD_MAIN_C,
+                )
             selections_done = (
                 self._opening_skill_selections >= self._run_config.opening_skill_max_selections
             )
@@ -2889,6 +3023,8 @@ class CoopTask(Task):
         # 两者都没识别到：对局界面尚未稳定，继续等待；同时解除点击阻塞，
         # 待下一组技能页弹出时再正常尝试选择。
         self._opening_clicks_blocked = False
+        # 界面未稳定帧不计入准备完成快速通道的连续帧
+        self._opening_ready_streak = 0
         # 邀请者：挑战未生效/被拒时画面回到组队大厅（双态按钮重现）。帮助者
         # 可能此时才点准备——立即回 INVITE_START 重新开局，不干等开局超时
         # （实机 2026-09-25：帮助者点了准备，任务却在开局等待里死等）。
@@ -3574,6 +3710,11 @@ class CoopTask(Task):
                     self._run_config.summon_recognition_delay_min,
                     self._run_config.summon_recognition_delay_max,
                 )
+                # 开局合并先行（2026-11-19 用户定案）：点满时置一次性标记，
+                # 首批规划消费——有可合对召唤让位一轮。仅帮助者/宠物（邀请者
+                # 点满后走「准备完成」+凑阵容批次，打法独立不受影响）
+                if self._run_config.opening_merge_first and not self._invite_mode:
+                    self._opening_merge_pending = True
             else:
                 # 强制阶段不以识别为门禁，按固定间隔快速连点即可
                 post_delay = self._run_config.forced_summon_interval_seconds
@@ -3858,6 +3999,11 @@ class CoopTask(Task):
                     # 阶段在此置位防「回补↔选技能」空转
                     self._topup_done = self._topup_active
                     self._star3_active = False
+                    # 凑出主C时刻顺带查「准备完成」并点击（帮助者一次性机制，
+                    # 2026-11-19 用户定案）；弹窗遮挡帧返回等待留在本状态
+                    helper_ready = self._helper_ready_done_action(observation)
+                    if helper_ready is not None:
+                        return helper_ready
                     return (
                         Action(
                             kind="wait",
@@ -3871,8 +4017,12 @@ class CoopTask(Task):
                         State.SELECT_MAIN_C_SKILLS,
                     )
             else:
-                # 首次培养只看星级（数量未达标）：星级门禁放行回选技能
+                # 首次培养只看星级（数量未达标）：星级门禁放行回选技能。
+                # 凑出主C时刻顺带查「准备完成」并点击（帮助者一次性机制）
                 self._star3_active = False
+                helper_ready = self._helper_ready_done_action(observation)
+                if helper_ready is not None:
+                    return helper_ready
                 return (
                     Action(
                         kind="wait",
@@ -3950,10 +4100,38 @@ class CoopTask(Task):
             )
             if star3_merge_first:
                 logger.info("3星强袭培养环节：合并优先，召唤让位")
+        # 开局合并先行（2026-11-19 用户定案）：强制召唤点满后的首批规划，
+        # 有可批合对则召唤让位一轮——先合成腾格，下一轮把剩余空位+腾出的格
+        # 一次批次召唤填满，省一次「召唤→识别」往返；无对可合标记作废直接
+        # 召唤，不干等。标记只消费一次，不会连环合成把召唤无限后推。
+        # 批次合成关闭时不让位（走原有召唤先行的旧路径）
+        opening_merge_batch: list[MergeCandidate] | None = None
+        opening_merge_deferred = False
+        if (
+            self._opening_merge_pending
+            and not self._invite_mode
+            and not self._summon_refusal_suppressed
+        ):
+            self._opening_merge_pending = False
+            if self._run_config.batch_merge_enabled:
+                opening_merge_batch = self._strategy.select_merge_batch(
+                    board.find_merge_candidates(
+                        self.ctx.main_c, wildcard_heroes=self._wildcard_heroes
+                    ),
+                    self._failed_merge_pairs,
+                    board,
+                )
+                opening_merge_deferred = bool(opening_merge_batch)
+            if opening_merge_deferred:
+                logger.info(
+                    "frame=%d 开局合并先行：召唤让位一轮，合成腾格后再填空",
+                    observation.frame_id,
+                )
         if (
             self._run_config.batch_summon_enabled
             and batch_limit > 0
             and not star3_merge_first
+            and not opening_merge_deferred
             and not self._summon_refusal_suppressed
         ):
             self._batch_summon_remaining = batch_limit
@@ -3998,9 +4176,14 @@ class CoopTask(Task):
         if self._run_config.batch_merge_enabled and not topup_fill_first:
             # 批末归因：上一批中仍原样存在的对记入失败记忆（拖动未生效）
             self._attribute_merge_batch(candidates)
-            batch = self._strategy.select_merge_batch(
-                candidates, self._failed_merge_pairs, board
-            )
+            if opening_merge_batch:
+                # 开局合并先行：直接执行让位预判时选好的批，不重选
+                # （重选可能因同帧候选相同而无谓地重复计算）
+                batch = opening_merge_batch
+            else:
+                batch = self._strategy.select_merge_batch(
+                    candidates, self._failed_merge_pairs, board
+                )
             if batch:
                 return self._plan_merge_batch(batch, observation.frame_id)
         # 批次关闭或无可批对：走原有单动作策略
@@ -5460,8 +5643,12 @@ class CoopTask(Task):
         # 邀请者「准备完成」标记按局重置：否则第 2 局起永不点准备完成
         # （此前靠游戏 90s 自动开始兜底，2026-09-26 凑阵容前移后必须逐局重置）
         self._invite_ready_clicked = False
+        # 帮助者「准备完成」检查标记按局重置：每局凑出主C时重新查一次
+        self._helper_ready_check_done = False
         self._invite_light_walk = False
         self._summon_count = 0
+        # 开局合并先行标记随局重置：防带出下一局首批规划（同 9-27 局间泄漏教训）
+        self._opening_merge_pending = False
         self._batch_summon_remaining = 0
         self._batch_merge_queue = []
         self._pending_merge_batch_signatures = []
@@ -5495,6 +5682,7 @@ class CoopTask(Task):
         self._opening_wait_count = 0
         self._home_return_count = 0
         self._territory_return_count = 0
+        self._opening_ready_streak = 0
         self._match_started_at = None
         self._next_skill_at = None
         self._awaiting_main_candidates = False

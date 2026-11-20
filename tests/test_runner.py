@@ -1741,6 +1741,37 @@ class TestClosePopupRetry:
         assert any(a.tag == "required_summon" for a in executor.actions)
         assert final == State.BUILD_MAIN_C
 
+    def test_popup_early_retry_skips_multi_frame_budget(self):
+        """快速补点（2026-11-19）：关弹窗验证第 1 帧弹窗仍在即重试，不等满
+        action_verify_frames 通用多帧预算。弹窗连续可见 3 帧：第 1 击被入场
+        动画吞掉 → 第 1 验证帧立即补第 2 击 → 弹窗消失验证通过，共 2 击。"""
+        from wlxq_bot.config import RunConfig
+
+        runner = Runner(
+            default_config=DefaultConfig(
+                run=RunConfig(action_verify_frames=5, close_popup_max_retries=4)
+            ),
+            tasks_config=TasksConfig(),
+        )
+        perception = _PopupPerception(popup_frames=3)
+        executor = FakeExecutor(verified=False)
+        task = _make_popup_task()
+
+        runner._run_loop(
+            FakeScreen(make_window_ctx()),
+            perception,
+            executor,
+            task,
+            SafetyGuard(max_failures=3, frame_ttl_ms=5000),
+            1,
+            max_steps=100,
+        )
+
+        popup_clicks = [a for a in executor.actions if a.tag == "close_popup"]
+        # 旧 5 帧预算下第 1 击要干等 5 帧验证才补点（而弹窗 3 帧后自己消失，
+        # 全程只有 1 击）；2 击即证明第 1 帧失败就立即重新决策补点了
+        assert len(popup_clicks) == 2
+
 
 # ---------------------------------------------------------------------------
 # 合成验证失败重试

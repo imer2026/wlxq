@@ -954,24 +954,28 @@ class TestInterfaceFlagGating:
         assert raw == {}
 
     def test_mount_ride_anchor_flag_gating(self, tmp_path):
-        """坐骑消失锚点（2026-11-15）：培养/选技能两状态识别，开局技能页不识别。"""
+        """坐骑消失锚点（2026-11-15）：培养/局内选技能两状态识别。
+
+        开局技能页阶段自 2026-11-19 起也识别该模板——但仅作组间间隙暴露帧数
+        观测（任务层 DEBUG 日志），坐骑缺席计数仍只在 BUILD 态消费，技能页
+        盖住按钮的帧不会误判消失。"""
         vision = _RecordingVision()
         perception = _flag_gated_perception(tmp_path, vision)
         ctx = _make_window_ctx()
 
-        # 培养与选技能状态都查询该模板，未命中时旗标为 False
+        # 培养、局内选技能状态都查询该模板，未命中时旗标为 False
         for state in (State.BUILD_MAIN_C, State.SELECT_MAIN_C_SKILLS):
             raw: dict = {}
             perception._detect_interface_flags(ctx, None, state, raw, [])
             assert raw.get("zhun_bei_wan_cheng_visible") is False
 
-        # 开局技能页阶段不识别（技能页盖住按钮的帧不参与坐骑计数）
+        # 开局技能页阶段同样识别（观测用途），未命中旗标 False
         fresh_vision = _RecordingVision()
         fresh_perception = _flag_gated_perception(tmp_path, fresh_vision)
         raw = {}
         fresh_perception._detect_interface_flags(ctx, None, State.SELECT_OPENING_SKILLS, raw, [])
-        assert "zhun_bei_wan_cheng_visible" not in raw
-        assert "zhun_bei_wan_cheng.png" not in fresh_vision.template_calls
+        assert raw.get("zhun_bei_wan_cheng_visible") is False
+        assert "zhun_bei_wan_cheng.png" in fresh_vision.template_calls
 
         # 命中时旗标为 True 且匹配结果入 raw_data
         hit_vision = _RecordingVision(
@@ -1021,6 +1025,8 @@ class TestInterfaceFlagGating:
                 "zhao_huan.png",
                 "tan_chuang.png",
                 "fan_hui.png",
+                # 观测（2026-11-19）：组间间隙「准备完成」暴露帧数统计
+                "zhun_bei_wan_cheng.png",
             },
             State.BUILD_MAIN_C: {
                 "xuan_ze_ji_neng.png",
@@ -2168,3 +2174,42 @@ class TestInitiatorInviteButtonFlags:
         assert "tiao_zhan_dui_you_zhun_bei.png" not in vision.template_calls
         assert "tiao_zhan_dui_you_wei_zhun_bei.png" not in vision.template_calls
         assert "invite_start_ready_visible" not in raw
+
+
+class TestForcedSummonBoardSkip:
+    """开局强制召唤连点期跳过棋盘分类（2026-11-19 用户定案）：该阶段决策
+    点击发送即计数，12 格分类无消费者；任务层 observation_mode="forced_summon"
+    声明，perception 据此跳过。界面标志匹配不受影响。"""
+
+    def test_forced_summon_mode_skips_board_classification(self, tmp_path):
+        import numpy as np
+
+        from wlxq_bot.models import State
+
+        predictions = _board_predictions(_prediction("assault"))
+        perception = _build_perception(tmp_path, FakeCellClassifier([predictions]))
+        ctx = _make_window_ctx()
+        frame = np.zeros((1723, 923, 3), dtype=np.uint8)
+
+        calls: list[str] = []
+        original = perception._observe_board
+
+        def _spy(*args, **kwargs):
+            calls.append("board")
+            return original(*args, **kwargs)
+
+        perception._observe_board = _spy  # type: ignore[method-assign]
+
+        normal = perception.observe(ctx, frame, hint_state=State.BUILD_MAIN_C)
+        assert calls == ["board"]
+        assert normal.board is not None
+
+        calls.clear()
+        skipped = perception.observe(
+            ctx,
+            frame,
+            hint_state=State.BUILD_MAIN_C,
+            observation_mode="forced_summon",
+        )
+        assert calls == []
+        assert skipped.board is None

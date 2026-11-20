@@ -912,7 +912,16 @@ class Runner:
                     pending.attempts += 1
                     verify_budget = (
                         pending.action.verify_frames
-                        or self.default_config.run.action_verify_frames
+                        or (
+                            # 关弹窗类动作（2026-11-19 用户定案快速补点）：验证帧上
+                            # 弹窗仍在 = 点击没生效的直接证据（入场动画吞击是游戏
+                            # 行为，实机验证从未出现「延迟几帧才关」），第 1 帧失败
+                            # 立即重新决策补点，不等满通用多帧预算；点到关掉为止，
+                            # 验证通过清零重试计数
+                            1
+                            if pending.action.tag in _POPUP_CLOSE_TAGS
+                            else self.default_config.run.action_verify_frames
+                        )
                     )
                     if pending.attempts >= verify_budget:
                         tag = pending.action.tag
